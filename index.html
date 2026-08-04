@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SANSTYLE — street-sourced typeface engine</title>
+<meta name="description" content="Turn photographed graffiti letterforms into a living, downloadable typeface. Lasso a letter, we vectorize and fit it; the font grows as you walk.">
+<link rel="stylesheet" href="css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🖍️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">SANSTYLE</span>
+    <span class="brand-sub">street-sourced typeface engine</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab-btn on" data-tab="capture">CAPTURE</button>
+    <button class="tab-btn" data-tab="glyphs">GLYPHS <span id="navCount" class="nav-count"></span></button>
+    <button class="tab-btn" data-tab="tester">TESTER</button>
+  </nav>
+  <div class="top-meta">NYC → 1000 UPM · local-first</div>
+</header>
+
+<main>
+
+<!-- ============================== CAPTURE ============================== -->
+<section class="tab active" id="tab-capture">
+
+  <aside class="steps">
+    <div class="step active" id="step-wall">
+      <div class="step-head"><span class="step-num">1</span> WALL</div>
+      <div class="step-body">
+        <p>Shoot a letterform in the wild. Phone shots at an angle are fine.</p>
+        <input type="file" id="fileInput" accept="image/*" hidden>
+        <div class="btn-row">
+          <button class="primary sm" id="uploadBtn">UPLOAD PHOTO</button>
+          <button class="ghost sm" id="demoBtn">DEMO WALL</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="step" id="step-flatten">
+      <div class="step-head"><span class="step-num">2</span> FLATTEN</div>
+      <div class="step-body">
+        <p>Drag the corners onto the wall plane to kill the camera angle.</p>
+        <div class="btn-row">
+          <button class="primary sm" id="flattenApply">APPLY</button>
+          <button class="ghost sm" id="flattenSkip">SKIP</button>
+          <button class="ghost sm" id="flattenReset">UNDO</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="step" id="step-lasso">
+      <div class="step-head"><span class="step-num">3</span> LASSO</div>
+      <div class="step-body">
+        <p>Draw a loose loop around <b>one</b> letterform. We find the paint inside.</p>
+        <div class="btn-row">
+          <button class="ghost sm" id="lassoReset">RESET LOOP</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="step" id="step-ink">
+      <div class="step-head"><span class="step-num">4</span> INK</div>
+      <div class="step-body">
+        <div class="seg">
+          <button id="inkModeAuto" class="seg-btn on">AUTO</button>
+          <button id="inkModeColor" class="seg-btn">PICK PAINT</button>
+        </div>
+
+        <div id="lumaControls">
+          <label class="slider-row">
+            <span>THRESHOLD</span>
+            <input type="range" id="inkThresh" min="-70" max="70" value="0" step="1">
+          </label>
+          <label class="check-row">
+            <input type="checkbox" id="inkInvert">
+            <span>paint is lighter than wall</span>
+          </label>
+        </div>
+
+        <div id="colorControls" style="display:none">
+          <button class="ghost sm" id="eyedropBtn">🖉 SAMPLE THE PAINT</button>
+          <div class="seed-chips" id="seedChips"></div>
+          <label class="slider-row">
+            <span>COLOR RANGE</span>
+            <input type="range" id="inkTol" min="2" max="90" value="30" step="1">
+          </label>
+        </div>
+
+        <label class="slider-row">
+          <span>DE-NOISE</span>
+          <input type="range" id="inkSmooth" min="0" max="3" value="1" step="1">
+        </label>
+        <label class="slider-row">
+          <span>SPECK FILTER</span>
+          <input type="range" id="inkSpeck" min="0" max="20" value="5" step="1">
+        </label>
+        <label class="slider-row">
+          <span>CURVE FIT</span>
+          <input type="range" id="inkDetail" min="0.6" max="3" value="1.2" step="0.2">
+        </label>
+      </div>
+    </div>
+
+    <div class="step" id="step-tag">
+      <div class="step-head"><span class="step-num">5</span> TAG &amp; ADD</div>
+      <div class="step-body">
+        <p>Tell it which character this is — over on the right. <kbd>Enter</kbd> submits.</p>
+      </div>
+    </div>
+  </aside>
+
+  <div class="stage-wrap">
+    <canvas id="stage"></canvas>
+    <div class="stage-tools">
+      <button id="toolLasso" class="tool on" title="lasso (draw a loop)">LASSO</button>
+      <button id="toolHand" class="tool" title="pan (or hold space)">HAND</button>
+      <button id="toolFit" class="tool" title="fit image">FIT</button>
+    </div>
+    <div class="stage-hint" id="stageHint">Drop a photo of graffiti — or load a demo wall.</div>
+  </div>
+
+  <aside class="preview-col">
+    <div class="panel-label">LETTERFORM · FITTED</div>
+    <canvas id="previewCanvas" width="300" height="330"></canvas>
+    <div class="fit-info" id="fitInfo"></div>
+    <div class="tag-row">
+      <input id="charInput" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
+      <button id="submitBtn" class="primary" disabled>ADD TO TYPEFACE</button>
+    </div>
+    <p class="microcopy">
+      Scaled to its optical class, overshoot compensated, sidebearings measured
+      from the shape — it lands ready to typeset.
+    </p>
+  </aside>
+
+</section>
+
+<!-- ============================== GLYPHS ============================== -->
+<section class="tab" id="tab-glyphs">
+  <div class="glyphs-head">
+    <div>
+      <div class="panel-label">THE LIVING GLYPH SET</div>
+      <div class="dim" id="glyphCount"></div>
+    </div>
+    <div class="btn-row">
+      <input type="file" id="importInput" accept="application/json" hidden>
+      <button class="ghost sm" id="importBtn">IMPORT / MERGE JSON</button>
+      <button class="ghost sm" id="exportBtn">EXPORT JSON</button>
+      <button class="ghost sm danger" id="clearBtn">CLEAR ALL</button>
+    </div>
+  </div>
+  <div id="glyphGrid"></div>
+
+  <div class="drawer" id="glyphDrawer">
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <span class="drawer-char" id="drawerChar"></span>
+        <button class="ghost sm" id="drawerClose">CLOSE</button>
+      </div>
+      <div id="drawerBody"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== TESTER ============================== -->
+<section class="tab" id="tab-tester">
+  <div class="tester-controls">
+    <label class="ctl">
+      <span>TYPEFACE NAME</span>
+      <input id="fontNameInput" class="text-input" maxlength="40" spellcheck="false">
+    </label>
+    <label class="ctl">
+      <span>SIZE</span>
+      <input type="range" id="sizeRange" min="24" max="280" value="112">
+    </label>
+    <label class="ctl">
+      <span>TRACKING</span>
+      <input type="range" id="trackRange" min="-0.05" max="0.3" value="0.02" step="0.005">
+    </label>
+    <label class="ctl">
+      <span>LEADING</span>
+      <input type="range" id="leadRange" min="0.85" max="1.8" value="1.05" step="0.05">
+    </label>
+    <button class="ghost sm" id="invertBtn">INVERT</button>
+    <label class="check-row">
+      <input type="checkbox" id="mirrorCase" checked>
+      <span>fill missing case from the other case</span>
+    </label>
+  </div>
+
+  <div class="sample-row">
+    <span class="dim">TRY:</span>
+    <button class="sample-btn" data-text="SANSTYLE">SANSTYLE</button>
+    <button class="sample-btn" data-text="THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789">PANGRAM</button>
+    <button class="sample-btn" data-text="BROOKLYN QUEENS BRONX HARLEM STATEN ISLAND">BOROUGHS</button>
+    <button class="sample-btn" data-text="PAINT THE CITY #5">MIXED</button>
+  </div>
+
+  <div class="tester-wrap" id="testerWrap">
+    <div class="tester-empty" id="testerEmpty">
+      <p>No letterforms yet.</p>
+      <p class="dim">Capture your first letter and it appears here as a typeable, downloadable font — instantly.</p>
+    </div>
+    <div class="tester" id="tester" contenteditable="true" spellcheck="false">SANSTYLE</div>
+  </div>
+
+  <div class="tester-foot" id="testerFoot">
+    <div class="coverage" id="coverage"></div>
+    <div class="foot-right">
+      <span class="dim" id="compileMeta"></span>
+      <button class="primary" id="downloadBtn" disabled>⤓ DOWNLOAD <span id="dlName">Sanstyle.ttf</span></button>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  Local-first: letterforms live in this browser. Export the JSON to share a set or merge crews’ walls into one face.
+</footer>
+
+<script src="js/util.js"></script>
+<script src="js/geometry.js"></script>
+<script src="js/fitcurves.js"></script>
+<script src="js/raster.js"></script>
+<script src="js/trace.js"></script>
+<script src="js/fitting.js"></script>
+<script src="js/ttf.js"></script>
+<script src="js/store.js"></script>
+<script src="js/demo.js"></script>
+<script src="js/ui/capture.js"></script>
+<script src="js/ui/glyphs.js"></script>
+<script src="js/ui/tester.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
