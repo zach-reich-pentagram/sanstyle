@@ -1,130 +1,144 @@
-# SANSTYLE™
+# Sanstyle
 
 **Street-sourced typeface engine.** Photograph graffiti around town, lasso a
-letterform, and it becomes a glyph in a living, typeable, downloadable font —
-perspective-corrected, vectorized, optically fitted, and auto-spaced, all in
-the browser.
+letterform (or let the machine find it), and it becomes a glyph in a living,
+typeable, downloadable font — perspective-corrected, vectorized, optically
+fitted, and auto-spaced, entirely in the browser.
 
-Photo of a wall → usable `.ttf`, in about fifteen seconds per letter.
+Photo of a wall → usable `.ttf`.
 
 ![Capture studio](docs/shots/capture.png)
 
 ## Run it
 
-It's a fully client-side static app — no build step, no dependencies, nothing
-leaves your machine.
+Fully client-side static app — no build step, no server, nothing leaves your
+machine.
 
 ```bash
 python3 -m http.server 8000     # or: npx serve .
 # open http://localhost:8000
 ```
 
-Opening `index.html` straight from disk works too. Host the folder anywhere
-static (GitHub Pages included) and it's live.
+Opening `index.html` from disk works too. **Demo wall** generates a sprayed
+letter so the whole flow can be tried without a photo. iPhone **HEIC/HEIF**
+photos upload directly (Safari decodes natively; elsewhere a vendored libheif
+decodes locally).
 
-No photo handy? **DEMO WALL** generates a sprayed letter on a brick wall so
-you can try the whole flow immediately.
+## Two ways in
 
-## The workflow
+**Manual (full control).** Upload → optionally drag four corners onto the
+wall plane (homography flatten) → loop the letterform with the freehand
+**Lasso** or click-point **Polygon** tool → dial in the ink → tag → add.
 
-1. **WALL** — upload a phone shot (or drag & drop one onto the stage).
-2. **FLATTEN** — drag four corners onto the wall plane; a homography warp
-   removes the camera angle. Skip it for straight-on shots.
-3. **LASSO** — draw a loose loop around *one* letterform.
-4. **INK** — the app finds the paint inside the loop. `AUTO` uses Otsu
-   thresholding on luminance; `PICK PAINT` matches the sprayed color you
-   click (multiple clicks widen the range — handy for fades). De-noise,
-   speck filter, and curve-fit sliders retune the trace live.
-5. **TAG & ADD** — type which character it is, hit Enter. Done.
+Ink controls: automatic Otsu thresholding or **Pick paint** color matching
+(multiple clicks widen the range), de-noise, speck filter, curve fit, and:
 
-Each capture lands in the **GLYPHS** library (every slot keeps unlimited
-variants — pick which one ships, nudge size/baseline/sidebearings if you
-disagree with the auto fit). The **TESTER** types with the real compiled font
-and the **DOWNLOAD** button hands you an installable TTF.
+- **Fill gaps** — heals spray-coverage holes inside the ink. Low values close
+  pinholes while counters survive; cranked, the letter goes fully solid.
+- **Block out overlap** — when another letter crosses the one you want,
+  brush over the intruder. Its paint is removed and your stroke is bridged
+  back through the blocked zone with a morphological inference of where the
+  hidden edge continues. Brush size and bridge reach are adjustable.
+
+A classifier guesses the character from the traced shape as a one-tap
+suggestion; case-sensitive tagging stays yours.
+
+**Auto capture (single or batch).** Select one or many photos: each is
+auto-straightened (gradient-orientation deskew), letter-sized paint blobs are
+detected and traced, and a character prediction is made for each. Everything
+lands in a review queue — photo crop and traced letterform side by side, the
+guess prefilled with its confidence — where you **Add**, retag, **Skip**, or
+**Edit manually** (drops that photo into the manual studio, pre-lassoed).
+Nothing enters the typeface without your yes.
+
+![Review queue](docs/shots/review.png)
+
+The predictions come from geometric template matching (normalized-grid IoU +
+counter count + aspect against system-font renders) — deliberately simple,
+fully local, and always human-confirmed. Swapping in a stronger model later
+only means replacing `js/classify.js`.
+
+## The optical fitting
+
+Every glyph is fitted into a 1000-UPM em by its character class (caps and
+figures to the 700-unit cap height; x-height, ascender and descender classes
+for lowercase; a tuned table for marks), then corrected:
+
+- **Overshoot compensation** — flat extremes (E, H, T) align exactly; round
+  ones (O, S) overshoot ~11 units; pointed apexes (A, V) ~15, so everything
+  *looks* the same height.
+- **Auto sidebearings** — the whitespace depth of each side's margin profile
+  sets the bearing (a simplified HT-Letterspacer): open shapes tuck in,
+  solid stems get full clearance. Proportional spacing with zero manual
+  metrics.
+
+The compiler emits a complete TrueType font (cubic→quadratic, winding
+normalization, all ten required tables, correct checksums) and hot-swaps it
+into the page via the FontFace API in a few milliseconds.
+
+## The tester
 
 ![Type tester](docs/shots/tester.png)
 
-## The two bits of magic
+- Types with the real compiled font. Newlines, paste, the lot.
+- **Variant cycling** — when a character has several captured letterforms,
+  repeated letters rotate through them (alternate fonts are compiled per
+  variant slot), so doubles never twin. Toggleable.
+- **Manual kerning** — hit **Kern**, click a letterform, and arrow-key it
+  (shift for coarse). Esc returns to typing; kern tweaks carry into exports.
+- Background color, text color, and alignment controls; tracking down to
+  −0.25 em; canvas aspect presets (Free / iPhone / Square / 16:9 / Poster)
+  for mockups.
+- **Exports**: the specimen as **SVG** (true vector paths), **PNG**, or
+  **JPG** — plus the installable **TTF** itself.
 
-**1 — Photo → clean vector.** The lassoed region is segmented (Otsu on
-luminance, or perceptual color distance from your sampled paint), cleaned
-with morphological close/open and a connected-component speck filter, then
-boundary-traced. The 1-px staircase is relaxed, simplified (Ramer-Douglas-
-Peucker), split at corners, and each smooth run is least-squares fit with
-cubic Béziers (Schneider's algorithm). Counters survive as holes with correct
-winding. Drips are yours to keep or de-noise away.
+## Glyphs, sharing, design
 
-**2 — Any letterform → consistent typeface.** Every glyph is fitted into a
-1000-UPM em by its character class (caps/figures to the 700-unit cap height,
-x-height, ascender, and descender classes for lowercase, a tuned table for
-marks). Then the optics:
-
-- **Overshoot compensation** — the fitter measures how flat the outline is at
-  its extremes. Flat tops (E, H, T) align exactly; round ones (O, S) get
-  ~11 units of overshoot; pointed apexes (A, V) get ~15 — so everything
-  *looks* the same height, which is the thing that actually matters.
-- **Auto sidebearings** — a simplified HT-Letterspacer: the whitespace depth
-  of each side's margin profile is averaged over the measuring band, and open
-  profiles (A, L, T) get pulled tighter than solid stems (H, N). Proportional
-  spacing with zero manual metrics.
-
-The compiler then emits a complete TrueType font — cubic→quadratic conversion,
-winding normalization, `glyf/loca/cmap/head/hhea/hmtx/maxp/name/post/OS-2`
-with correct checksums — and hot-swaps it into the page via the FontFace API.
-The tester isn't a canvas simulation; it's the actual font. ~7 ms per rebuild.
-
-![Glyph library](docs/shots/glyphs.png)
-
-## Sharing sets
-
-Everything is local-first (`localStorage`). **EXPORT JSON** writes the whole
-library — outlines, variants, fit metadata — and **IMPORT / MERGE** unions
-someone else's set into yours (variant IDs dedupe). That's the current answer
-to "crowd-sourced": pass sets around, merge crews' walls into one face.
-
-The storage layer is a single small module (`js/store.js`) with a JSON wire
-format, deliberately shaped so a shared backend (tiny API + moderation queue)
-can slot in behind it later without touching the capture or font code.
+The **Glyphs** tab holds the full character grid: per-slot variants,
+activation, optical nudges (size, baseline, sidebearings), delete. The
+library persists locally and round-trips through **Export / Import JSON** so
+sets can be shared and merged. The **Design** tab live-adjusts the interface
+itself — text size, padding, gaps, control height, corner radius, line
+weight, canvas padding — persisted per browser.
 
 ## Under the hood
 
 ```
 js/
-  geometry.js    vectors, RDP, point-in-poly, homography solve, Bézier math
+  geometry.js    vectors, RDP, point-in-poly, homography, Bézier math
   fitcurves.js   Schneider least-squares cubic fitting
-  raster.js      luma/Otsu, color match, morphology, components, poly fill
+  raster.js      Otsu, color match, morphology, components, fill-holes,
+                 occlusion bridge
   trace.js       mask → boundary loops → corner-aware Bézier contours
-  fitting.js     char classes, overshoot, auto-spacing, glyph records
+  fitting.js     char classes, overshoot, auto-spacing, variant sets
   ttf.js         dependency-free TrueType compiler
-  store.js       library model + persistence + import/export
+  classify.js    template character classifier (local, human-confirmed)
+  auto.js        deskew + letter detection for the automated lane
+  heic.js        HEIC/HEIF intake (vendored libheif, lazy-loaded)
+  export.js      specimen layout → SVG / PNG / JPG
+  store.js       library model, persistence, import/export
   demo.js        procedural demo walls (seeded)
-  ui/            capture stage, glyph grid, live tester
+  ui/            capture stage, glyph grid, tester, review queue
 ```
 
-Plain ES5-ish classic scripts, one global namespace (`ST`), zero runtime
-dependencies. The same files run headless in Node for tests.
+Zero runtime dependencies (the HEIC decoder is vendored and loads only when
+a HEIC arrives). The same files run headless in Node for tests.
 
 ## Tests
 
 ```bash
-npm test        # 18 unit tests: geometry, tracing, fitting, TTF byte format
-npm run e2e     # headless Chromium: real-mouse lasso → submit → download,
-                # validated by an independent TTF parser AND fontTools
-python3 tools/validate_font.py some-font.ttf   # standalone font check
+npm test        # 23 unit tests: geometry, tracing, fitting, morphology,
+                # deskew, classifier scoring, TTF byte format
+npm run e2e     # headless Chromium: freehand + polygon lasso, flatten,
+                # pick-paint, fill-gaps, HEIC intake, auto capture + review,
+                # variant cycling, kerning, exports, TTF download —
+                # validated by an independent parser AND fontTools
 ```
-
-The e2e run drives the actual UI (pointer events on the canvas), compiles a
-font from eight demo captures, downloads it, byte-compares the download to the
-in-memory build, and round-trips it through fontTools. It also regenerates the
-screenshots above.
 
 ## Roadmap
 
-- **Live community wall** — a small sync server so anyone can contribute
-  letterforms from anywhere and the face evolves in public. The store's JSON
-  format is already the wire format; needs auth + a moderation queue.
-- OpenType alternates (`rand`/`calt`) so repeated letters cycle through
-  captured variants like a real hand would.
-- Stroke-weight normalization across captures (currently: sizes are optical,
-  weights are honest).
-- Kern-pair suggestions for the worst offenders (AV, To, r.).
+- Live community wall (shared backend + moderation; the JSON export is
+  already the wire format).
+- OpenType `calt`/`rand` so variant cycling ships inside the font file, not
+  just the tester.
+- Stroke-weight normalization across captures.

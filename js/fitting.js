@@ -224,16 +224,21 @@
    * Assemble the compile-ready glyph set from the library.
    * glyphsByChar: { char: {variants:[...], active: index} }
    * opts.mirrorCase: map missing case onto the drawn counterpart.
+   * opts.variantOffset: rotate each slot's pick by N — used to build the
+   *   alternate "cycle fonts" so repeated letters vary in the tester.
    * Returns Map(codepoint → {contours, advance, lsb}) — shared objects when
    * two codepoints reuse one drawing.
    */
   M.buildFontGlyphs = function (glyphsByChar, opts) {
     const map = new Map();
     const finalized = {};
+    const offset = (opts && opts.variantOffset) || 0;
     for (const ch in glyphsByChar) {
       const slot = glyphsByChar[ch];
       if (!slot || !slot.variants || !slot.variants.length) continue;
-      const v = slot.variants[Math.min(slot.active || 0, slot.variants.length - 1)];
+      const n = slot.variants.length;
+      const idx = ((Math.min(slot.active || 0, n - 1) + offset) % n + n) % n;
+      const v = slot.variants[idx];
       finalized[ch] = M.finalizeVariant(v);
       map.set(ch.codePointAt(0), finalized[ch]);
     }

@@ -23,13 +23,12 @@
     const yOf = (fu) => 4 + (top - fu) * s;
 
     if (withMetrics) {
-      c.strokeStyle = 'rgba(255,255,255,0.14)';
+      c.strokeStyle = '#000';
       c.lineWidth = 1;
-      for (const fu of [ST.metrics.CAP, ST.metrics.XH, ST.metrics.DESC]) {
-        c.beginPath(); c.moveTo(2, yOf(fu)); c.lineTo(W - 2, yOf(fu)); c.stroke();
+      for (const fu of [ST.metrics.CAP, ST.metrics.XH, 0, ST.metrics.DESC]) {
+        const y = Math.round(yOf(fu)) + 0.5;
+        c.beginPath(); c.moveTo(2, y); c.lineTo(W - 2, y); c.stroke();
       }
-      c.strokeStyle = 'rgba(255,92,31,0.6)';
-      c.beginPath(); c.moveTo(2, yOf(0)); c.lineTo(W - 2, yOf(0)); c.stroke();
     }
 
     const path = new Path2D();
@@ -45,15 +44,15 @@
       }
       path.closePath();
     }
-    c.fillStyle = '#f4f2ec';
+    c.fillStyle = '#000';
     c.fill(path, 'nonzero');
     return { fin, s, ox, yOf };
   }
 
   function renderGrid() {
     const sections = [
-      ['CAPS', ST.CHARSET.caps], ['LOWERCASE', ST.CHARSET.lower],
-      ['NUMERALS', ST.CHARSET.digits], ['MARKS', ST.CHARSET.marks],
+      ['Caps', ST.CHARSET.caps], ['Lowercase', ST.CHARSET.lower],
+      ['Numerals', ST.CHARSET.digits], ['Marks', ST.CHARSET.marks],
     ];
     const root = $('#glyphGrid');
     root.innerHTML = '';
@@ -108,7 +107,7 @@
 
     if (!slot) {
       body.appendChild(el('p', { class: 'dim drawer-empty' },
-        'Nothing captured for this character yet. Find it on a wall.'));
+        'Nothing captured for this character yet.'));
       return;
     }
 
@@ -153,17 +152,17 @@
       ST.store.updateNudge(ch, active, { [key]: cur + delta });
     };
     body.appendChild(el('div', { class: 'nudge-box' },
-      el('div', { class: 'panel-label' }, 'OPTICAL NUDGES'),
-      mkNudge('SIZE %', 'scale', 2),
-      mkNudge('BASELINE', 'dy', 10),
-      mkNudge('LEFT SB', 'dl', 8),
-      mkNudge('RIGHT SB', 'dr', 8),
+      el('div', { class: 'panel-label' }, 'Optical nudges'),
+      mkNudge('Size %', 'scale', 2),
+      mkNudge('Baseline', 'dy', 10),
+      mkNudge('Left side', 'dl', 8),
+      mkNudge('Right side', 'dr', 8),
       el('div', { class: 'drawer-actions' },
-        el('button', { class: 'ghost sm', onclick: () => ST.store.resetNudge(ch, active) }, 'RESET FIT'),
+        el('button', { class: 'ghost sm', onclick: () => ST.store.resetNudge(ch, active) }, 'Reset fit'),
         el('button', {
           class: 'ghost sm danger',
           onclick: () => { ST.store.deleteVariant(ch, active); },
-        }, 'DELETE THIS LETTERFORM'),
+        }, 'Delete this letterform'),
       ),
     ));
   }

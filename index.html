@@ -3,24 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SANSTYLE — street-sourced typeface engine</title>
-<meta name="description" content="Turn photographed graffiti letterforms into a living, downloadable typeface. Lasso a letter, we vectorize and fit it; the font grows as you walk.">
+<title>Sanstyle</title>
+<meta name="description" content="Turn photographed graffiti letterforms into a living, downloadable typeface.">
 <link rel="stylesheet" href="css/app.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🖍️</text></svg>">
+<link rel="icon" href="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cstyle%3Etext%7Bfill:%23000%7D@media(prefers-color-scheme:dark)%7Btext%7Bfill:%23fff%7D%7D%3C/style%3E%3Ctext y='0.86em' font-size='92'%3E%E2%9C%8E%3C/text%3E%3C/svg%3E">
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand">
-    <span class="brand-mark">SANSTYLE</span>
-    <span class="brand-sub">street-sourced typeface engine</span>
-  </div>
-  <nav class="tabs">
-    <button class="tab-btn on" data-tab="capture">CAPTURE</button>
-    <button class="tab-btn" data-tab="glyphs">GLYPHS <span id="navCount" class="nav-count"></span></button>
-    <button class="tab-btn" data-tab="tester">TESTER</button>
+  <nav class="tabs seg">
+    <button class="seg-btn tab-btn on" data-tab="capture">Capture</button>
+    <button class="seg-btn tab-btn" data-tab="glyphs">Glyphs <span id="navCount" class="nav-count"></span></button>
+    <button class="seg-btn tab-btn" data-tab="tester">Tester</button>
+    <button class="seg-btn tab-btn" data-tab="design">Design</button>
   </nav>
-  <div class="top-meta">NYC → 1000 UPM · local-first</div>
+  <button class="pill sm" id="queuePill" style="display:none">Review queue</button>
 </header>
 
 <main>
@@ -30,112 +27,134 @@
 
   <aside class="steps">
     <div class="step active" id="step-wall">
-      <div class="step-head"><span class="step-num">1</span> WALL</div>
+      <div class="step-head"><span class="step-num">1</span> Wall</div>
       <div class="step-body">
-        <p>Shoot a letterform in the wild. Phone shots at an angle are fine.</p>
-        <input type="file" id="fileInput" accept="image/*" hidden>
+        <input type="file" id="fileInput" accept="image/*,.heic,.heif" hidden>
+        <input type="file" id="autoInput" accept="image/*,.heic,.heif" multiple hidden>
         <div class="btn-row">
-          <button class="primary sm" id="uploadBtn">UPLOAD PHOTO</button>
-          <button class="ghost sm" id="demoBtn">DEMO WALL</button>
+          <button class="pill sm" id="uploadBtn">Upload photo</button>
+          <button class="pill sm" id="demoBtn">Demo wall</button>
         </div>
+        <div class="btn-row">
+          <button class="pill sm" id="autoBtn">Auto capture (batch ok)</button>
+        </div>
+        <p>Auto capture straightens the photo, finds the letterforms, and asks you to confirm each one. iPhone HEIC photos work.</p>
       </div>
     </div>
 
     <div class="step" id="step-flatten">
-      <div class="step-head"><span class="step-num">2</span> FLATTEN</div>
+      <div class="step-head"><span class="step-num">2</span> Flatten</div>
       <div class="step-body">
-        <p>Drag the corners onto the wall plane to kill the camera angle.</p>
+        <p>Drag the corners onto the wall plane.</p>
         <div class="btn-row">
-          <button class="primary sm" id="flattenApply">APPLY</button>
-          <button class="ghost sm" id="flattenSkip">SKIP</button>
-          <button class="ghost sm" id="flattenReset">UNDO</button>
+          <button class="pill sm" id="flattenApply">Apply</button>
+          <button class="pill sm" id="flattenSkip">Skip</button>
+          <button class="pill sm" id="flattenReset">Undo</button>
         </div>
       </div>
     </div>
 
     <div class="step" id="step-lasso">
-      <div class="step-head"><span class="step-num">3</span> LASSO</div>
+      <div class="step-head"><span class="step-num">3</span> Lasso</div>
       <div class="step-body">
-        <p>Draw a loose loop around <b>one</b> letterform. We find the paint inside.</p>
+        <p>Loop one letterform — drag to draw, or place polygon points.</p>
         <div class="btn-row">
-          <button class="ghost sm" id="lassoReset">RESET LOOP</button>
+          <button class="pill sm" id="lassoReset">Reset loop</button>
         </div>
       </div>
     </div>
 
     <div class="step" id="step-ink">
-      <div class="step-head"><span class="step-num">4</span> INK</div>
+      <div class="step-head"><span class="step-num">4</span> Ink</div>
       <div class="step-body">
         <div class="seg">
-          <button id="inkModeAuto" class="seg-btn on">AUTO</button>
-          <button id="inkModeColor" class="seg-btn">PICK PAINT</button>
+          <button id="inkModeAuto" class="seg-btn on">Auto</button>
+          <button id="inkModeColor" class="seg-btn">Pick paint</button>
         </div>
 
         <div id="lumaControls">
           <label class="slider-row">
-            <span>THRESHOLD</span>
+            <span>Threshold:</span>
             <input type="range" id="inkThresh" min="-70" max="70" value="0" step="1">
           </label>
           <label class="check-row">
             <input type="checkbox" id="inkInvert">
-            <span>paint is lighter than wall</span>
+            <span>Paint is lighter than wall</span>
           </label>
         </div>
 
         <div id="colorControls" style="display:none">
-          <button class="ghost sm" id="eyedropBtn">🖉 SAMPLE THE PAINT</button>
+          <button class="pill sm" id="eyedropBtn">Sample the paint</button>
           <div class="seed-chips" id="seedChips"></div>
           <label class="slider-row">
-            <span>COLOR RANGE</span>
+            <span>Color range:</span>
             <input type="range" id="inkTol" min="2" max="90" value="30" step="1">
           </label>
         </div>
 
         <label class="slider-row">
-          <span>DE-NOISE</span>
+          <span>De-noise:</span>
           <input type="range" id="inkSmooth" min="0" max="3" value="1" step="1">
         </label>
         <label class="slider-row">
-          <span>SPECK FILTER</span>
+          <span>Speck filter:</span>
           <input type="range" id="inkSpeck" min="0" max="20" value="5" step="1">
         </label>
         <label class="slider-row">
-          <span>CURVE FIT</span>
+          <span>Fill gaps:</span>
+          <input type="range" id="inkFill" min="0" max="75" value="5" step="1">
+        </label>
+        <label class="slider-row">
+          <span>Curve fit:</span>
           <input type="range" id="inkDetail" min="0.6" max="3" value="1.2" step="0.2">
         </label>
+
+        <div class="block-box">
+          <div class="btn-row">
+            <button class="pill sm" id="blockToggle">Block out overlap</button>
+            <button class="pill sm" id="blockClear">Clear</button>
+          </div>
+          <label class="slider-row">
+            <span>Brush size:</span>
+            <input type="range" id="blockSize" min="6" max="48" value="16" step="1">
+          </label>
+          <label class="slider-row">
+            <span>Bridge:</span>
+            <input type="range" id="inkBridge" min="0" max="36" value="14" step="1">
+          </label>
+          <p>Paint over an intruding letter; the stroke underneath is inferred back through.</p>
+        </div>
       </div>
     </div>
 
     <div class="step" id="step-tag">
-      <div class="step-head"><span class="step-num">5</span> TAG &amp; ADD</div>
+      <div class="step-head"><span class="step-num">5</span> Tag &amp; add</div>
       <div class="step-body">
-        <p>Tell it which character this is — over on the right. <kbd>Enter</kbd> submits.</p>
+        <p>Type the character on the right. Enter submits.</p>
       </div>
     </div>
   </aside>
 
   <div class="stage-wrap">
     <canvas id="stage"></canvas>
-    <div class="stage-tools">
-      <button id="toolLasso" class="tool on" title="lasso (draw a loop)">LASSO</button>
-      <button id="toolHand" class="tool" title="pan (or hold space)">HAND</button>
-      <button id="toolFit" class="tool" title="fit image">FIT</button>
+    <div class="stage-tools seg">
+      <button id="toolLasso" class="seg-btn on" title="Freehand lasso">Lasso</button>
+      <button id="toolPoly" class="seg-btn" title="Polygon lasso — click points, click the first point or press Enter to close">Polygon</button>
+      <button id="toolHand" class="seg-btn" title="Pan (or hold space)">Hand</button>
+      <button id="toolFit" class="seg-btn" title="Fit image">Fit</button>
     </div>
     <div class="stage-hint" id="stageHint">Drop a photo of graffiti — or load a demo wall.</div>
   </div>
 
   <aside class="preview-col">
-    <div class="panel-label">LETTERFORM · FITTED</div>
+    <div class="panel-label">Letterform, fitted</div>
     <canvas id="previewCanvas" width="300" height="330"></canvas>
     <div class="fit-info" id="fitInfo"></div>
+    <button class="pill sm" id="guessBtn" style="display:none"></button>
     <div class="tag-row">
       <input id="charInput" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
-      <button id="submitBtn" class="primary" disabled>ADD TO TYPEFACE</button>
+      <button id="submitBtn" class="pill primary" disabled>Add to typeface</button>
     </div>
-    <p class="microcopy">
-      Scaled to its optical class, overshoot compensated, sidebearings measured
-      from the shape — it lands ready to typeset.
-    </p>
   </aside>
 
 </section>
@@ -143,15 +162,12 @@
 <!-- ============================== GLYPHS ============================== -->
 <section class="tab" id="tab-glyphs">
   <div class="glyphs-head">
-    <div>
-      <div class="panel-label">THE LIVING GLYPH SET</div>
-      <div class="dim" id="glyphCount"></div>
-    </div>
+    <div class="dim" id="glyphCount"></div>
     <div class="btn-row">
       <input type="file" id="importInput" accept="application/json" hidden>
-      <button class="ghost sm" id="importBtn">IMPORT / MERGE JSON</button>
-      <button class="ghost sm" id="exportBtn">EXPORT JSON</button>
-      <button class="ghost sm danger" id="clearBtn">CLEAR ALL</button>
+      <button class="pill sm" id="importBtn">Import / merge JSON</button>
+      <button class="pill sm" id="exportBtn">Export JSON</button>
+      <button class="pill sm danger" id="clearBtn">Clear all</button>
     </div>
   </div>
   <div id="glyphGrid"></div>
@@ -160,7 +176,7 @@
     <div class="drawer-panel">
       <div class="drawer-head">
         <span class="drawer-char" id="drawerChar"></span>
-        <button class="ghost sm" id="drawerClose">CLOSE</button>
+        <button class="pill sm" id="drawerClose">Close</button>
       </div>
       <div id="drawerBody"></div>
     </div>
@@ -171,58 +187,172 @@
 <section class="tab" id="tab-tester">
   <div class="tester-controls">
     <label class="ctl">
-      <span>TYPEFACE NAME</span>
+      <span>Typeface name:</span>
       <input id="fontNameInput" class="text-input" maxlength="40" spellcheck="false">
     </label>
     <label class="ctl">
-      <span>SIZE</span>
+      <span>Size:</span>
       <input type="range" id="sizeRange" min="24" max="280" value="112">
     </label>
     <label class="ctl">
-      <span>TRACKING</span>
-      <input type="range" id="trackRange" min="-0.05" max="0.3" value="0.02" step="0.005">
+      <span>Tracking:</span>
+      <input type="range" id="trackRange" min="-0.25" max="0.3" value="0.02" step="0.005">
     </label>
     <label class="ctl">
-      <span>LEADING</span>
+      <span>Leading:</span>
       <input type="range" id="leadRange" min="0.85" max="1.8" value="1.05" step="0.05">
     </label>
-    <button class="ghost sm" id="invertBtn">INVERT</button>
+    <label class="ctl">
+      <span>Background color:</span>
+      <input type="color" id="bgColor" value="#ffffff">
+    </label>
+    <label class="ctl">
+      <span>Text color:</span>
+      <input type="color" id="fgColor" value="#000000">
+    </label>
+    <div class="ctl">
+      <span>Align:</span>
+      <div class="seg">
+        <button class="seg-btn align-btn on" data-align="left">Left</button>
+        <button class="seg-btn align-btn" data-align="center">Center</button>
+        <button class="seg-btn align-btn" data-align="right">Right</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <span>Canvas:</span>
+      <div class="seg">
+        <button class="seg-btn aspect-btn on" data-aspect="free">Free</button>
+        <button class="seg-btn aspect-btn" data-aspect="9:19.5">iPhone</button>
+        <button class="seg-btn aspect-btn" data-aspect="1:1">Square</button>
+        <button class="seg-btn aspect-btn" data-aspect="16:9">16:9</button>
+        <button class="seg-btn aspect-btn" data-aspect="2:3">Poster</button>
+      </div>
+    </div>
+    <label class="check-row">
+      <input type="checkbox" id="cycleToggle" checked>
+      <span>Cycle variants on repeated letters</span>
+    </label>
     <label class="check-row">
       <input type="checkbox" id="mirrorCase" checked>
-      <span>fill missing case from the other case</span>
+      <span>Fill missing case from the other case</span>
     </label>
+    <button class="pill sm" id="kernToggle">Kern</button>
+    <button class="pill sm" id="kernClear">Clear kerns</button>
+    <span class="dim" id="kernReadout"></span>
   </div>
 
   <div class="sample-row">
-    <span class="dim">TRY:</span>
-    <button class="sample-btn" data-text="SANSTYLE">SANSTYLE</button>
-    <button class="sample-btn" data-text="THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789">PANGRAM</button>
-    <button class="sample-btn" data-text="BROOKLYN QUEENS BRONX HARLEM STATEN ISLAND">BOROUGHS</button>
-    <button class="sample-btn" data-text="PAINT THE CITY #5">MIXED</button>
+    <span class="dim">Try:</span>
+    <button class="pill sm sample-btn" data-text="Sanstyle">Sanstyle</button>
+    <button class="pill sm sample-btn" data-text="THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789">Pangram</button>
+    <button class="pill sm sample-btn" data-text="BROOKLYN QUEENS BRONX HARLEM STATEN ISLAND">Boroughs</button>
+    <button class="pill sm sample-btn" data-text="AA EE SS 55 — repeated letters cycle">Doubles</button>
+    <span class="dim" id="kernHint" style="display:none">Click a letterform, then arrow keys kern it (shift = coarse). Esc exits.</span>
   </div>
 
   <div class="tester-wrap" id="testerWrap">
-    <div class="tester-empty" id="testerEmpty">
-      <p>No letterforms yet.</p>
-      <p class="dim">Capture your first letter and it appears here as a typeable, downloadable font — instantly.</p>
+    <div class="tester-sheet" id="testerSheet">
+      <div class="tester-empty" id="testerEmpty">
+        <p>No letterforms yet. Capture your first letter and type with it here.</p>
+      </div>
+      <div class="tester" id="tester" contenteditable="true" spellcheck="false">Sanstyle</div>
     </div>
-    <div class="tester" id="tester" contenteditable="true" spellcheck="false">SANSTYLE</div>
   </div>
 
   <div class="tester-foot" id="testerFoot">
     <div class="coverage" id="coverage"></div>
     <div class="foot-right">
       <span class="dim" id="compileMeta"></span>
-      <button class="primary" id="downloadBtn" disabled>⤓ DOWNLOAD <span id="dlName">Sanstyle.ttf</span></button>
+      <button class="pill sm" id="expSvg">Export SVG</button>
+      <button class="pill sm" id="expPng">Export PNG</button>
+      <button class="pill sm" id="expJpg">Export JPG</button>
+      <button class="pill primary" id="downloadBtn" disabled>Download <span id="dlName">Sanstyle.ttf</span></button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== DESIGN ============================== -->
+<section class="tab" id="tab-design">
+  <div class="design-panel">
+    <div class="panel-label">Design playground</div>
+    <p class="dim">Live-adjust the interface itself. Settings persist in this browser.</p>
+
+    <label class="slider-row wide">
+      <span>Text size: <b id="dvFontVal"></b></span>
+      <input type="range" id="dvFont" min="11" max="20" step="1">
+    </label>
+    <label class="slider-row wide">
+      <span>Panel padding: <b id="dvPadVal"></b></span>
+      <input type="range" id="dvPad" min="6" max="36" step="1">
+    </label>
+    <label class="slider-row wide">
+      <span>Element gap: <b id="dvGapVal"></b></span>
+      <input type="range" id="dvGap" min="4" max="28" step="1">
+    </label>
+    <label class="slider-row wide">
+      <span>Control height: <b id="dvCtlVal"></b></span>
+      <input type="range" id="dvCtl" min="26" max="48" step="1">
+    </label>
+    <label class="slider-row wide">
+      <span>Corner radius: <b id="dvRadiusVal"></b></span>
+      <input type="range" id="dvRadius" min="0" max="999" step="1">
+    </label>
+    <label class="slider-row wide">
+      <span>Line weight: <b id="dvBorderVal"></b></span>
+      <input type="range" id="dvBorder" min="1" max="3" step="1">
+    </label>
+    <label class="slider-row wide">
+      <span>Test canvas padding: <b id="dvCanvasPadVal"></b></span>
+      <input type="range" id="dvCanvasPad" min="0" max="120" step="4">
+    </label>
+
+    <div class="btn-row">
+      <button class="pill sm" id="designReset">Reset to defaults</button>
+    </div>
+
+    <div class="design-demo">
+      <div class="panel-label">Preview</div>
+      <div class="btn-row">
+        <button class="pill">A pill button</button>
+        <button class="pill primary">A primary pill</button>
+        <div class="seg"><button class="seg-btn on">Option 1</button><button class="seg-btn">Option 2</button></div>
+      </div>
+      <label class="slider-row wide"><span>A slider:</span><input type="range" min="0" max="100" value="50"></label>
     </div>
   </div>
 </section>
 
 </main>
 
-<footer class="foot">
-  Local-first: letterforms live in this browser. Export the JSON to share a set or merge crews’ walls into one face.
-</footer>
+<!-- ============================== REVIEW MODAL ============================== -->
+<div class="modal" id="reviewModal">
+  <div class="modal-panel">
+    <div class="modal-head">
+      <span id="reviewProgress"></span>
+      <button class="pill sm" id="reviewClose">Close</button>
+    </div>
+    <div class="modal-spinner" id="reviewSpinner" style="display:none">Analyzing…</div>
+    <div class="modal-body" id="reviewBody">
+      <div class="review-panes">
+        <div>
+          <div class="panel-label">From the photo</div>
+          <canvas id="reviewSource" width="300" height="300"></canvas>
+        </div>
+        <div>
+          <div class="panel-label">Traced letterform</div>
+          <canvas id="reviewTrace" width="300" height="300"></canvas>
+        </div>
+      </div>
+      <div class="dim" id="reviewConf"></div>
+      <div class="review-actions">
+        <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" aria-label="Which character is this?">
+        <button class="pill primary" id="reviewAccept">Add to typeface</button>
+        <button class="pill" id="reviewSkip">Skip</button>
+        <button class="pill" id="reviewEdit">Edit manually</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script src="js/util.js"></script>
 <script src="js/geometry.js"></script>
@@ -231,11 +361,16 @@
 <script src="js/trace.js"></script>
 <script src="js/fitting.js"></script>
 <script src="js/ttf.js"></script>
+<script src="js/classify.js"></script>
+<script src="js/auto.js"></script>
+<script src="js/heic.js"></script>
 <script src="js/store.js"></script>
 <script src="js/demo.js"></script>
+<script src="js/export.js"></script>
 <script src="js/ui/capture.js"></script>
 <script src="js/ui/glyphs.js"></script>
 <script src="js/ui/tester.js"></script>
+<script src="js/ui/batch.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

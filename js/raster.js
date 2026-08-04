@@ -90,7 +90,10 @@
     return out;
   };
 
-  // --- Morphology (disk structuring element) --------------------------------
+  // --- Morphology ------------------------------------------------------------
+  // Small radii use a true disk; larger radii switch to an O(n) separable box
+  // (running distance-to-nearest scan per axis), which is what the occlusion
+  // bridge needs for r up to ~40 without melting the CPU.
   function diskOffsets(r) {
     const off = [];
     for (let dy = -r; dy <= r; dy++) {
@@ -101,8 +104,7 @@
     return off;
   }
 
-  function morph(mask, w, h, r, isDilate) {
-    if (r <= 0) return mask;
+  function morphDisk(mask, w, h, r, isDilate) {
     const off = diskOffsets(r);
     const out = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
@@ -121,8 +123,37 @@
     return out;
   }
 
-  raster.dilate = (m, w, h, r) => morph(m, w, h, r, true);
-  raster.erode = (m, w, h, r) => morph(m, w, h, r, false);
+  function dilateBox(mask, w, h, r) {
+    const tmp = new Uint8Array(w * h);
+    // horizontal: 1 if any ink within r columns
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let last = -1e9;
+      for (let x = 0; x < w; x++) { if (mask[row + x]) last = x; if (x - last <= r) tmp[row + x] = 1; }
+      last = 1e9;
+      for (let x = w - 1; x >= 0; x--) { if (mask[row + x]) last = x; if (last - x <= r) tmp[row + x] = 1; }
+    }
+    const out = new Uint8Array(w * h);
+    for (let x = 0; x < w; x++) {
+      let last = -1e9;
+      for (let y = 0; y < h; y++) { if (tmp[y * w + x]) last = y; if (y - last <= r) out[y * w + x] = 1; }
+      last = 1e9;
+      for (let y = h - 1; y >= 0; y--) { if (tmp[y * w + x]) last = y; if (last - y <= r) out[y * w + x] = 1; }
+    }
+    return out;
+  }
+
+  function erodeBox(mask, w, h, r) {
+    const inv = new Uint8Array(w * h);
+    for (let i = 0; i < mask.length; i++) inv[i] = mask[i] ? 0 : 1;
+    const d = dilateBox(inv, w, h, r);
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < mask.length; i++) out[i] = d[i] ? 0 : 1;
+    return out;
+  }
+
+  raster.dilate = (m, w, h, r) => (r <= 0 ? m : r <= 3 ? morphDisk(m, w, h, r, true) : dilateBox(m, w, h, r));
+  raster.erode = (m, w, h, r) => (r <= 0 ? m : r <= 3 ? morphDisk(m, w, h, r, false) : erodeBox(m, w, h, r));
   raster.close = (m, w, h, r) => raster.erode(raster.dilate(m, w, h, r), w, h, r);
   raster.open = (m, w, h, r) => raster.dilate(raster.erode(m, w, h, r), w, h, r);
 
@@ -165,6 +196,54 @@
     for (let i = 1; i < sizes.length; i++) keep[i] = sizes[i] >= cut ? 1 : 0;
     const out = new Uint8Array(w * h);
     for (let i = 0; i < mask.length; i++) out[i] = keep[labels[i]];
+    return out;
+  };
+
+  // Fill enclosed holes (spray-coverage gaps). A hole fills when it is at
+  // most maxFrac of the TOTAL shape (ink + that hole) — measured this way,
+  // spray gaps sit near 0 while an O's counter is ~50%, so the slider can
+  // reach both regimes: small values heal infill, cranked values go solid.
+  raster.fillHoles = function (mask, w, h, maxFrac) {
+    if (!maxFrac || maxFrac <= 0) return mask;
+    const inkArea = raster.count(mask);
+    if (!inkArea) return mask;
+    const inv = new Uint8Array(w * h);
+    for (let i = 0; i < mask.length; i++) inv[i] = mask[i] ? 0 : 1;
+    const { labels, sizes } = raster.components(inv, w, h);
+    const touchesBorder = new Uint8Array(sizes.length);
+    for (let x = 0; x < w; x++) {
+      touchesBorder[labels[x]] = 1;
+      touchesBorder[labels[(h - 1) * w + x]] = 1;
+    }
+    for (let y = 0; y < h; y++) {
+      touchesBorder[labels[y * w]] = 1;
+      touchesBorder[labels[y * w + w - 1]] = 1;
+    }
+    const fillLabel = new Uint8Array(sizes.length);
+    for (let L = 1; L < sizes.length; L++) {
+      if (touchesBorder[L]) continue;
+      if (sizes[L] <= maxFrac * (inkArea + sizes[L])) fillLabel[L] = 1;
+    }
+    const out = Uint8Array.from(mask);
+    for (let i = 0; i < mask.length; i++) {
+      if (!mask[i] && fillLabel[labels[i]]) out[i] = 1;
+    }
+    return out;
+  };
+
+  // Occlusion inference: X marks the intruding letter (block-out brush).
+  // Remove A∩X, then bridge the surviving stroke back through X with a wide
+  // morphological closing whose new pixels are only accepted inside X — a
+  // geometric guess at where the hidden stroke continues.
+  raster.bridgeThrough = function (maskA, maskX, w, h, r) {
+    const base = new Uint8Array(w * h);
+    for (let i = 0; i < maskA.length; i++) base[i] = maskA[i] && !maskX[i] ? 1 : 0;
+    if (!r || r <= 0) return base;
+    const closed = raster.close(base, w, h, r);
+    const out = Uint8Array.from(base);
+    for (let i = 0; i < out.length; i++) {
+      if (closed[i] && maskX[i]) out[i] = 1;
+    }
     return out;
   };
 

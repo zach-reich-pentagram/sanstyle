@@ -1,7 +1,7 @@
 /* SANSTYLE — ui/capture.js
- * The capture studio: photo in → flattened → lassoed → ink found → traced →
- * fitted → submitted to the library. Owns the main stage canvas, the step
- * cards, and the letterform preview column.
+ * The capture studio: photo in → flattened → lassoed (freehand or polygon) →
+ * ink found (with hole filling and occlusion block-out/bridge) → traced →
+ * fitted → submitted. Owns the stage canvas, step cards, and preview column.
  */
 (function (g) {
   'use strict';
@@ -9,31 +9,37 @@
   const V = ST.geom;
   const $ = ST.$;
 
-  const MAX_EDGE = 1800;      // working-image long edge
-  const CROP_PAD = 10;        // px around the lasso bbox
+  const MAX_EDGE = 1800;
+  const CROP_PAD = 10;
 
   const cap = (ST.capture = {
     step: 'wall',             // wall | flatten | lasso | ink
-    tool: 'lasso',            // lasso | hand
-    img: null,                // working canvas
+    tool: 'lasso',            // lasso | poly | hand
+    img: null,
     imgBeforeFlatten: null,
     view: { scale: 1, tx: 0, ty: 0 },
-    quad: null,               // 4 perspective handles (image coords)
-    lasso: [],                // closed polygon (image coords)
-    lassoLive: null,          // while drawing
+    quad: null,
+    lasso: [],
+    lassoLive: null,
+    polyPts: null,            // in-progress polygon lasso
+    polyCursor: null,
+    blocks: [],               // block-out brush circles {x, y, r} image coords
+    blockArmed: false,
+    blockR: 16,
     ink: {
       mode: 'luma', threshOffset: 0, tol: 30, invert: false, invertAuto: true,
-      smooth: 1, despeckle: 5, detail: 1.2, seeds: [],
+      smooth: 1, despeckle: 5, detail: 1.2, fill: 5, bridge: 14, seeds: [],
     },
     eyedrop: false,
-    extract: null,            // {crop, mask, w, h, paths, overlay}
-    record: null,             // preview record for current char
+    extract: null,
+    record: null,
+    guess: null,
     demoIdx: 0,
     lastDemo: null,
   });
 
   let stage, ctx, wrap, hintEl, preview, pctx;
-  let dragging = null; // {kind: 'pan'|'handle'|'lasso', ...}
+  let dragging = null;
   let spaceHeld = false;
   let raf = 0;
 
@@ -66,10 +72,10 @@
     $('#step-tag').classList.toggle('active', !!(cap.extract && cap.extract.paths.length));
     $('#step-tag').classList.toggle('locked', !(cap.extract && cap.extract.paths.length));
     const hints = {
-      wall: 'Drop a photo of a piece — or load a demo wall.',
-      flatten: 'Drag the corners onto the wall plane to kill the camera angle. Apply, or skip if it’s straight-on.',
-      lasso: 'Draw a loose loop around ONE letterform. Scroll to zoom · hold space to pan.',
-      ink: 'Dial in the paint below, tag the character on the right, and add it to the typeface.',
+      wall: 'Drop a photo here — or load a demo wall.',
+      flatten: 'Drag the corners onto the wall plane, then apply. Skip if it’s straight-on.',
+      lasso: 'Loop one letterform: drag to draw, or use the polygon tool and click points. Scroll zooms, space pans.',
+      ink: 'Dial in the paint, then tag the character on the right.',
     };
     setHint(hints[step] || '');
     requestDraw();
@@ -87,14 +93,18 @@
     cap.img = c;
     cap.imgBeforeFlatten = null;
     cap.lasso = [];
+    cap.polyPts = null;
+    cap.blocks = [];
     cap.extract = null;
     cap.record = null;
+    cap.guess = null;
     cap.ink.seeds = [];
     cap.quad = defaultQuad();
     fitView();
     setStep('flatten');
     updatePreview();
   }
+  cap.useBitmap = useBitmap;
 
   function defaultQuad() {
     if (!cap.img) return null;
@@ -104,6 +114,16 @@
 
   cap.loadFile = function (file) {
     const finish = (bmp, w, h) => useBitmap(bmp, w, h);
+    if (ST.heic && ST.heic.looksHeic(file)) {
+      // Safari can decode natively; everyone else gets the vendored decoder.
+      const native = g.createImageBitmap ? g.createImageBitmap(file, { imageOrientation: 'from-image' }) : Promise.reject();
+      Promise.resolve(native)
+        .then((bmp) => finish(bmp, bmp.width, bmp.height))
+        .catch(() => ST.heic.decode(file)
+          .then((cnv) => finish(cnv, cnv.width, cnv.height))
+          .catch((err) => ST.toast('HEIC: ' + err.message, 'warn')));
+      return;
+    }
     if (g.createImageBitmap) {
       g.createImageBitmap(file, { imageOrientation: 'from-image' })
         .then((bmp) => finish(bmp, bmp.width, bmp.height))
@@ -121,12 +141,13 @@
 
   cap.loadDemo = function (letter) {
     const letters = ST.demo.letters;
-    const ch = letter || letters[cap.demoIdx++ % letters.length];
+    const ch = letter || letters[cap.demoIdx % letters.length];
+    cap.demoIdx++; // every wall gets a fresh seed, so recaptures differ
     const wall = ST.demo.makeWall(ch, 1234 + cap.demoIdx * 77 + ch.charCodeAt(0));
     cap.lastDemo = wall;
     useBitmap(wall.canvas, wall.canvas.width, wall.canvas.height);
     $('#charInput').value = ch;
-    setHint(`Demo wall loaded — a sprayed “${ch}”. Flatten (or skip) then lasso it.`);
+    setHint(`Demo wall loaded — a sprayed “${ch}”. Flatten or skip, then lasso it.`);
     return wall;
   };
 
@@ -144,8 +165,7 @@
       q
     );
     if (!h) { ST.toast('That quad is too twisted — move the corners.', 'warn'); return; }
-    const srcCtx = cap.img.getContext('2d');
-    const src = srcCtx.getImageData(0, 0, cap.img.width, cap.img.height);
+    const src = cap.img.getContext('2d').getImageData(0, 0, cap.img.width, cap.img.height);
     const out = new ImageData(W, H);
     const sd = src.data, od = out.data, sw = cap.img.width, sh = cap.img.height;
     for (let y = 0; y < H; y++) {
@@ -173,6 +193,8 @@
     cap.imgBeforeFlatten = cap.img;
     cap.img = c;
     cap.lasso = [];
+    cap.polyPts = null;
+    cap.blocks = [];
     cap.extract = null;
     fitView();
     setStep('lasso');
@@ -191,7 +213,7 @@
 
   cap.skipFlatten = function () { setStep('lasso'); };
 
-  // ---------- lasso → extraction ----------
+  // ---------- lasso (freehand + polygon) ----------
   function closeLasso() {
     if (!cap.lassoLive || cap.lassoLive.length < 8) {
       cap.lassoLive = null;
@@ -200,6 +222,23 @@
     }
     cap.lasso = V.rdp(cap.lassoLive, 1.2 / cap.view.scale);
     cap.lassoLive = null;
+    finishLasso();
+  }
+
+  function closePoly() {
+    if (!cap.polyPts || cap.polyPts.length < 3) { cancelPoly(); return; }
+    cap.lasso = cap.polyPts.slice();
+    cancelPoly();
+    finishLasso();
+  }
+
+  function cancelPoly() {
+    cap.polyPts = null;
+    cap.polyCursor = null;
+    requestDraw();
+  }
+
+  function finishLasso() {
     const bb = V.bounds(cap.lasso);
     if (bb.w < 8 || bb.h < 8) {
       cap.lasso = [];
@@ -213,10 +252,18 @@
   cap.clearLasso = function () {
     cap.lasso = [];
     cap.lassoLive = null;
+    cap.polyPts = null;
     cap.extract = null;
     cap.record = null;
+    cap.guess = null;
     if (cap.img) setStep('lasso');
     updatePreview();
+    requestDraw();
+  };
+
+  cap.clearBlocks = function () {
+    cap.blocks = [];
+    if (cap.lasso.length) runExtraction(false);
     requestDraw();
   };
 
@@ -229,11 +276,11 @@
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
+  // ---------- extraction ----------
   function runExtraction(autoTune) {
     if (!cap.img || cap.lasso.length < 3) return;
     const crop = cropRegion();
-    const ictx = cap.img.getContext('2d');
-    const data = ictx.getImageData(crop.x, crop.y, crop.w, crop.h);
+    const data = cap.img.getContext('2d').getImageData(crop.x, crop.y, crop.w, crop.h);
     const local = cap.lasso.map((p) => ({ x: p.x - crop.x, y: p.y - crop.y }));
     const roi = ST.raster.fillPoly(crop.w, crop.h, local);
     const luma = ST.raster.luma(data.data, crop.w, crop.h);
@@ -255,12 +302,33 @@
       mask = ST.raster.close(mask, crop.w, crop.h, ink.smooth);
       mask = ST.raster.open(mask, crop.w, crop.h, 1);
     }
+
+    // occlusion block-out: erase the intruding letter, bridge our stroke through
+    let blockMask = null;
+    const localBlocks = cap.blocks.filter((b) =>
+      b.x + b.r > crop.x && b.x - b.r < crop.x + crop.w &&
+      b.y + b.r > crop.y && b.y - b.r < crop.y + crop.h);
+    if (localBlocks.length) {
+      blockMask = new Uint8Array(crop.w * crop.h);
+      for (const b of localBlocks) {
+        const bx = b.x - crop.x, by = b.y - crop.y, r = b.r, r2 = r * r;
+        const x0 = Math.max(0, Math.floor(bx - r)), x1 = Math.min(crop.w - 1, Math.ceil(bx + r));
+        const y0 = Math.max(0, Math.floor(by - r)), y1 = Math.min(crop.h - 1, Math.ceil(by + r));
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            if ((x - bx) ** 2 + (y - by) ** 2 <= r2) blockMask[y * crop.w + x] = 1;
+          }
+        }
+      }
+      mask = ST.raster.bridgeThrough(mask, blockMask, crop.w, crop.h, ink.bridge);
+    }
+
+    if (ink.fill > 0) mask = ST.raster.fillHoles(mask, crop.w, crop.h, ink.fill / 100);
     mask = ST.raster.despeckle(mask, crop.w, crop.h, ink.despeckle / 100, 30);
 
     const paths = ST.trace.vectorize(mask, crop.w, crop.h, { rdpEps: ink.detail });
     const inkCount = ST.raster.count(mask);
 
-    // red overlay for the stage
     const overlay = g.document.createElement('canvas');
     overlay.width = crop.w; overlay.height = crop.h;
     const od = overlay.getContext('2d');
@@ -274,8 +342,9 @@
     od.putImageData(oimg, 0, 0);
 
     cap.extract = { crop, mask, w: crop.w, h: crop.h, paths, overlay, inkCount };
+    cap.guess = (paths.length && ST.classify) ? ST.classify.classifyPaths(paths) : null;
     if (!paths.length) {
-      setHint('No paint found in the loop — adjust threshold / invert, or pick the paint color.');
+      setHint('No paint found in the loop — adjust the threshold, invert, or pick the paint color.');
     }
     setStep('ink');
     updatePreview();
@@ -299,27 +368,39 @@
     if (info) {
       if (cap.record) {
         const r = cap.record;
-        const os = (r.osTop || r.osBot)
-          ? ` · overshoot +${r.osTop}/−${r.osBot}`
-          : ' · flat fit';
-        info.innerHTML =
-          `<span class="chip">${r.clsName.toUpperCase()}</span>` +
-          `<span>LSB ${r.lsb} · RSB ${r.rsb} · ADV ${r.advance}${os}</span>`;
+        const os = (r.osTop || r.osBot) ? ` · overshoot +${r.osTop}/−${r.osBot}` : '';
+        info.textContent = `Fit: ${r.clsName} · left ${r.lsb} · right ${r.rsb} · advance ${r.advance}${os}`;
       } else if (cap.extract && !cap.extract.paths.length) {
-        info.innerHTML = '<span class="warn-text">No shape traced yet.</span>';
+        info.textContent = 'No shape traced yet.';
       } else {
-        info.innerHTML = '<span class="dim">Lasso a letterform to see it fitted here.</span>';
+        info.textContent = '';
+      }
+    }
+    const guessBtn = $('#guessBtn');
+    if (guessBtn) {
+      const top = cap.guess && cap.guess.length ? cap.guess[0] : null;
+      if (top && cap.extract && cap.extract.paths.length) {
+        guessBtn.style.display = '';
+        guessBtn.textContent =
+          `Guess: ${top.ch} (${Math.round((cap.guess.confidence || 0) * 100)}%) — use it`;
+      } else {
+        guessBtn.style.display = 'none';
       }
     }
   }
   cap.updatePreview = updatePreview;
+
+  cap.useGuess = function () {
+    if (!cap.guess || !cap.guess.length) return;
+    $('#charInput').value = cap.guess[0].ch;
+    updatePreview();
+  };
 
   function drawPreview(ch) {
     if (!pctx) return;
     const W = preview.width, H = preview.height;
     pctx.clearRect(0, 0, W, H);
 
-    // vertical span shown: DESC-60 .. ASC+70
     const top = ST.metrics.ASC + 70, bottom = ST.metrics.DESC - 60;
     const span = top - bottom;
     const yOf = (fu) => ((top - fu) / span) * (H - 24) + 12;
@@ -328,20 +409,19 @@
       [ST.metrics.ASC, 'asc'], [ST.metrics.CAP, 'cap'], [ST.metrics.XH, 'x'],
       [0, 'base'], [ST.metrics.DESC, 'desc'],
     ];
-    pctx.font = '9px ui-monospace, monospace';
+    pctx.font = '10px "Helvetica Neue", Helvetica, Arial, sans-serif';
     for (const [fu, label] of lines) {
-      const y = yOf(fu);
-      pctx.strokeStyle = fu === 0 ? 'rgba(255,92,31,0.75)' : 'rgba(255,255,255,0.16)';
+      const y = Math.round(yOf(fu)) + 0.5;
+      pctx.strokeStyle = '#000';
       pctx.lineWidth = 1;
       pctx.beginPath(); pctx.moveTo(8, y); pctx.lineTo(W - 8, y); pctx.stroke();
-      pctx.fillStyle = 'rgba(255,255,255,0.35)';
-      // cap sits just under asc — put its label below the line so they don't collide
-      pctx.fillText(label, W - 34, fu === ST.metrics.CAP ? y + 9 : y - 3);
+      pctx.fillStyle = '#000';
+      pctx.fillText(label, W - 34, fu === ST.metrics.CAP ? y + 11 : y - 4);
     }
 
     if (!cap.record) {
-      pctx.fillStyle = 'rgba(255,255,255,0.12)';
-      pctx.font = '600 120px system-ui, sans-serif';
+      pctx.fillStyle = '#e3e3e3';
+      pctx.font = '400 120px "Helvetica Neue", Helvetica, Arial, sans-serif';
       pctx.textAlign = 'center';
       pctx.fillText(ch || 'A', W / 2, yOf(0));
       pctx.textAlign = 'start';
@@ -349,21 +429,18 @@
     }
 
     const fin = ST.metrics.finalizeVariant(cap.record);
-    const sFit = (H - 24) / span;
-    let s = sFit;
-    const glyphW = fin.advance;
+    let s = (H - 24) / span;
     const maxW = W - 70;
-    if (glyphW * s > maxW) s = maxW / glyphW;
+    if (fin.advance * s > maxW) s = maxW / fin.advance;
     const originX = (W - fin.advance * s) / 2;
     const yGl = (fu) => yOf(0) - fu * s;
 
-    // sidebearing markers
-    pctx.strokeStyle = 'rgba(255,92,31,0.5)';
-    pctx.setLineDash([3, 3]);
+    pctx.strokeStyle = '#000';
+    pctx.lineWidth = 1;
     for (const x of [originX, originX + fin.advance * s]) {
-      pctx.beginPath(); pctx.moveTo(x, yOf(top) + 6); pctx.lineTo(x, yOf(bottom) - 6); pctx.stroke();
+      const xr = Math.round(x) + 0.5;
+      pctx.beginPath(); pctx.moveTo(xr, yOf(top) + 4); pctx.lineTo(xr, yOf(bottom) - 4); pctx.stroke();
     }
-    pctx.setLineDash([]);
 
     const path = new Path2D();
     for (const c of fin.contours) {
@@ -378,7 +455,7 @@
       }
       path.closePath();
     }
-    pctx.fillStyle = '#f4f2ec';
+    pctx.fillStyle = '#000';
     pctx.fill(path, 'nonzero');
   }
 
@@ -393,11 +470,12 @@
     record.thumb = makeThumb(record);
     ST.store.addVariant(ch, record);
     const n = ST.store.count();
-    ST.toast(`“${ch}” added — ${n} character${n === 1 ? '' : 's'} live in ${ST.store.state.fontName}.`);
-    // ready for the next letter on the same wall
+    ST.toast(`“${ch}” added — ${n} character${n === 1 ? '' : 's'} in ${ST.store.state.fontName}.`);
     cap.lasso = [];
     cap.extract = null;
     cap.record = null;
+    cap.guess = null;
+    cap.blocks = [];
     if (chInput) chInput.value = '';
     setStep('lasso');
     updatePreview();
@@ -425,10 +503,11 @@
       }
       path.closePath();
     }
-    cx.fillStyle = '#f4f2ec';
+    cx.fillStyle = '#000';
     cx.fill(path, 'nonzero');
     return c.toDataURL('image/png');
   }
+  cap.makeThumb = makeThumb;
 
   // ---------- stage drawing ----------
   function requestDraw() {
@@ -439,17 +518,17 @@
 
   function draw() {
     if (!ctx) return;
-    const W = stage.width = stage.clientWidth * (g.devicePixelRatio || 1);
-    const H = stage.height = stage.clientHeight * (g.devicePixelRatio || 1);
     const dpr = g.devicePixelRatio || 1;
+    stage.width = stage.clientWidth * dpr;
+    stage.height = stage.clientHeight * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
 
     if (!cap.img) {
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
-      ctx.font = '500 15px system-ui, sans-serif';
+      ctx.fillStyle = '#bbb';
+      ctx.font = '400 14px "Helvetica Neue", Helvetica, Arial, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('DROP A PHOTO OF GRAFFITI HERE', stage.clientWidth / 2, stage.clientHeight / 2);
+      ctx.fillText('Drop a photo of graffiti here', stage.clientWidth / 2, stage.clientHeight / 2);
       ctx.textAlign = 'start';
       return;
     }
@@ -461,10 +540,8 @@
     ctx.imageSmoothingEnabled = v.scale < 3;
     ctx.drawImage(cap.img, 0, 0);
 
-    // ink overlay
     if (cap.extract && cap.step !== 'flatten') {
       ctx.drawImage(cap.extract.overlay, cap.extract.crop.x, cap.extract.crop.y);
-      // traced vectors
       ctx.lineWidth = 1.6 / v.scale;
       ctx.strokeStyle = '#d8ff3d';
       for (const p of cap.extract.paths) {
@@ -482,9 +559,17 @@
         ctx.stroke();
       }
     }
+
+    // block-out strokes
+    if (cap.blocks.length && cap.step !== 'flatten') {
+      ctx.fillStyle = 'rgba(59,130,246,0.4)';
+      for (const b of cap.blocks) {
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
     ctx.restore();
 
-    // lasso (drawn in screen space for crisp dashes)
+    // lasso overlays in screen space
     const lassoPts = cap.lassoLive || (cap.lasso.length ? cap.lasso : null);
     if (lassoPts && cap.step !== 'flatten') {
       ctx.lineWidth = 2;
@@ -494,26 +579,63 @@
         i ? ctx.lineTo(sp.x, sp.y) : ctx.moveTo(sp.x, sp.y);
       });
       if (!cap.lassoLive) ctx.closePath();
-      ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
       ctx.stroke();
       ctx.setLineDash([6, 5]);
-      ctx.strokeStyle = '#ffffff';
+      ctx.strokeStyle = '#fff';
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+
+    // polygon-in-progress
+    if (cap.polyPts && cap.polyPts.length) {
+      const pts = cap.polyPts.map(toScreen);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      if (cap.polyCursor) {
+        const c = toScreen(cap.polyCursor);
+        ctx.lineTo(c.x, c.y);
+      }
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+      ctx.stroke();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      pts.forEach((p, i) => {
+        ctx.beginPath();
+        ctx.rect(p.x - 3.5, p.y - 3.5, 7, 7);
+        ctx.fillStyle = i === 0 ? '#000' : '#fff';
+        ctx.fill();
+        ctx.strokeStyle = i === 0 ? '#fff' : '#000';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+    }
+
+    // block brush cursor
+    if (cap.blockArmed && cap.polyCursor) {
+      const c = toScreen(cap.polyCursor);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, cap.blockR * v.scale, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(59,130,246,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
     }
 
     // perspective quad
     if (cap.step === 'flatten' && cap.quad) {
       const q = cap.quad.map(toScreen);
-      ctx.fillStyle = 'rgba(8,8,10,0.55)';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
       ctx.beginPath();
       ctx.rect(0, 0, stage.clientWidth, stage.clientHeight);
       ctx.moveTo(q[0].x, q[0].y);
       for (let i = 3; i >= 0; i--) ctx.lineTo(q[i].x, q[i].y);
       ctx.closePath();
       ctx.fill('evenodd');
-      ctx.strokeStyle = '#ff5c1f';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
       ctx.beginPath();
       q.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
       ctx.closePath();
@@ -521,10 +643,10 @@
       for (const p of q) {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-        ctx.fillStyle = '#0b0b0d';
+        ctx.fillStyle = '#fff';
         ctx.fill();
-        ctx.strokeStyle = '#ff5c1f';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
         ctx.stroke();
       }
     }
@@ -560,33 +682,67 @@
       dragging = { kind: 'pan', sx: sp.x, sy: sp.y, tx: cap.view.tx, ty: cap.view.ty };
       return;
     }
-    if (ev.button === 0 && cap.step !== 'flatten') {
-      cap.lassoLive = [ip];
-      dragging = { kind: 'lasso' };
+    if (ev.button !== 0 || cap.step === 'flatten') return;
+
+    if (cap.blockArmed) {
+      cap.blocks.push({ x: ip.x, y: ip.y, r: cap.blockR });
+      dragging = { kind: 'block', last: ip };
       requestDraw();
+      return;
     }
+    if (cap.tool === 'poly') {
+      if (!cap.polyPts) {
+        cap.polyPts = [ip];
+      } else {
+        const startScreen = toScreen(cap.polyPts[0]);
+        if (cap.polyPts.length >= 3 && Math.hypot(startScreen.x - sp.x, startScreen.y - sp.y) < 12) {
+          closePoly();
+          return;
+        }
+        cap.polyPts.push(ip);
+      }
+      cap.polyCursor = ip;
+      requestDraw();
+      return;
+    }
+    cap.lassoLive = [ip];
+    dragging = { kind: 'lasso' };
+    requestDraw();
   }
 
   function onPointerMove(ev) {
-    if (!dragging) return;
     const sp = stagePos(ev);
+    const ip = toImage(sp);
+    if (!dragging) {
+      if ((cap.polyPts && cap.polyPts.length) || cap.blockArmed) {
+        cap.polyCursor = ip;
+        requestDraw();
+      }
+      return;
+    }
     if (dragging.kind === 'pan') {
       cap.view.tx = dragging.tx + sp.x - dragging.sx;
       cap.view.ty = dragging.ty + sp.y - dragging.sy;
     } else if (dragging.kind === 'handle') {
-      cap.quad[dragging.idx] = toImage(sp);
+      cap.quad[dragging.idx] = ip;
     } else if (dragging.kind === 'lasso') {
-      const ip = toImage(sp);
       const last = cap.lassoLive[cap.lassoLive.length - 1];
       if (V.dist(ip, last) > 2 / cap.view.scale) cap.lassoLive.push(ip);
+    } else if (dragging.kind === 'block') {
+      if (V.dist(ip, dragging.last) > cap.blockR / 2) {
+        cap.blocks.push({ x: ip.x, y: ip.y, r: cap.blockR });
+        dragging.last = ip;
+      }
+      cap.polyCursor = ip;
     }
     requestDraw();
   }
 
   function onPointerUp(ev) {
     if (dragging && dragging.kind === 'lasso') closeLasso();
+    if (dragging && dragging.kind === 'block' && cap.lasso.length) runExtraction(false);
     dragging = null;
-    try { stage.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+    try { stage.releasePointerCapture(ev.pointerId); } catch (e) { /* released */ }
   }
 
   function onWheel(ev) {
@@ -613,7 +769,7 @@
     syncInkMode('color');
     updateSeedChips();
     if (cap.lasso.length) runExtraction(false);
-    ST.toast(`Paint sampled (${cap.ink.seeds.length} color${cap.ink.seeds.length > 1 ? 's' : ''}). Click more spots to widen.`);
+    ST.toast(`Paint sampled (${cap.ink.seeds.length}). Click more spots to widen the range.`);
   }
 
   function updateSeedChips() {
@@ -622,7 +778,7 @@
     box.innerHTML = '';
     cap.ink.seeds.forEach((s, i) => {
       const chip = ST.el('button', {
-        class: 'seed-chip', title: 'remove',
+        class: 'seed-chip', title: 'Remove this color',
         style: `background: rgb(${s.r | 0},${s.g | 0},${s.b | 0})`,
         onclick: () => {
           cap.ink.seeds.splice(i, 1);
@@ -643,6 +799,27 @@
     $('#colorControls').style.display = mode === 'color' ? '' : 'none';
   }
 
+  function setTool(tool) {
+    cap.tool = tool;
+    if (tool !== 'poly') cancelPoly();
+    cap.eyedrop = false;
+    $('#eyedropBtn') && $('#eyedropBtn').classList.remove('on');
+    for (const [id, t] of [['#toolLasso', 'lasso'], ['#toolPoly', 'poly'], ['#toolHand', 'hand']]) {
+      const el = $(id);
+      if (el) el.classList.toggle('on', tool === t);
+    }
+  }
+  cap.setTool = setTool;
+
+  function setBlockArmed(on) {
+    cap.blockArmed = on;
+    $('#blockToggle').classList.toggle('on', on);
+    setHint(on
+      ? 'Paint over the intruding letter. The stroke underneath gets bridged back through.'
+      : '');
+    requestDraw();
+  }
+
   // ---------- init ----------
   cap.init = function () {
     wrap = $('.stage-wrap');
@@ -658,17 +835,28 @@
     stage.addEventListener('pointermove', onPointerMove);
     stage.addEventListener('pointerup', onPointerUp);
     stage.addEventListener('pointercancel', onPointerUp);
+    stage.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      if (cap.tool === 'poly' && cap.polyPts) closePoly();
+    });
     stage.addEventListener('wheel', onWheel, { passive: false });
     stage.addEventListener('contextmenu', (e) => e.preventDefault());
 
     g.addEventListener('keydown', (e) => {
-      if (e.code === 'Space' && !e.repeat && e.target.tagName !== 'INPUT' && !e.target.isContentEditable) {
-        spaceHeld = true; e.preventDefault();
+      const typing = e.target.tagName === 'INPUT' || e.target.isContentEditable;
+      if (e.code === 'Space' && !e.repeat && !typing) { spaceHeld = true; e.preventDefault(); }
+      if (e.key === 'Escape') {
+        if (cap.polyPts) cancelPoly();
+        else if (cap.lassoLive) { cap.lassoLive = null; requestDraw(); }
+        else if (cap.blockArmed) setBlockArmed(false);
+      }
+      if (e.key === 'Enter' && cap.tool === 'poly' && cap.polyPts && !typing) {
+        e.preventDefault();
+        closePoly();
       }
     });
     g.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceHeld = false; });
 
-    // drag & drop / file input
     for (const ev of ['dragover', 'drop']) {
       wrap.addEventListener(ev, (e) => {
         e.preventDefault();
@@ -682,57 +870,49 @@
     $('#uploadBtn').addEventListener('click', () => $('#fileInput').click());
     $('#demoBtn').addEventListener('click', () => cap.loadDemo());
 
-    // flatten
     $('#flattenApply').addEventListener('click', cap.applyFlatten);
     $('#flattenSkip').addEventListener('click', cap.skipFlatten);
     $('#flattenReset').addEventListener('click', cap.resetFlatten);
 
-    // lasso
     $('#lassoReset').addEventListener('click', cap.clearLasso);
 
-    // tools
     $('#toolFit').addEventListener('click', fitView);
-    $('#toolHand').addEventListener('click', () => {
-      cap.tool = cap.tool === 'hand' ? 'lasso' : 'hand';
-      $('#toolHand').classList.toggle('on', cap.tool === 'hand');
-      $('#toolLasso').classList.toggle('on', cap.tool === 'lasso');
-    });
-    $('#toolLasso').addEventListener('click', () => {
-      cap.tool = 'lasso';
-      cap.eyedrop = false;
-      $('#eyedropBtn').classList.remove('on');
-      $('#toolHand').classList.remove('on');
-      $('#toolLasso').classList.add('on');
-    });
+    $('#toolHand').addEventListener('click', () => setTool(cap.tool === 'hand' ? 'lasso' : 'hand'));
+    $('#toolLasso').addEventListener('click', () => setTool('lasso'));
+    $('#toolPoly').addEventListener('click', () => setTool('poly'));
 
-    // ink controls
     $('#inkModeAuto').addEventListener('click', () => { syncInkMode('luma'); if (cap.lasso.length) runExtraction(false); });
     $('#inkModeColor').addEventListener('click', () => syncInkMode('color'));
     $('#eyedropBtn').addEventListener('click', () => {
       cap.eyedrop = !cap.eyedrop;
       $('#eyedropBtn').classList.toggle('on', cap.eyedrop);
-      setHint(cap.eyedrop ? 'Click the sprayed paint in the photo. Click several spots for fades.' : '');
+      setHint(cap.eyedrop ? 'Click the sprayed paint in the photo. Several clicks widen the match.' : '');
     });
+
     const rerun = ST.debounce(() => { if (cap.lasso.length) runExtraction(false); }, 140);
-    const bindRange = (id, key, parse) => {
+    const bindRange = (id, key) => {
       const el = $(id);
-      el.addEventListener('input', () => {
-        cap.ink[key] = parse ? parse(el.value) : +el.value;
-        rerun();
-      });
+      if (!el) return;
+      el.addEventListener('input', () => { cap.ink[key] = +el.value; rerun(); });
     };
     bindRange('#inkThresh', 'threshOffset');
     bindRange('#inkTol', 'tol');
     bindRange('#inkSmooth', 'smooth');
     bindRange('#inkSpeck', 'despeckle');
     bindRange('#inkDetail', 'detail');
+    bindRange('#inkFill', 'fill');
+    bindRange('#inkBridge', 'bridge');
     $('#inkInvert').addEventListener('change', (e) => {
       cap.ink.invert = e.target.checked;
       cap.ink.invertAuto = false;
       rerun();
     });
 
-    // tag + submit
+    $('#blockToggle').addEventListener('click', () => setBlockArmed(!cap.blockArmed));
+    $('#blockSize').addEventListener('input', (e) => { cap.blockR = +e.target.value; requestDraw(); });
+    $('#blockClear').addEventListener('click', cap.clearBlocks);
+
+    $('#guessBtn').addEventListener('click', cap.useGuess);
     $('#charInput').addEventListener('input', updatePreview);
     $('#charInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); cap.submit(); }
@@ -740,6 +920,7 @@
     $('#submitBtn').addEventListener('click', cap.submit);
 
     syncInkMode('luma');
+    setTool('lasso');
     setStep('wall');
     updatePreview();
     requestDraw();

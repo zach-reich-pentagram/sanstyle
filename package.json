@@ -11,5 +11,8 @@
   },
   "devDependencies": {
     "playwright-core": "^1.62.1"
+  },
+  "dependencies": {
+    "libheif-js": "^1.19.8"
   }
 }

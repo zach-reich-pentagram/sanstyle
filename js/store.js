@@ -22,8 +22,17 @@
         fontName: 'Sanstyle',
         mirrorCase: true,
         glyphs: {}, // char → { variants: [record], active: 0 }
+        tester: null,
+        design: null,
       };
       this._save = ST.debounce(() => this.persist(), 500);
+    }
+
+    defaultTester() {
+      return {
+        bg: '#ffffff', fg: '#000000', align: 'left', aspect: 'free',
+        cycle: true, size: 112, tracking: 0.02, leading: 1.05,
+      };
     }
 
     load() {
@@ -34,8 +43,26 @@
           if (data && data.glyphs) this.state = Object.assign(this.state, data);
         }
       } catch (e) {
-        console.warn('SANSTYLE: could not load library', e);
+        console.warn('Sanstyle: could not load library', e);
       }
+      this.state.tester = Object.assign(this.defaultTester(), this.state.tester || {});
+      this.state.design = this.state.design || {};
+    }
+
+    // Visual preferences persist but don't trigger a font recompile.
+    updateTester(patch) {
+      Object.assign(this.state.tester, patch);
+      this._save();
+      this.emit('tester');
+    }
+
+    updateDesign(patch) {
+      Object.assign(this.state.design, patch);
+      for (const k in this.state.design) {
+        if (this.state.design[k] === null) delete this.state.design[k];
+      }
+      this._save();
+      this.emit('design');
     }
 
     persist() {
