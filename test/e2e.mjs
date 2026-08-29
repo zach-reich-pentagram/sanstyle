@@ -32,7 +32,7 @@ const check = (cond, msg) => {
   else { failures++; console.error(`  ✗ FAIL: ${msg}`); }
 };
 
-const server = createServer((req, res) => {
+function serveStatic(req, res) {
   const url = new URL(req.url, 'http://x');
   let p = path.join(ROOT, decodeURIComponent(url.pathname));
   if (url.pathname === '/') p = path.join(ROOT, 'index.html');
@@ -43,10 +43,87 @@ const server = createServer((req, res) => {
   } catch {
     res.writeHead(404); res.end('nope');
   }
-});
+}
+
+const server = createServer(serveStatic);
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const BASE = `http://127.0.0.1:${server.address().port}/`;
 console.log('serving', BASE);
+
+// ---- mock cloud: same HTTP contract as the real Drive-backed /api ----------
+const cloud = {
+  library: null,
+  svgs: new Map(),      // variantId → {name, content}
+  inbox: [],
+  photoBytes: new Map(),
+  uploads: [],
+};
+
+function readAll(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+const apiServer = createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://x');
+  const json = (code, obj) => {
+    res.writeHead(code, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(obj));
+  };
+  if (url.pathname === '/api/health') return json(200, { configured: true });
+  if (url.pathname.startsWith('/api/')) {
+    if (req.headers['x-sanstyle-pass'] !== '3754') return json(401, { error: 'bad passcode' });
+    if (url.pathname === '/api/library' && req.method === 'GET') {
+      return json(200, { library: cloud.library, svgIds: [...cloud.svgs.keys()] });
+    }
+    if (url.pathname === '/api/library' && req.method === 'PUT') {
+      const body = JSON.parse((await readAll(req)).toString('utf8'));
+      cloud.library = body.library;
+      for (const s of body.svgs || []) cloud.svgs.set(s.id, { name: s.name, content: s.content });
+      const keep = new Set();
+      for (const ch in cloud.library.glyphs) {
+        for (const v of cloud.library.glyphs[ch].variants) keep.add(v.id);
+      }
+      for (const id of [...cloud.svgs.keys()]) if (!keep.has(id)) cloud.svgs.delete(id);
+      return json(200, { ok: true, svgIds: [...cloud.svgs.keys()] });
+    }
+    if (url.pathname === '/api/inbox') return json(200, { photos: cloud.inbox });
+    if (url.pathname === '/api/photo') {
+      const b = cloud.photoBytes.get(url.searchParams.get('id'));
+      if (!b) return json(404, { error: 'nope' });
+      res.writeHead(200, { 'content-type': 'image/png' });
+      return res.end(b);
+    }
+    if (url.pathname === '/api/upload' && req.method === 'POST') {
+      const bytes = await readAll(req);
+      const id = 'up_' + String(cloud.uploads.length + 1).padStart(10, '0');
+      let name = 'photo.jpg';
+      try { name = decodeURIComponent(req.headers['x-file-name'] || name); } catch { /* default */ }
+      cloud.uploads.push({ id, name, size: bytes.length, mime: req.headers['content-type'] });
+      cloud.inbox.push({ id, name, mimeType: req.headers['content-type'], createdTime: new Date().toISOString() });
+      cloud.photoBytes.set(id, bytes);
+      return json(200, { id, name });
+    }
+    return json(404, { error: 'nope' });
+  }
+  return serveStatic(req, res);
+});
+await new Promise((r) => apiServer.listen(0, '127.0.0.1', r));
+const API_BASE = `http://127.0.0.1:${apiServer.address().port}/`;
+console.log('serving (with mock api)', API_BASE);
+
+async function pollCloud(desc, fn, timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < (timeoutMs || 15000)) {
+    if (fn()) { check(true, desc); return true; }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check(false, desc + ' (timed out)');
+  return false;
+}
 
 const browser = await chromium.launch({
   executablePath: '/opt/pw-browsers/chromium',
@@ -56,9 +133,12 @@ const page = await browser.newPage({
   viewport: { width: 1560, height: 940 },
   deviceScaleFactor: 1.5,
 });
+// Resource-status console lines (the 404 that detects local mode, the 401 of a
+// deliberately wrong passcode) are expected network noise, not JS errors.
+const isRealError = (t) => !/Failed to load resource/.test(t);
 const jsErrors = [];
 page.on('pageerror', (e) => jsErrors.push(String(e)));
-page.on('console', (m) => { if (m.type() === 'error') jsErrors.push(m.text()); });
+page.on('console', (m) => { if (m.type() === 'error' && isRealError(m.text())) jsErrors.push(m.text()); });
 
 await page.goto(BASE);
 await page.waitForFunction(() => globalThis.__st && globalThis.ST);
@@ -381,8 +461,102 @@ check(after.length >= 9, `library survived reload (${after.length} chars: ${afte
 
 check(jsErrors.length === 0, `no JS errors on the page ${jsErrors.length ? '→ ' + jsErrors.slice(0, 3).join(' | ') : ''}`);
 
+// =============================================================================
+// Cloud sync against the mock API (fresh browser context = "another device")
+// =============================================================================
+console.log('\n— cloud sync: passcode gate');
+// synthesize two inbox photos with the demo-wall generator on the old page
+for (const [ch, id, when] of [['N', 'ph_n_00000001', '2026-08-29T10:00:00Z'], ['T', 'ph_t_00000002', '2026-08-29T09:00:00Z']]) {
+  const dataUrl = await page.evaluate((c) => ST.demo.makeWall(c, 424242 + c.charCodeAt(0)).canvas.toDataURL('image/png'), ch);
+  cloud.inbox.push({ id, name: `wall-${ch.toLowerCase()}.png`, mimeType: 'image/png', createdTime: when });
+  cloud.photoBytes.set(id, Buffer.from(dataUrl.split(',')[1], 'base64'));
+}
+
+const ctx2 = await browser.newContext({ viewport: { width: 1560, height: 940 }, deviceScaleFactor: 1.5 });
+const page2 = await ctx2.newPage();
+const jsErrors2 = [];
+page2.on('pageerror', (e) => jsErrors2.push(String(e)));
+page2.on('console', (m) => { if (m.type() === 'error' && isRealError(m.text())) jsErrors2.push(m.text()); });
+
+await page2.goto(API_BASE);
+await page2.waitForSelector('#gateModal.open', { timeout: 10000 });
+check(true, 'passcode gate blocks the app when the api is configured');
+await page2.fill('#gateInput', '0000');
+await page2.click('#gateForm button[type="submit"]');
+await page2.waitForTimeout(300);
+const gateErr = await page2.evaluate(() => document.getElementById('gateError').textContent);
+check(gateErr.length > 0, `wrong passcode rejected (“${gateErr}”)`);
+await page2.fill('#gateInput', '3754');
+await page2.click('#gateForm button[type="submit"]');
+await page2.waitForFunction(() => !document.getElementById('gateModal').classList.contains('open'), { timeout: 10000 });
+check(true, 'correct passcode unlocks');
+
+console.log('\n— cloud sync: inbox extraction');
+await page2.waitForSelector('#inboxModal.open', { timeout: 10000 });
+const inboxText = await page2.evaluate(() => document.getElementById('inboxCount').textContent);
+check(inboxText.includes('2'), `inbox prompt: “${inboxText}”`);
+await page2.screenshot({ path: path.join(SHOTS, 'sync.png') });
+await page2.click('#inboxExtract');
+await page2.waitForSelector('#reviewBody', { timeout: 20000 });
+for (let i = 0; i < 8; i++) {
+  const open = await page2.evaluate(() =>
+    document.getElementById('reviewModal').classList.contains('open') && ST.batch.queue.length > 0);
+  if (!open) break;
+  const ch = await page2.evaluate(() => {
+    const item = ST.batch.queue[ST.batch.idx];
+    return /wall-n/.test(item.sourceName) ? 'N' : 'T';
+  });
+  await page2.fill('#reviewChar', ch);
+  await page2.click('#reviewAccept');
+  await page2.waitForTimeout(200);
+}
+const acceptedChars = await page2.evaluate(() => __st.state().chars);
+check(acceptedChars.includes('N') && acceptedChars.includes('T'), `Drive photos became glyphs (${acceptedChars.join(' ')})`);
+
+await pollCloud('library.json pushed to Drive with N and T', () =>
+  cloud.library && cloud.library.glyphs && cloud.library.glyphs.N && cloud.library.glyphs.T);
+await pollCloud('SVG mirrors written for every variant', () => cloud.svgs.size >= 2);
+await pollCloud('both inbox photos marked processed', () =>
+  cloud.library && ['ph_n_00000001', 'ph_t_00000002'].every((id) => (cloud.library.processedPhotos || []).includes(id)));
+const oneSvg = [...cloud.svgs.values()][0];
+check(oneSvg && oneSvg.content.startsWith('<svg') && oneSvg.content.includes('data-char'),
+  `mirrored SVGs are standalone letterforms (${oneSvg && oneSvg.name})`);
+check(!JSON.stringify(cloud.library).includes('data:image'), 'thumbs stay local (not pushed to Drive)');
+
+console.log('\n— cloud sync: restore on a wiped device');
+await page2.evaluate(() => localStorage.removeItem('sanstyle.library.v1'));
+await page2.reload();
+await page2.waitForFunction(() =>
+  globalThis.__st &&
+  !document.getElementById('gateModal').classList.contains('open') &&
+  __st.state().chars.length >= 2, { timeout: 15000 });
+const restored = await page2.evaluate(() => __st.state().chars);
+check(restored.includes('N') && restored.includes('T'), `library restored from Drive (${restored.join(' ')})`);
+await page2.waitForTimeout(1600);
+const reprompt = await page2.evaluate(() => document.getElementById('inboxModal').classList.contains('open'));
+check(!reprompt, 'processed photos are not offered again');
+
+console.log('\n— cloud sync: site upload → Drive inbox');
+await page2.setInputFiles('#autoInput', path.join(ROOT, 'test', 'fixtures', 'letter-L.heic'));
+await pollCloud('uploaded photo stored in the Drive inbox', () => cloud.uploads.length === 1, 30000);
+check(cloud.uploads[0] && cloud.uploads[0].name.endsWith('.jpg') && cloud.uploads[0].size > 1500,
+  `upload is a re-encoded jpeg (${cloud.uploads[0] && cloud.uploads[0].size} bytes)`);
+await page2.waitForSelector('#reviewBody', { timeout: 20000 });
+await page2.fill('#reviewChar', 'L');
+await page2.click('#reviewAccept');
+await pollCloud('uploaded letterform synced (L in Drive library)', () =>
+  cloud.library && cloud.library.glyphs && cloud.library.glyphs.L);
+await pollCloud('uploaded photo marked processed', () =>
+  cloud.library && (cloud.library.processedPhotos || []).some((id) => id.startsWith('up_')));
+
+const pillText = await page2.evaluate(() => document.getElementById('syncPill').textContent);
+check(pillText === 'Synced', `sync pill reads “${pillText}”`);
+check(jsErrors2.length === 0, `no JS errors in the sync session ${jsErrors2.length ? '→ ' + jsErrors2.slice(0, 3).join(' | ') : ''}`);
+await ctx2.close();
+
 await browser.close();
 server.close();
+apiServer.close();
 
 console.log(failures === 0 ? '\nE2E: ALL CHECKS PASSED' : `\nE2E: ${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

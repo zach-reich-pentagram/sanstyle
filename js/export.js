@@ -136,6 +136,53 @@
     return cnv;
   };
 
+  // ---------- single-letterform SVG (the Drive mirror) ----------
+  const MARK_NAMES = {
+    '.': 'period', ',': 'comma', ':': 'colon', ';': 'semicolon', '!': 'exclaim',
+    '?': 'question', "'": 'apostrophe', '"': 'quote', '-': 'hyphen',
+    '_': 'underscore', '#': 'hash', '@': 'at', '&': 'ampersand', '$': 'dollar',
+    '%': 'percent', '(': 'paren-open', ')': 'paren-close', '[': 'bracket-open',
+    ']': 'bracket-close', '*': 'asterisk', '+': 'plus', '=': 'equals',
+    '/': 'slash', '\\': 'backslash', '<': 'less', '>': 'greater',
+    '`': 'backtick', '{': 'brace-open', '}': 'brace-close', '|': 'pipe',
+    '~': 'tilde', '^': 'caret',
+  };
+
+  ex.charLabel = function (ch) {
+    if (/^[A-Z]$/.test(ch)) return ch + '-caps';
+    if (/^[a-z]$/.test(ch)) return ch + '-lower';
+    if (/^[0-9]$/.test(ch)) return ch;
+    if (MARK_NAMES[ch]) return MARK_NAMES[ch];
+    return 'u' + ch.codePointAt(0).toString(16);
+  };
+
+  ex.svgFileName = function (record) {
+    return `${ex.charLabel(record.char)}__${record.id}.svg`;
+  };
+
+  /** One letterform as a standalone SVG, em-box viewBox (asc 760 → desc −240). */
+  ex.variantSVG = function (record) {
+    const fin = ST.metrics.finalizeVariant(record);
+    const n2 = (v) => Math.round(v * 100) / 100;
+    const yTop = 760;
+    let d = '';
+    for (const c of fin.contours) {
+      const cs = c.cubics;
+      d += `M${n2(cs[0][0].x + fin.lsb)} ${n2(yTop - cs[0][0].y)}`;
+      for (const cu of cs) {
+        d += `C${n2(cu[1].x + fin.lsb)} ${n2(yTop - cu[1].y)} ` +
+          `${n2(cu[2].x + fin.lsb)} ${n2(yTop - cu[2].y)} ` +
+          `${n2(cu[3].x + fin.lsb)} ${n2(yTop - cu[3].y)}`;
+      }
+      d += 'Z';
+    }
+    const esc = record.char === '<' ? '&lt;' : record.char === '&' ? '&amp;' : record.char;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${Math.max(1, fin.advance)} 1000" ` +
+      `data-char="${esc}" data-advance="${fin.advance}" data-lsb="${fin.lsb}">` +
+      `<title>${esc}</title>` +
+      `<path fill="#000" fill-rule="nonzero" d="${d}"/></svg>`;
+  };
+
   ex.download = function (blob, filename) {
     const a = ST.el('a', { href: URL.createObjectURL(blob), download: filename });
     g.document.body.appendChild(a);

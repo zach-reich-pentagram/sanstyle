@@ -24,6 +24,7 @@
         glyphs: {}, // char → { variants: [record], active: 0 }
         tester: null,
         design: null,
+        processedPhotos: [], // Drive inbox file ids already reviewed
       };
       this._save = ST.debounce(() => this.persist(), 500);
     }
@@ -47,6 +48,13 @@
       }
       this.state.tester = Object.assign(this.defaultTester(), this.state.tester || {});
       this.state.design = this.state.design || {};
+      this.state.processedPhotos = this.state.processedPhotos || [];
+    }
+
+    markPhotoProcessed(id) {
+      if (!id || this.state.processedPhotos.includes(id)) return;
+      this.state.processedPhotos.push(id);
+      this.touch();
     }
 
     // Visual preferences persist but don't trigger a font recompile.
@@ -145,24 +153,34 @@
     }
 
     exportJSON() {
-      return JSON.stringify({
+      return JSON.stringify(this.exportObject(), null, 1);
+    }
+
+    exportObject() {
+      return {
         app: 'sanstyle',
         version: 1,
         exported: new Date().toISOString(),
         fontName: this.state.fontName,
         mirrorCase: this.state.mirrorCase,
         glyphs: this.state.glyphs,
-      }, null, 1);
+        processedPhotos: this.state.processedPhotos,
+        tester: this.state.tester,
+        design: this.state.design,
+      };
     }
 
-    importJSON(text, merge) {
-      const data = JSON.parse(text);
-      if (!data || data.app !== 'sanstyle' || !data.glyphs) {
-        throw new Error('Not a SANSTYLE library file');
-      }
+    /**
+     * Merge another library into this one. Variants union by id; the incoming
+     * side's preferences (font name, tester, design, active picks) win when
+     * present — with one user syncing across devices, "latest pull/push wins"
+     * is the intended behavior.
+     */
+    mergeLibrary(data, opts) {
+      const o = opts || {};
       let added = 0;
-      if (!merge) this.state.glyphs = {};
-      for (const ch in data.glyphs) {
+      if (o.replace) this.state.glyphs = {};
+      for (const ch in data.glyphs || {}) {
         const incoming = data.glyphs[ch];
         if (!incoming || !Array.isArray(incoming.variants)) continue;
         if (!this.state.glyphs[ch]) this.state.glyphs[ch] = { variants: [], active: 0 };
@@ -171,11 +189,32 @@
         for (const v of incoming.variants) {
           if (v && v.contours && !have.has(v.id)) { slot.variants.push(v); added++; }
         }
-        slot.active = ST.clamp(slot.active, 0, slot.variants.length - 1);
+        if (o.preferIncoming && typeof incoming.active === 'number') {
+          slot.active = incoming.active;
+        }
+        slot.active = ST.clamp(slot.active || 0, 0, slot.variants.length - 1);
       }
-      if (data.fontName && !merge) this.state.fontName = data.fontName;
+      if (data.fontName && (o.preferIncoming || o.replace || this.state.fontName === 'Sanstyle')) {
+        this.state.fontName = data.fontName;
+      }
+      if (o.preferIncoming && typeof data.mirrorCase === 'boolean') this.state.mirrorCase = data.mirrorCase;
+      if (o.preferIncoming && data.tester) {
+        this.state.tester = Object.assign(this.defaultTester(), data.tester);
+      }
+      if (o.preferIncoming && data.design) this.state.design = data.design;
+      for (const id of data.processedPhotos || []) {
+        if (!this.state.processedPhotos.includes(id)) this.state.processedPhotos.push(id);
+      }
       this.touch();
       return added;
+    }
+
+    importJSON(text, merge) {
+      const data = JSON.parse(text);
+      if (!data || data.app !== 'sanstyle' || !data.glyphs) {
+        throw new Error('Not a Sanstyle library file');
+      }
+      return this.mergeLibrary(data, { replace: !merge });
     }
 
     clearAll() {

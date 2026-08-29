@@ -60,6 +60,7 @@
     ST.fontlive.init();
     ST.batch.init();
     initDesign();
+    ST.sync.init();
 
     ST.$$('.tab-btn').forEach((b) => {
       b.addEventListener('click', () => switchTab(b.dataset.tab));

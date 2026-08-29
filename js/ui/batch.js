@@ -29,12 +29,22 @@
     show();
     $('#reviewBody').style.display = 'none';
     $('#reviewSpinner').style.display = '';
-    let found = 0;
+    let found = 0, stored = 0;
+    const storeInDrive = ST.sync && ST.sync.storeUploadsEnabled();
     for (let i = 0; i < list.length; i++) {
       setProgress(`Analyzing photo ${i + 1} of ${list.length}…`);
       try {
         const canvas = await fileToCanvas(list[i]);
-        found += batch.addCanvas(canvas, list[i].name);
+        let sourceId = null;
+        if (storeInDrive) {
+          try {
+            sourceId = await ST.sync.uploadCanvas(canvas, list[i].name);
+            if (sourceId) { stored++; ST.sync.markProcessed(sourceId); }
+          } catch (e) {
+            console.warn('drive upload failed', e);
+          }
+        }
+        found += batch.addCanvas(canvas, list[i].name, sourceId);
       } catch (e) {
         console.warn('auto: skipped', list[i].name, e);
       }
@@ -42,6 +52,7 @@
     }
     batch.processing = false;
     $('#reviewSpinner').style.display = 'none';
+    if (stored) ST.toast(`${stored} photo${stored === 1 ? '' : 's'} stored in the Drive inbox.`);
     if (!batch.queue.length) {
       hide();
       ST.toast('No letterforms detected — try the manual capture flow.', 'warn');
@@ -52,14 +63,57 @@
     renderCurrent();
   };
 
+  // Photos already sitting in the Drive inbox.
+  batch.addRemotePhotos = async function (photos) {
+    batch.processing = true;
+    show();
+    $('#reviewBody').style.display = 'none';
+    $('#reviewSpinner').style.display = '';
+    let found = 0, empty = 0;
+    for (let i = 0; i < photos.length; i++) {
+      setProgress(`Fetching photo ${i + 1} of ${photos.length} from Drive…`);
+      try {
+        const canvas = await ST.sync.fetchPhotoCanvas(photos[i]);
+        const n = batch.addCanvas(canvas, photos[i].name, photos[i].id);
+        found += n;
+        if (!n) { empty++; ST.sync.markProcessed(photos[i].id); }
+      } catch (e) {
+        console.warn('inbox photo failed', photos[i].name, e);
+      }
+    }
+    batch.processing = false;
+    $('#reviewSpinner').style.display = 'none';
+    if (!batch.queue.length) {
+      hide();
+      ST.toast(empty
+        ? `No letterforms detected in ${empty} photo${empty === 1 ? '' : 's'} — marked as reviewed.`
+        : 'Nothing to review.', 'warn');
+      return;
+    }
+    ST.toast(`${found} letterform${found === 1 ? '' : 's'} found. Review each one.`);
+    batch.idx = Math.min(batch.idx, batch.queue.length - 1);
+    renderCurrent();
+  };
+
   // Also callable directly with a canvas (tests, demo walls).
-  batch.addCanvas = function (canvas, name) {
+  batch.addCanvas = function (canvas, name, sourceId) {
     const result = ST.auto.processImage(canvas, {});
     for (const cand of result.candidates) {
-      batch.queue.push({ sourceName: name || 'photo', canvas: result.canvas, angle: result.angle, cand });
+      batch.queue.push({
+        sourceName: name || 'photo', sourceId: sourceId || null,
+        canvas: result.canvas, angle: result.angle, cand,
+      });
     }
     return result.candidates.length;
   };
+
+  // Once every candidate from a Drive photo is resolved, remember it.
+  function resolveSource(item) {
+    if (!item || !item.sourceId) return;
+    if (!batch.queue.some((q) => q.sourceId === item.sourceId)) {
+      if (ST.sync) ST.sync.markProcessed(item.sourceId);
+    }
+  }
 
   function fileToCanvas(file) {
     return new Promise((resolve, reject) => {
@@ -139,7 +193,8 @@
   }
 
   function removeCurrent() {
-    batch.queue.splice(batch.idx, 1);
+    const [item] = batch.queue.splice(batch.idx, 1);
+    resolveSource(item);
     if (batch.idx >= batch.queue.length) batch.idx = batch.queue.length - 1;
     if (!batch.queue.length) {
       hide();
@@ -179,6 +234,7 @@
     $('#charInput').value = item.cand.guess || '';
     ST.capture.updatePreview();
     batch.queue.splice(batch.idx, 1);
+    resolveSource(item);
     if (batch.idx >= batch.queue.length) batch.idx = Math.max(0, batch.queue.length - 1);
     hide();
     if (g.__st && g.__st.switchTab) g.__st.switchTab('capture');

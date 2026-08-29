@@ -113,7 +113,16 @@
   }
 
   cap.loadFile = function (file) {
-    const finish = (bmp, w, h) => useBitmap(bmp, w, h);
+    const finish = (bmp, w, h) => {
+      useBitmap(bmp, w, h);
+      if (ST.sync && ST.sync.storeUploadsEnabled()) {
+        ST.sync.uploadCanvas(cap.img, file.name)
+          .then((id) => {
+            if (id) { ST.sync.markProcessed(id); ST.toast('Photo stored in the Drive inbox.'); }
+          })
+          .catch(() => ST.toast('Could not store the photo in Drive.', 'warn'));
+      }
+    };
     if (ST.heic && ST.heic.looksHeic(file)) {
       // Safari can decode natively; everyone else gets the vendored decoder.
       const native = g.createImageBitmap ? g.createImageBitmap(file, { imageOrientation: 'from-image' }) : Promise.reject();

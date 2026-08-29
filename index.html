@@ -18,6 +18,7 @@
     <button class="seg-btn tab-btn" data-tab="design">Design</button>
   </nav>
   <button class="pill sm" id="queuePill" style="display:none">Review queue</button>
+  <button class="pill sm" id="syncPill" style="display:none">Synced</button>
 </header>
 
 <main>
@@ -38,6 +39,10 @@
         <div class="btn-row">
           <button class="pill sm" id="autoBtn">Auto capture (batch ok)</button>
         </div>
+        <label class="check-row" id="driveStoreRow" style="display:none">
+          <input type="checkbox" id="driveStoreToggle" checked>
+          <span>Store uploads in the Drive inbox</span>
+        </label>
         <p>Auto capture straightens the photo, finds the letterforms, and asks you to confirm each one. iPhone HEIC photos work.</p>
       </div>
     </div>
@@ -324,6 +329,28 @@
 
 </main>
 
+<!-- ============================== PASSCODE GATE ============================== -->
+<div class="gate" id="gateModal">
+  <form class="gate-panel" id="gateForm">
+    <label for="gateInput">Passcode:</label>
+    <input id="gateInput" type="password" inputmode="numeric" autocomplete="off" class="text-input" aria-label="Passcode">
+    <button type="submit" class="pill primary">Unlock</button>
+    <div class="gate-error" id="gateError"></div>
+  </form>
+</div>
+
+<!-- ============================== INBOX PROMPT ============================== -->
+<div class="modal" id="inboxModal">
+  <div class="modal-panel narrow">
+    <p id="inboxCount"></p>
+    <div class="review-actions">
+      <button class="pill primary" id="inboxExtract">Extract letterforms now</button>
+      <button class="pill" id="inboxLater">Later</button>
+      <button class="pill sm" id="inboxRescan">Re-scan all photos</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============================== REVIEW MODAL ============================== -->
 <div class="modal" id="reviewModal">
   <div class="modal-panel">
@@ -371,6 +398,7 @@
 <script src="js/ui/glyphs.js"></script>
 <script src="js/ui/tester.js"></script>
 <script src="js/ui/batch.js"></script>
+<script src="js/sync.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

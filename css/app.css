@@ -541,6 +541,31 @@ main { flex: 1; display: flex; min-height: 0; }
 .review-actions { display: flex; gap: var(--gap); align-items: center; flex-wrap: wrap; }
 #reviewChar { width: 64px; }
 
+/* ---------- passcode gate ---------- */
+.gate {
+  position: fixed;
+  inset: 0;
+  background: var(--paper);
+  display: none;
+  place-items: center;
+  z-index: 300;
+}
+.gate.open { display: grid; }
+.gate-panel {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  border: var(--bw) solid var(--ink);
+  border-radius: var(--pill-r);
+  padding: calc(var(--pad) * 0.75) var(--pad);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.gate-panel .text-input { width: 120px; text-align: center; letter-spacing: 0.35em; }
+.gate-error { width: 100%; text-align: center; color: var(--danger); min-height: 1.3em; }
+.modal-panel.narrow { width: 460px; }
+#syncPill.warn { color: var(--danger); border-color: var(--danger); }
+
 /* ---------- misc ---------- */
 .dim { color: var(--dim); }
 #toast {

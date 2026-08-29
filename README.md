@@ -92,6 +92,23 @@ into the page via the FontFace API in a few milliseconds.
 - **Exports**: the specimen as **SVG** (true vector paths), **PNG**, or
   **JPG** — plus the installable **TTF** itself.
 
+## Cloud sync (Google Drive + Vercel)
+
+With the one-time setup in [SETUP-SYNC.md](SETUP-SYNC.md), the deployed site
+becomes a passcode-gated, cross-device studio backed by two Drive folders:
+
+- an **inbox folder** — share photos into it from your phone's Drive app (or
+  upload through the site) and the site offers to extract letterforms from
+  whatever is new since your last visit;
+- a **letterforms folder** — `library.json` (the full library: variants,
+  fits, nudges, settings) plus an auto-maintained **SVG mirror** of every
+  letterform, ready to open in Illustrator.
+
+The browser only ever talks to the site's own `/api` routes (Vercel
+serverless, in `api/`), which hold the Drive credentials server-side and
+check the passcode on every request. Without the env vars, the site runs
+local-only exactly as before.
+
 ## Glyphs, sharing, design
 
 The **Glyphs** tab holds the full character grid: per-slot variants,
@@ -104,6 +121,9 @@ weight, canvas padding — persisted per browser.
 ## Under the hood
 
 ```
+api/
+  _lib.js        service-account JWT + Drive REST helpers (no SDK)
+  health/library/inbox/photo/upload — the sync endpoints
 js/
   geometry.js    vectors, RDP, point-in-poly, homography, Bézier math
   fitcurves.js   Schneider least-squares cubic fitting
@@ -115,8 +135,9 @@ js/
   classify.js    template character classifier (local, human-confirmed)
   auto.js        deskew + letter detection for the automated lane
   heic.js        HEIC/HEIF intake (vendored libheif, lazy-loaded)
-  export.js      specimen layout → SVG / PNG / JPG
+  export.js      specimen layout → SVG / PNG / JPG, per-letterform SVGs
   store.js       library model, persistence, import/export
+  sync.js        passcode gate, Drive pull/merge/push, inbox prompts
   demo.js        procedural demo walls (seeded)
   ui/            capture stage, glyph grid, tester, review queue
 ```
@@ -127,12 +148,16 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 23 unit tests: geometry, tracing, fitting, morphology,
-                # deskew, classifier scoring, TTF byte format
+npm test        # 30 unit tests: geometry, tracing, fitting, morphology,
+                # deskew, classifier scoring, TTF byte format, and the api
+                # routes (JWT signing verified against a real keypair,
+                # Drive calls stubbed)
 npm run e2e     # headless Chromium: freehand + polygon lasso, flatten,
                 # pick-paint, fill-gaps, HEIC intake, auto capture + review,
-                # variant cycling, kerning, exports, TTF download —
-                # validated by an independent parser AND fontTools
+                # variant cycling, kerning, exports, TTF download — plus the
+                # full sync flow (gate, inbox extraction, SVG mirroring,
+                # wiped-device restore, site→Drive upload) against an
+                # in-memory mock of the api contract
 ```
 
 ## Roadmap
