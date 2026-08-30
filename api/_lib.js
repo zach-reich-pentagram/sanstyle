@@ -37,6 +37,14 @@ function send(res, code, data, headers) {
 
 async function readBody(req, limit) {
   const max = limit || 6 * 1024 * 1024;
+  // Vercel's Node runtime may have already consumed the stream and exposed
+  // the result as req.body (Buffer, string, or parsed JSON). Prefer that;
+  // fall back to reading the stream (plain node:http, local dev, tests).
+  if (req.body !== undefined && req.body !== null) {
+    if (Buffer.isBuffer(req.body)) return req.body;
+    if (typeof req.body === 'string') return Buffer.from(req.body);
+    if (typeof req.body === 'object') return Buffer.from(JSON.stringify(req.body));
+  }
   const chunks = [];
   let total = 0;
   for await (const chunk of req) {

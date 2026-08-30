@@ -24,4 +24,3 @@ module.exports = async function handler(req, res) {
     return L.send(res, 500, { error: String(e.message || e) });
   }
 };
-module.exports.config = { api: { bodyParser: false } };
