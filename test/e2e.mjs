@@ -285,27 +285,40 @@ const heicRes = await page.evaluate(() => {
 });
 check(heicRes.paths >= 1 && heicRes.ok, `HEIC decoded, L traced (${heicRes.ink}px ink) and submitted`);
 
-// ---- auto flow: detect → guess → review → accept ---------------------------------
-console.log('\n— auto capture + review queue');
+// ---- auto flow: photo-first, letter-first review ---------------------------------
+console.log('\n— auto capture + letter-first review');
 const autoRes = await page.evaluate(() => __st.autoFromDemo('T'));
 check(autoRes.candidates >= 1, `auto pipeline found ${autoRes.candidates} candidate(s) on a demo wall`);
 await page.evaluate(() => ST.batch.reopen());
-await page.waitForTimeout(200);
-const modalOpen = await page.evaluate(() => document.getElementById('reviewModal').classList.contains('open'));
-check(modalOpen, 'review modal opened');
-const guessInfo = await page.evaluate(() => ({
-  guess: document.getElementById('reviewChar').value,
+await page.waitForTimeout(250);
+const askState = await page.evaluate(() => ({
+  open: document.getElementById('reviewModal').classList.contains('open'),
+  askVisible: document.getElementById('reviewAsk').style.display !== 'none',
+  hint: document.getElementById('reviewHint').textContent,
+}));
+check(askState.open && askState.askVisible, 'review opens on the letter-first ask phase');
+check(/shape/.test(askState.hint), `ask hint shows detection (“${askState.hint.slice(0, 58)}…”)`);
+await page.fill('#reviewChar', 'T');
+await page.click('#reviewFind');
+await page.waitForTimeout(250);
+const resState = await page.evaluate(() => ({
+  resultVisible: document.getElementById('reviewResult').style.display !== 'none',
   conf: document.getElementById('reviewConf').textContent,
 }));
-check(guessInfo.conf.length > 0, `review shows prediction (${JSON.stringify(guessInfo.guess)} — ${guessInfo.conf.slice(0, 48)}…)`);
+check(resState.resultVisible, 'find shows the best-matching traced shape');
+check(resState.conf.includes('Best match for “T”'), `match info: “${resState.conf.slice(0, 60)}…”`);
 await page.screenshot({ path: path.join(SHOTS, 'review.png') });
 const beforeT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
-await page.fill('#reviewChar', 'T');
 await page.click('#reviewAccept');
-await page.waitForTimeout(150);
+await page.waitForTimeout(200);
 const afterT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
-check(afterT === beforeT + 1, 'review Accept added the letterform to the library');
-await page.evaluate(() => ST.batch.close());
+check(afterT === beforeT + 1, 'Add to typeface stored the letterform');
+const backToAsk = await page.evaluate(() => document.getElementById('reviewAsk').style.display !== 'none');
+check(backToAsk, 'after adding, the same photo offers another letter');
+await page.click('#reviewNext');
+await page.waitForTimeout(250);
+const closedAfter = await page.evaluate(() => !document.getElementById('reviewModal').classList.contains('open'));
+check(closedAfter, 'last photo done → queue closes');
 
 // ---- live font + variant cycling ---------------------------------------------
 console.log('\n— live font, cycling, kerning');
@@ -497,18 +510,21 @@ const inboxText = await page2.evaluate(() => document.getElementById('inboxCount
 check(inboxText.includes('2'), `inbox prompt: “${inboxText}”`);
 await page2.screenshot({ path: path.join(SHOTS, 'sync.png') });
 await page2.click('#inboxExtract');
-await page2.waitForSelector('#reviewBody', { timeout: 20000 });
-for (let i = 0; i < 8; i++) {
-  const open = await page2.evaluate(() =>
-    document.getElementById('reviewModal').classList.contains('open') && ST.batch.queue.length > 0);
-  if (!open) break;
-  const ch = await page2.evaluate(() => {
-    const item = ST.batch.queue[ST.batch.idx];
-    return /wall-n/.test(item.sourceName) ? 'N' : 'T';
-  });
+// first photo appears as soon as it's fetched+analyzed (incremental intake)
+await page2.waitForFunction(() =>
+  document.getElementById('reviewModal').classList.contains('open') &&
+  document.getElementById('reviewBody').style.display !== 'none' &&
+  document.getElementById('reviewAsk').style.display !== 'none', { timeout: 20000 });
+for (let p = 0; p < 2; p++) {
+  const ch = await page2.evaluate(() =>
+    /wall-n/.test(ST.batch.queue[ST.batch.idx].name) ? 'N' : 'T');
   await page2.fill('#reviewChar', ch);
+  await page2.click('#reviewFind');
+  await page2.waitForTimeout(250);
   await page2.click('#reviewAccept');
-  await page2.waitForTimeout(200);
+  await page2.waitForTimeout(250);
+  await page2.click('#reviewNext');
+  await page2.waitForTimeout(300);
 }
 const acceptedChars = await page2.evaluate(() => __st.state().chars);
 check(acceptedChars.includes('N') && acceptedChars.includes('T'), `Drive photos became glyphs (${acceptedChars.join(' ')})`);
@@ -541,9 +557,16 @@ await page2.setInputFiles('#autoInput', path.join(ROOT, 'test', 'fixtures', 'let
 await pollCloud('uploaded photo stored in the Drive inbox', () => cloud.uploads.length === 1, 30000);
 check(cloud.uploads[0] && cloud.uploads[0].name.endsWith('.jpg') && cloud.uploads[0].size > 1500,
   `upload is a re-encoded jpeg (${cloud.uploads[0] && cloud.uploads[0].size} bytes)`);
-await page2.waitForSelector('#reviewBody', { timeout: 20000 });
+await page2.waitForFunction(() =>
+  document.getElementById('reviewModal').classList.contains('open') &&
+  document.getElementById('reviewBody').style.display !== 'none' &&
+  document.getElementById('reviewAsk').style.display !== 'none', { timeout: 20000 });
 await page2.fill('#reviewChar', 'L');
+await page2.click('#reviewFind');
+await page2.waitForTimeout(250);
 await page2.click('#reviewAccept');
+await page2.waitForTimeout(200);
+await page2.click('#reviewNext');
 await pollCloud('uploaded letterform synced (L in Drive library)', () =>
   cloud.library && cloud.library.glyphs && cloud.library.glyphs.L);
 await pollCloud('uploaded photo marked processed', () =>

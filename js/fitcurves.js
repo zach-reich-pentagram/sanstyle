@@ -118,13 +118,27 @@
     return out;
   }
 
-  function computeCenterTangent(pts, center) {
+  // Direction at index i measured across ±span of arc length — one noisy
+  // vertex must not dictate a tangent constraint, or forced-tangent fits
+  // fail and the splitter cascades.
+  function spanIndices(pts, i, span, lo, hi) {
+    let b = i, db = 0;
+    while (b > lo && db < span) { db += V.dist(pts[b], pts[b - 1]); b--; }
+    let f = i, df = 0;
+    while (f < hi && df < span) { df += V.dist(pts[f], pts[f + 1]); f++; }
+    return [b, f];
+  }
+
+  function computeCenterTangent(pts, center, span, first, last) {
+    const [b, f] = spanIndices(pts, center, span || 0, first, last);
+    const t = V.norm(V.sub(pts[b], pts[f])); // points backward, per Schneider
+    if (t.x || t.y) return t;
     const v1 = V.sub(pts[center - 1], pts[center]);
     const v2 = V.sub(pts[center], pts[center + 1]);
     return V.norm({ x: (v1.x + v2.x) / 2, y: (v1.y + v2.y) / 2 });
   }
 
-  function fitCubic(pts, first, last, tHat1, tHat2, errSq, out, depth) {
+  function fitCubic(pts, first, last, tHat1, tHat2, errSq, out, depth, span) {
     const nPts = last - first + 1;
     if (nPts === 2) {
       const dist = V.dist(pts[first], pts[last]) / 3;
@@ -155,29 +169,40 @@
       out.push(bez);
       return;
     }
-    const tHatCenter = computeCenterTangent(pts, splitPoint);
-    fitCubic(pts, first, splitPoint, tHat1, tHatCenter, errSq, out, depth + 1);
-    fitCubic(pts, splitPoint, last, V.neg(tHatCenter), tHat2, errSq, out, depth + 1);
+    const tHatCenter = computeCenterTangent(pts, splitPoint, span, first, last);
+    fitCubic(pts, first, splitPoint, tHat1, tHatCenter, errSq, out, depth + 1, span);
+    fitCubic(pts, splitPoint, last, V.neg(tHatCenter), tHat2, errSq, out, depth + 1, span);
   }
 
   /**
    * Fit an open polyline with cubic Béziers.
    * @param pts   points [{x,y}...] (deduped)
-   * @param tanL  unit tangent leaving pts[0] (or null → auto from first edge)
+   * @param tanL  unit tangent leaving pts[0] (or null → auto)
    * @param tanR  unit tangent arriving at last point, pointing backwards
    *              (or null → auto)
    * @param err   max deviation in the same units as pts
+   * @param span  arc distance over which tangents are measured (noise guard);
+   *              0/undefined → immediate neighbors (classic behavior)
    */
-  ST.fitCubics = function (pts, tanL, tanR, err) {
+  ST.fitCubics = function (pts, tanL, tanR, err, span) {
     const clean = [pts[0]];
     for (let i = 1; i < pts.length; i++) {
       if (V.dist(pts[i], clean[clean.length - 1]) > 1e-9) clean.push(pts[i]);
     }
     if (clean.length < 2) return [];
-    const t1 = tanL || V.norm(V.sub(clean[1], clean[0]));
-    const t2 = tanR || V.norm(V.sub(clean[clean.length - 2], clean[clean.length - 1]));
+    const n = clean.length;
+    const sp = span || 0;
+    let t1 = tanL, t2 = tanR;
+    if (!t1) {
+      const [, f] = spanIndices(clean, 0, sp, 0, n - 1);
+      t1 = V.norm(V.sub(clean[Math.max(1, f)], clean[0]));
+    }
+    if (!t2) {
+      const [b] = spanIndices(clean, n - 1, sp, 0, n - 1);
+      t2 = V.norm(V.sub(clean[Math.min(n - 2, b)], clean[n - 1]));
+    }
     const out = [];
-    fitCubic(clean, 0, clean.length - 1, t1, t2, err * err, out, 0);
+    fitCubic(clean, 0, n - 1, t1, t2, err * err, out, 0, sp);
     return out;
   };
 })(typeof window !== 'undefined' ? window : globalThis);

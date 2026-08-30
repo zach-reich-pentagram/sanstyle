@@ -83,6 +83,7 @@
     ctx.drawImage(src, -src.width / 2, -src.height / 2);
     return out;
   }
+  auto.rotateCanvas = rotateCanvas; // also used by the manual rotate controls
 
   // ---------- candidate detection ----------
   function detectCandidates(mask, w, h, imgArea) {
@@ -210,7 +211,11 @@
             if (mask[gi] && want.has(det.labels[gi])) sub[y * cw + x] = 1;
           }
         }
-        let clean = ST.raster.close(sub, cw, ch, 1);
+        // burr cleanup scales with the letterform: bigger crops need wider
+        // close (heal notches) + open (shave spurs) to come out smooth
+        const rk = Math.max(1, Math.round(Math.max(cw, ch) / 550));
+        let clean = ST.raster.close(sub, cw, ch, rk);
+        clean = ST.raster.open(clean, cw, ch, rk);
         clean = ST.raster.fillHoles(clean, cw, ch, o.fillHoles);
         const paths = ST.trace.vectorize(clean, cw, ch, {});
         if (!paths.length) continue;

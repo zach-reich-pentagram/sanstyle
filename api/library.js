@@ -54,24 +54,37 @@ module.exports = async function handler(req, res) {
       await L.driveUpsert(libraryId, 'library.json', 'application/json',
         JSON.stringify(body.library, null, 1));
 
-      for (const svg of body.svgs || []) {
-        if (!svg || !svg.id || !svg.name || !svg.content) continue;
-        if (!/\.svg$/.test(svg.name) || svg.content.length > 400000) continue;
-        await L.driveUpsert(libraryId, svg.name, 'image/svg+xml', svg.content);
-      }
-
-      // reconcile: trash mirrored SVGs for deleted variants
-      const keep = collectVariantIds(body.library);
+      // One folder listing serves both upsert routing and orphan reconcile —
+      // per-file lookups would blow the function budget on big pushes.
       const svgFiles = await L.driveList(
         `'${libraryId}' in parents and mimeType = 'image/svg+xml' and trashed = false`,
         'id, name'
       );
+      const byName = new Map(svgFiles.map((f) => [f.name, f.id]));
+
+      const uploadedIds = [];
+      for (const svg of body.svgs || []) {
+        if (!svg || !svg.id || !svg.name || !svg.content) continue;
+        if (!/\.svg$/.test(svg.name) || svg.content.length > 400000) continue;
+        if (byName.has(svg.name)) {
+          await L.driveUpdate(byName.get(svg.name), 'image/svg+xml', svg.content);
+        } else {
+          await L.driveCreate(libraryId, svg.name, 'image/svg+xml', svg.content);
+        }
+        uploadedIds.push(svg.id);
+      }
+
+      // reconcile: trash mirrored SVGs for deleted variants
+      const keep = collectVariantIds(body.library);
       const svgIds = [];
       for (const f of svgFiles) {
         const vid = L.svgIdFromName(f.name);
         if (!vid) continue;
         if (keep.has(vid)) svgIds.push(vid);
         else await L.driveTrash(f.id);
+      }
+      for (const id of uploadedIds) {
+        if (!svgIds.includes(id) && keep.has(id)) svgIds.push(id);
       }
       return L.send(res, 200, { ok: true, svgIds });
     }

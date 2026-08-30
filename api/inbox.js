@@ -14,7 +14,7 @@ module.exports = async function handler(req, res) {
     const files = await L.driveList(
       `'${inboxId}' in parents and trashed = false and ` +
       `(mimeType contains 'image/' or name contains '.heic' or name contains '.HEIC' or name contains '.heif')`,
-      'id, name, mimeType, createdTime, size'
+      'id, name, mimeType, createdTime, size, thumbnailLink'
     );
     files.sort((a, b) => (b.createdTime || '').localeCompare(a.createdTime || ''));
     return L.send(res, 200, { photos: files });

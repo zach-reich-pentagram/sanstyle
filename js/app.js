@@ -113,7 +113,8 @@
         step: ST.capture.step,
         glyphsMapped: ST.fontlive.glyphMaps[0] ? ST.fontlive.glyphMaps[0].size : 0,
         cycleFonts: ST.fontlive.glyphMaps.length,
-        queue: ST.batch.queue.length,
+        queue: Math.max(0, ST.batch.queue.length - ST.batch.idx),
+        reviewPhase: ST.batch.phase,
       }),
     };
   }

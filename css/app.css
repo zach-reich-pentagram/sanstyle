@@ -538,6 +538,14 @@ main { flex: 1; display: flex; min-height: 0; }
   border-radius: 14px;
   background: var(--paper);
 }
+.review-photo {
+  width: 100%;
+  border: var(--bw) solid var(--ink);
+  border-radius: 14px;
+  background: var(--paper);
+  margin-bottom: var(--gap);
+}
+#reviewAsk .ctl { gap: 10px; }
 .review-actions { display: flex; gap: var(--gap); align-items: center; flex-wrap: wrap; }
 #reviewChar { width: 64px; }
 

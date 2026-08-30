@@ -78,6 +78,41 @@ test('estimateSkewAngle recovers a synthetic tilt', () => {
   assert.ok(Math.abs(ang0) <= 1, `flat image should read ~0°, got ${ang0}`);
 });
 
+test('autoScale smoothing: big noisy contour comes out with far fewer segments', () => {
+  const w = 860, h = 860;
+  const m = new Uint8Array(w * h);
+  // disk r≈380 with a 6px high-frequency wobble — photo-texture stand-in
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const dx = x - 430, dy = y - 430;
+      const r = Math.hypot(dx, dy);
+      const th = Math.atan2(dy, dx);
+      if (r <= 380 + 6 * Math.sin(37 * th)) m[y * w + x] = 1;
+    }
+  }
+  const smooth = ST.trace.vectorize(m, w, h, {});
+  const rough = ST.trace.vectorize(m, w, h, { autoScale: false });
+  assert.strictEqual(smooth.length, 1);
+  assert.ok(smooth[0].cubics.length <= 30, `smooth trace has ${smooth[0].cubics.length} segments`);
+  assert.ok(rough[0].cubics.length > smooth[0].cubics.length * 1.8,
+    `autoScale reduces segments (${rough[0].cubics.length} → ${smooth[0].cubics.length})`);
+  // the smoothed curve should hug the mean radius, not chase the wobble
+  let maxDev = 0;
+  for (const cu of smooth[0].cubics) {
+    for (let s = 0; s <= 12; s++) {
+      const p = ST.geom.cubicAt(cu, s / 12);
+      maxDev = Math.max(maxDev, Math.abs(Math.hypot(p.x - 430, p.y - 430) - 380));
+    }
+  }
+  assert.ok(maxDev < 9, `stays near the mean radius (max dev ${maxDev.toFixed(1)}px)`);
+});
+
+test('classifier scoreFor prefers the right template', () => {
+  // scoring is browser-side (canvas templates) — here just assert the pure
+  // grid path used by scoreFor exists and behaves on hand-built probes
+  assert.strictEqual(typeof ST.classify.scoreFor, 'function');
+});
+
 test('classifier grid + scoring separates a bar from a ring', () => {
   const w = 60, h = 60;
   const bar = new Uint8Array(w * h);

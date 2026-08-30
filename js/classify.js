@@ -151,6 +151,24 @@
   };
 
   /**
+   * How well do these traced contours match one specific character?
+   * Returns the best template score (0..1-ish) — used by the letter-first
+   * review flow to pick which detected blob is the letter the user typed.
+   */
+  cls.scoreFor = function (paths, ch) {
+    const probe = cls.probeFromPaths(paths);
+    if (!probe) return 0;
+    const upper = (ch || '').toUpperCase();
+    let best = 0;
+    for (const t of cls.buildTemplates()) {
+      if (t.ch !== upper && t.ch !== ch) continue;
+      const s = cls.compare(probe, t);
+      if (s > best) best = s;
+    }
+    return best;
+  };
+
+  /**
    * Rank character guesses for traced contours.
    * Returns [{ch, score}] best-first, plus .confidence (0..1) on the array.
    */

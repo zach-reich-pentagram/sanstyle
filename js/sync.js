@@ -128,6 +128,11 @@
     }
   }
 
+  // SVGs go up in small batches: one huge PUT with a hundred letterforms
+  // would run the serverless function past its time budget (and the request
+  // size limit). Each batch re-writes library.json too, which is cheap and
+  // keeps every batch self-consistent.
+  const SVG_BATCH = 8;
   let pushing = false, pushQueued = false;
   sync.pushNow = async function () {
     if (!sync.unlocked) return;
@@ -141,14 +146,24 @@
         for (const v of ST.store.state.glyphs[ch].variants) {
           const h = variantHash(v);
           if (sync.lastPushedHash[v.id] !== h || !sync.serverSvgIds.has(v.id)) {
-            svgs.push({ id: v.id, name: ST.exporter.svgFileName(v), content: ST.exporter.variantSVG(v) });
+            svgs.push({ id: v.id, name: ST.exporter.svgFileName(v), content: ST.exporter.variantSVG(v), hash: h });
           }
         }
       }
-      const res = await sync.api('PUT', 'api/library', { library, svgs });
-      if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + (await res.text()).slice(0, 200));
-      const data = await res.json();
-      sync.serverSvgIds = new Set(data.svgIds || []);
+      let sent = 0;
+      do {
+        const chunk = svgs.splice(0, SVG_BATCH);
+        const res = await sync.api('PUT', 'api/library', {
+          library,
+          svgs: chunk.map(({ id, name, content }) => ({ id, name, content })),
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + (await res.text()).slice(0, 200));
+        const data = await res.json();
+        sync.serverSvgIds = new Set(data.svgIds || []);
+        for (const s of chunk) sync.lastPushedHash[s.id] = s.hash;
+        sent += chunk.length;
+        if (svgs.length) setStatus('syncing', `${sent} letterforms up, ${svgs.length} to go`);
+      } while (svgs.length);
       snapshotHashes();
       setStatus('synced');
     } catch (e) {
@@ -255,8 +270,12 @@
       if (pass) sync.tryUnlock(pass, false);
     });
     $('#syncPill').addEventListener('click', () => {
-      if (sync.status === 'error') sync.pushNow();
-      else sync.manualSync();
+      if (sync.status === 'error') {
+        ST.toast('Sync: ' + (sync.lastError || 'unknown error') + ' — retrying.', 'warn');
+        sync.pushNow();
+      } else {
+        sync.manualSync();
+      }
     });
     $('#inboxExtract').addEventListener('click', sync.extractPending);
     $('#inboxLater').addEventListener('click', () => {

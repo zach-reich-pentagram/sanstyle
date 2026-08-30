@@ -91,6 +91,9 @@
     c.height = Math.round(h * s);
     c.getContext('2d').drawImage(source, 0, 0, c.width, c.height);
     cap.img = c;
+    cap.rotSource = c;
+    cap.rotDeg = 0;
+    const rot = $('#rotRange'); if (rot) rot.value = 0;
     cap.imgBeforeFlatten = null;
     cap.lasso = [];
     cap.polyPts = null;
@@ -222,6 +225,52 @@
 
   cap.skipFlatten = function () { setStep('lasso'); };
 
+  // ---------- rotation ----------
+  function afterRotate() {
+    cap.lasso = [];
+    cap.polyPts = null;
+    cap.blocks = [];
+    cap.extract = null;
+    cap.record = null;
+    cap.quad = defaultQuad();
+    fitView();
+    updatePreview();
+    requestDraw();
+  }
+
+  cap.setRotation = function (deg) {
+    if (!cap.rotSource) return;
+    cap.rotDeg = ST.clamp(deg, -25, 25);
+    cap.img = cap.rotDeg === 0 ? cap.rotSource : ST.auto.rotateCanvas(cap.rotSource, cap.rotDeg);
+    const rot = $('#rotRange'); if (rot) rot.value = cap.rotDeg;
+    afterRotate();
+  };
+
+  cap.quarterTurn = function (dir) {
+    if (!cap.rotSource) return;
+    cap.rotSource = ST.auto.rotateCanvas(cap.rotSource, dir * 90);
+    cap.setRotation(cap.rotDeg);
+  };
+
+  cap.autoStraighten = function () {
+    if (!cap.rotSource) return;
+    const base = cap.rotSource;
+    const s = Math.min(1, 900 / Math.max(base.width, base.height));
+    const small = g.document.createElement('canvas');
+    small.width = Math.round(base.width * s);
+    small.height = Math.round(base.height * s);
+    small.getContext('2d').drawImage(base, 0, 0, small.width, small.height);
+    const data = small.getContext('2d').getImageData(0, 0, small.width, small.height);
+    const gray = ST.raster.luma(data.data, small.width, small.height);
+    const angle = ST.auto.estimateSkewAngle(gray, small.width, small.height);
+    if (Math.abs(angle) < 0.75) {
+      ST.toast('Already straight (within a degree).');
+      return;
+    }
+    cap.setRotation(angle);
+    ST.toast(`Straightened by ${angle > 0 ? '−' : '+'}${Math.abs(angle)}°.`);
+  };
+
   // ---------- lasso (freehand + polygon) ----------
   function closeLasso() {
     if (!cap.lassoLive || cap.lassoLive.length < 8) {
@@ -308,8 +357,11 @@
       mask = ST.raster.maskFromLuma(luma, roi, t, ink.invert);
     }
     if (ink.smooth > 0) {
-      mask = ST.raster.close(mask, crop.w, crop.h, ink.smooth);
-      mask = ST.raster.open(mask, crop.w, crop.h, 1);
+      // scale the structuring element with the crop so big letterforms come
+      // out just as burr-free as small ones
+      const rk = Math.max(1, Math.round(Math.max(crop.w, crop.h) / 700));
+      mask = ST.raster.close(mask, crop.w, crop.h, ink.smooth * rk);
+      mask = ST.raster.open(mask, crop.w, crop.h, rk);
     }
 
     // occlusion block-out: erase the intruding letter, bridge our stroke through
@@ -882,6 +934,11 @@
     $('#flattenApply').addEventListener('click', cap.applyFlatten);
     $('#flattenSkip').addEventListener('click', cap.skipFlatten);
     $('#flattenReset').addEventListener('click', cap.resetFlatten);
+
+    $('#rotRange').addEventListener('change', (e) => cap.setRotation(+e.target.value));
+    $('#rotCCW').addEventListener('click', () => cap.quarterTurn(-1));
+    $('#rotCW').addEventListener('click', () => cap.quarterTurn(1));
+    $('#rotAuto').addEventListener('click', cap.autoStraighten);
 
     $('#lassoReset').addEventListener('click', cap.clearLasso);
 

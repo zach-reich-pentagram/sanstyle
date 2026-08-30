@@ -77,7 +77,20 @@
       try {
         localStorage.setItem(KEY, JSON.stringify(this.state));
       } catch (e) {
-        if (ST.toast) ST.toast('Storage full — export your library JSON to keep it safe.', 'warn');
+        // quota: retry without thumbnails (regenerable previews) before warning
+        try {
+          const slim = JSON.parse(JSON.stringify(this.state));
+          for (const ch in slim.glyphs) {
+            for (const v of slim.glyphs[ch].variants) delete v.thumb;
+          }
+          localStorage.setItem(KEY, JSON.stringify(slim));
+          if (!this._warnedSlim && ST.toast) {
+            this._warnedSlim = true;
+            ST.toast('Local cache is tight — previews trimmed locally; letterforms are safe.');
+          }
+        } catch (e2) {
+          if (ST.toast) ST.toast('Local storage is full — rely on cloud sync or export JSON.', 'warn');
+        }
       }
     }
 
