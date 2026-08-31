@@ -1,6 +1,6 @@
 /* Sanstyle end-to-end: drives the real app in headless Chromium.
  * Covers the manual flow (mouse lasso, polygon lasso, flatten, pick-paint),
- * the automated flow (detect → guess → review → accept), HEIC intake,
+ * the automated flow (detect → review → accept), HEIC intake,
  * variant cycling, kerning, exports, and validates every compiled font with
  * an independent parser plus fontTools. Regenerates the README screenshots.
  */
@@ -167,10 +167,8 @@ await page.waitForTimeout(250);
 let st = await page.evaluate(() => ({
   step: __st.state().step,
   paths: ST.capture.extract ? ST.capture.extract.paths.length : 0,
-  guess: ST.capture.guess && ST.capture.guess.length ? ST.capture.guess[0].ch : null,
 }));
 check(st.step === 'ink' && st.paths >= 1, `freehand lasso traced (${st.paths} contours)`);
-check(typeof st.guess === 'string' && st.guess.length === 1, `classifier produced a guess (“${st.guess}”)`);
 await page.fill('#charInput', 'S');
 await page.waitForTimeout(150);
 await page.screenshot({ path: path.join(SHOTS, 'capture.png') });
@@ -218,7 +216,7 @@ for (const ch of ['A', 'E', 'N', 'O', 'T', '5', '#']) {
     const ok = __st.tagAndSubmit(c);
     return { ...ex, ok };
   }, ch);
-  check(r.ok && r.paths >= 1, `“${ch}”: ${r.paths} contours → submitted (guess was “${r.guess}”)`);
+  check(r.ok && r.paths >= 1, `“${ch}”: ${r.paths} contours → submitted`);
 }
 
 // ---- fill-gaps slider: counter of O fills only when cranked -------------------
@@ -285,40 +283,43 @@ const heicRes = await page.evaluate(() => {
 });
 check(heicRes.paths >= 1 && heicRes.ok, `HEIC decoded, L traced (${heicRes.ink}px ink) and submitted`);
 
-// ---- auto flow: photo-first, letter-first review ---------------------------------
-console.log('\n— auto capture + letter-first review');
+// ---- auto flow: photo-at-a-time review, no guessing ------------------------------
+console.log('\n— auto capture + review queue');
 const autoRes = await page.evaluate(() => __st.autoFromDemo('T'));
 check(autoRes.candidates >= 1, `auto pipeline found ${autoRes.candidates} candidate(s) on a demo wall`);
 await page.evaluate(() => ST.batch.reopen());
 await page.waitForTimeout(250);
-const askState = await page.evaluate(() => ({
+const revState = await page.evaluate(() => ({
   open: document.getElementById('reviewModal').classList.contains('open'),
-  askVisible: document.getElementById('reviewAsk').style.display !== 'none',
   hint: document.getElementById('reviewHint').textContent,
+  progress: document.getElementById('reviewProgress').textContent,
 }));
-check(askState.open && askState.askVisible, 'review opens on the letter-first ask phase');
-check(/shape/.test(askState.hint), `ask hint shows detection (“${askState.hint.slice(0, 58)}…”)`);
-await page.fill('#reviewChar', 'T');
-await page.click('#reviewFind');
-await page.waitForTimeout(250);
-const resState = await page.evaluate(() => ({
-  resultVisible: document.getElementById('reviewResult').style.display !== 'none',
-  conf: document.getElementById('reviewConf').textContent,
-}));
-check(resState.resultVisible, 'find shows the best-matching traced shape');
-check(resState.conf.includes('Best match for “T”'), `match info: “${resState.conf.slice(0, 60)}…”`);
+check(revState.open, 'review modal opened straight onto the traced shape');
+check(/Shape 1 of/.test(revState.hint), `hint shows shape count (“${revState.hint.slice(0, 48)}…”)`);
 await page.screenshot({ path: path.join(SHOTS, 'review.png') });
 const beforeT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
+await page.fill('#reviewChar', 'T');
 await page.click('#reviewAccept');
-await page.waitForTimeout(200);
+await page.waitForTimeout(250);
 const afterT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
 check(afterT === beforeT + 1, 'Add to typeface stored the letterform');
-const backToAsk = await page.evaluate(() => document.getElementById('reviewAsk').style.display !== 'none');
-check(backToAsk, 'after adding, the same photo offers another letter');
-await page.click('#reviewNext');
-await page.waitForTimeout(250);
 const closedAfter = await page.evaluate(() => !document.getElementById('reviewModal').classList.contains('open'));
-check(closedAfter, 'last photo done → queue closes');
+check(closedAfter, 'accepting the only photo finishes the queue');
+
+// skip-only removal: a photo stays queued through save-for-later
+await page.evaluate(() => __st.autoFromDemo('O'));
+await page.evaluate(() => ST.batch.reopen());
+await page.waitForTimeout(200);
+await page.keyboard.press('Escape'); // save for later
+await page.waitForTimeout(150);
+let queued = await page.evaluate(() => __st.state().queue);
+check(queued === 1, 'Esc / save-for-later keeps the photo in the queue');
+await page.evaluate(() => ST.batch.reopen());
+await page.waitForTimeout(150);
+await page.click('#reviewSkip');
+await page.waitForTimeout(150);
+queued = await page.evaluate(() => __st.state().queue);
+check(queued === 0, 'Skip removes the photo from the queue');
 
 // ---- live font + variant cycling ---------------------------------------------
 console.log('\n— live font, cycling, kerning');
@@ -513,18 +514,13 @@ await page2.click('#inboxExtract');
 // first photo appears as soon as it's fetched+analyzed (incremental intake)
 await page2.waitForFunction(() =>
   document.getElementById('reviewModal').classList.contains('open') &&
-  document.getElementById('reviewBody').style.display !== 'none' &&
-  document.getElementById('reviewAsk').style.display !== 'none', { timeout: 20000 });
+  document.getElementById('reviewBody').style.display !== 'none', { timeout: 20000 });
 for (let p = 0; p < 2; p++) {
   const ch = await page2.evaluate(() =>
     /wall-n/.test(ST.batch.queue[ST.batch.idx].name) ? 'N' : 'T');
   await page2.fill('#reviewChar', ch);
-  await page2.click('#reviewFind');
-  await page2.waitForTimeout(250);
   await page2.click('#reviewAccept');
-  await page2.waitForTimeout(250);
-  await page2.click('#reviewNext');
-  await page2.waitForTimeout(300);
+  await page2.waitForTimeout(350);
 }
 const acceptedChars = await page2.evaluate(() => __st.state().chars);
 check(acceptedChars.includes('N') && acceptedChars.includes('T'), `Drive photos became glyphs (${acceptedChars.join(' ')})`);
@@ -559,14 +555,9 @@ check(cloud.uploads[0] && cloud.uploads[0].name.endsWith('.jpg') && cloud.upload
   `upload is a re-encoded jpeg (${cloud.uploads[0] && cloud.uploads[0].size} bytes)`);
 await page2.waitForFunction(() =>
   document.getElementById('reviewModal').classList.contains('open') &&
-  document.getElementById('reviewBody').style.display !== 'none' &&
-  document.getElementById('reviewAsk').style.display !== 'none', { timeout: 20000 });
+  document.getElementById('reviewBody').style.display !== 'none', { timeout: 20000 });
 await page2.fill('#reviewChar', 'L');
-await page2.click('#reviewFind');
-await page2.waitForTimeout(250);
 await page2.click('#reviewAccept');
-await page2.waitForTimeout(200);
-await page2.click('#reviewNext');
 await pollCloud('uploaded letterform synced (L in Drive library)', () =>
   cloud.library && cloud.library.glyphs && cloud.library.glyphs.L);
 await pollCloud('uploaded photo marked processed', () =>

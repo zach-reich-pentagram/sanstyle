@@ -75,6 +75,74 @@
     );
   }
 
+  // Two-pass box blur over any numeric array → Float32Array. Blurring the
+  // FIELD (luminance or color distance) before thresholding is what tames
+  // chalky/textured paint: partial-coverage speckle at the edge averages
+  // toward its neighborhood instead of flickering across the threshold.
+  raster.blur = function (src, w, h, r) {
+    if (!r || r <= 0) return Float32Array.from(src);
+    const tmp = new Float32Array(w * h);
+    const out = new Float32Array(w * h);
+    const win = 2 * r + 1;
+    const cl = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let acc = 0;
+      for (let x = -r; x <= r; x++) acc += src[row + cl(x, 0, w - 1)];
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = acc / win;
+        acc += src[row + cl(x + r + 1, 0, w - 1)] - src[row + cl(x - r, 0, w - 1)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += tmp[cl(y, 0, h - 1) * w + x];
+      for (let y = 0; y < h; y++) {
+        out[y * w + x] = acc / win;
+        acc += tmp[cl(y + r + 1, 0, h - 1) * w + x] - tmp[cl(y - r, 0, h - 1) * w + x];
+      }
+    }
+    return out;
+  };
+
+  // Min redmean distance to any seed color, per pixel → Float32Array.
+  raster.colorDistMap = function (data, w, h, seeds) {
+    const out = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+      let best = 1e9;
+      for (let s = 0; s < seeds.length; s++) {
+        const sd = seeds[s];
+        const d = colorDist(data[p], data[p + 1], data[p + 2], sd.r, sd.g, sd.b);
+        if (d < best) best = d;
+      }
+      out[i] = best;
+    }
+    return out;
+  };
+
+  // Ink pixels bordering background (4-neighborhood).
+  raster.perimeter = function (mask, w, h) {
+    let n = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!mask[i]) continue;
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
+            !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) n++;
+      }
+    }
+    return n;
+  };
+
+  // Ribbon-model stroke width ≈ 2·area/perimeter. Caps how hard structural
+  // smoothing may push before it would erase genuine thin strokes.
+  raster.strokeWidth = function (mask, w, h) {
+    const area = raster.count(mask);
+    if (!area) return 0;
+    const per = raster.perimeter(mask, w, h);
+    return per ? (2 * area) / per : 0;
+  };
+
   // Ink = pixels within tol of ANY seed color. tol in 0..100 UI units.
   raster.maskFromColor = function (data, w, h, roi, seeds, tol) {
     const out = new Uint8Array(w * h);

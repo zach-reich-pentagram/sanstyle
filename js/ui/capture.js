@@ -28,12 +28,11 @@
     blockR: 16,
     ink: {
       mode: 'luma', threshOffset: 0, tol: 30, invert: false, invertAuto: true,
-      smooth: 1, despeckle: 5, detail: 1.2, fill: 5, bridge: 14, seeds: [],
+      smoothing: 4, despeckle: 5, detail: 1.2, fill: 6, bridge: 14, seeds: [],
     },
     eyedrop: false,
     extract: null,
     record: null,
-    guess: null,
     demoIdx: 0,
     lastDemo: null,
   });
@@ -100,7 +99,6 @@
     cap.blocks = [];
     cap.extract = null;
     cap.record = null;
-    cap.guess = null;
     cap.ink.seeds = [];
     cap.quad = defaultQuad();
     fitView();
@@ -313,7 +311,8 @@
     cap.polyPts = null;
     cap.extract = null;
     cap.record = null;
-    cap.guess = null;
+    cap.eyedrop = false;
+    const eb = $('#eyedropBtn'); if (eb) eb.classList.remove('on');
     if (cap.img) setStep('lasso');
     updatePreview();
     requestDraw();
@@ -335,33 +334,58 @@
   }
 
   // ---------- extraction ----------
+  // One Smoothing knob drives the whole clean-up chain, all scale-aware:
+  //  1. pre-blur the decision field (luma / color distance) so chalky,
+  //     broken-texture edges stop flickering across the threshold;
+  //  2. structural smoothing — morphological close∘open at a radius that
+  //     grows with the crop but is capped by the measured stroke width, so
+  //     ragged fingers get shaved without ever erasing thin strokes.
   function runExtraction(autoTune) {
     if (!cap.img || cap.lasso.length < 3) return;
     const crop = cropRegion();
     const data = cap.img.getContext('2d').getImageData(crop.x, crop.y, crop.w, crop.h);
     const local = cap.lasso.map((p) => ({ x: p.x - crop.x, y: p.y - crop.y }));
     const roi = ST.raster.fillPoly(crop.w, crop.h, local);
-    const luma = ST.raster.luma(data.data, crop.w, crop.h);
     const ink = cap.ink;
+    const nPix = crop.w * crop.h;
+    const preBlur = Math.max(0, Math.round(ink.smoothing * 0.5));
 
     let mask;
     if (ink.mode === 'color' && ink.seeds.length) {
-      mask = ST.raster.maskFromColor(data.data, crop.w, crop.h, roi, ink.seeds, ink.tol);
+      let field = ST.raster.colorDistMap(data.data, crop.w, crop.h, ink.seeds);
+      if (preBlur) field = ST.raster.blur(field, crop.w, crop.h, preBlur);
+      const maxD = 8 + ink.tol * 3.4;
+      mask = new Uint8Array(nPix);
+      for (let i = 0; i < nPix; i++) {
+        if (roi[i] && field[i] <= maxD) mask[i] = 1;
+      }
     } else {
-      const base = ST.raster.otsu(luma, roi);
+      const rawLuma = ST.raster.luma(data.data, crop.w, crop.h);
+      let lumaU8 = rawLuma;
+      if (preBlur) {
+        const f = ST.raster.blur(rawLuma, crop.w, crop.h, preBlur);
+        lumaU8 = new Uint8Array(nPix);
+        for (let i = 0; i < nPix; i++) lumaU8[i] = ST.clamp(Math.round(f[i]), 0, 255);
+      }
+      const base = ST.raster.otsu(lumaU8, roi);
       const t = ST.clamp(base + ink.threshOffset, 2, 253);
       if (autoTune && ink.invertAuto) {
-        ink.invert = ST.raster.guessInvert(luma, roi, t);
+        ink.invert = ST.raster.guessInvert(lumaU8, roi, t);
         const inv = $('#inkInvert'); if (inv) inv.checked = ink.invert;
       }
-      mask = ST.raster.maskFromLuma(luma, roi, t, ink.invert);
+      mask = ST.raster.maskFromLuma(lumaU8, roi, t, ink.invert);
     }
-    if (ink.smooth > 0) {
-      // scale the structuring element with the crop so big letterforms come
-      // out just as burr-free as small ones
-      const rk = Math.max(1, Math.round(Math.max(crop.w, crop.h) / 700));
-      mask = ST.raster.close(mask, crop.w, crop.h, ink.smooth * rk);
-      mask = ST.raster.open(mask, crop.w, crop.h, rk);
+
+    if (ink.smoothing > 0) {
+      // clear speckle first so the stroke-width estimate isn't polluted
+      mask = ST.raster.despeckle(mask, crop.w, crop.h, 0.04, 24);
+      const sw = ST.raster.strokeWidth(mask, crop.w, crop.h);
+      const rBase = ink.smoothing * 1.2 * (Math.max(crop.w, crop.h) / 700);
+      const r = Math.max(0, Math.min(Math.round(rBase), Math.floor(sw * 0.33)));
+      if (r > 0) {
+        mask = ST.raster.close(mask, crop.w, crop.h, r);
+        mask = ST.raster.open(mask, crop.w, crop.h, r);
+      }
     }
 
     // occlusion block-out: erase the intruding letter, bridge our stroke through
@@ -403,7 +427,6 @@
     od.putImageData(oimg, 0, 0);
 
     cap.extract = { crop, mask, w: crop.w, h: crop.h, paths, overlay, inkCount };
-    cap.guess = (paths.length && ST.classify) ? ST.classify.classifyPaths(paths) : null;
     if (!paths.length) {
       setHint('No paint found in the loop — adjust the threshold, invert, or pick the paint color.');
     }
@@ -437,25 +460,8 @@
         info.textContent = '';
       }
     }
-    const guessBtn = $('#guessBtn');
-    if (guessBtn) {
-      const top = cap.guess && cap.guess.length ? cap.guess[0] : null;
-      if (top && cap.extract && cap.extract.paths.length) {
-        guessBtn.style.display = '';
-        guessBtn.textContent =
-          `Guess: ${top.ch} (${Math.round((cap.guess.confidence || 0) * 100)}%) — use it`;
-      } else {
-        guessBtn.style.display = 'none';
-      }
-    }
   }
   cap.updatePreview = updatePreview;
-
-  cap.useGuess = function () {
-    if (!cap.guess || !cap.guess.length) return;
-    $('#charInput').value = cap.guess[0].ch;
-    updatePreview();
-  };
 
   function drawPreview(ch) {
     if (!pctx) return;
@@ -532,10 +538,10 @@
     ST.store.addVariant(ch, record);
     const n = ST.store.count();
     ST.toast(`“${ch}” added — ${n} character${n === 1 ? '' : 's'} in ${ST.store.state.fontName}.`);
+    if (ST.batch && ST.batch.onStudioSubmit) ST.batch.onStudioSubmit();
     cap.lasso = [];
     cap.extract = null;
     cap.record = null;
-    cap.guess = null;
     cap.blocks = [];
     if (chInput) chInput.value = '';
     setStep('lasso');
@@ -735,7 +741,9 @@
       }
     }
     if (cap.eyedrop && ev.button === 0) {
-      sampleInk(ip);
+      // A click samples; a drag means the user wants a new lasso — don't
+      // hold them hostage to the eyedropper.
+      dragging = { kind: 'sample', sx: sp.x, sy: sp.y, ip };
       return;
     }
     const panButton = ev.button === 1 || ev.button === 2 || spaceHeld || cap.tool === 'hand';
@@ -781,7 +789,15 @@
       }
       return;
     }
-    if (dragging.kind === 'pan') {
+    if (dragging.kind === 'sample') {
+      if (Math.hypot(sp.x - dragging.sx, sp.y - dragging.sy) > 5) {
+        cap.eyedrop = false;
+        const eb = $('#eyedropBtn'); if (eb) eb.classList.remove('on');
+        cap.lassoLive = [dragging.ip, ip];
+        dragging = { kind: 'lasso' };
+        setHint('Drawing a new loop — sampling switched off.');
+      }
+    } else if (dragging.kind === 'pan') {
       cap.view.tx = dragging.tx + sp.x - dragging.sx;
       cap.view.ty = dragging.ty + sp.y - dragging.sy;
     } else if (dragging.kind === 'handle') {
@@ -800,6 +816,7 @@
   }
 
   function onPointerUp(ev) {
+    if (dragging && dragging.kind === 'sample') sampleInk(dragging.ip);
     if (dragging && dragging.kind === 'lasso') closeLasso();
     if (dragging && dragging.kind === 'block' && cap.lasso.length) runExtraction(false);
     dragging = null;
@@ -963,7 +980,6 @@
     };
     bindRange('#inkThresh', 'threshOffset');
     bindRange('#inkTol', 'tol');
-    bindRange('#inkSmooth', 'smooth');
     bindRange('#inkSpeck', 'despeckle');
     bindRange('#inkDetail', 'detail');
     bindRange('#inkFill', 'fill');
@@ -978,7 +994,6 @@
     $('#blockSize').addEventListener('input', (e) => { cap.blockR = +e.target.value; requestDraw(); });
     $('#blockClear').addEventListener('click', cap.clearBlocks);
 
-    $('#guessBtn').addEventListener('click', cap.useGuess);
     $('#charInput').addEventListener('input', updatePreview);
     $('#charInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); cap.submit(); }

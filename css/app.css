@@ -227,6 +227,22 @@ main { flex: 1; display: flex; min-height: 0; }
   flex-direction: column;
   gap: 8px;
 }
+details.adv {
+  border-top: var(--bw) solid var(--ink);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+details.adv summary {
+  cursor: pointer;
+  color: var(--dim);
+  list-style: none;
+}
+details.adv summary::before { content: "▸ "; }
+details.adv[open] summary::before { content: "▾ "; }
+details.adv > * { margin-top: 8px; }
+details.adv summary { margin-top: 0; }
 .seed-chips { display: none; gap: 6px; flex-wrap: wrap; }
 .seed-chip {
   width: 22px; height: 22px;

@@ -176,6 +176,10 @@
     }
 
     const W = work.width, H = work.height, area = W * H;
+    // pre-blur the field so broken/chalky paint textures threshold cleanly
+    const blurred = ST.raster.blur(gray, W, H, 2);
+    gray = new Uint8Array(W * H);
+    for (let i = 0; i < gray.length; i++) gray[i] = Math.max(0, Math.min(255, Math.round(blurred[i])));
     const t = ST.raster.otsu(gray, null);
     let mean = 0;
     for (let i = 0; i < gray.length; i++) mean += gray[i];
@@ -211,22 +215,21 @@
             if (mask[gi] && want.has(det.labels[gi])) sub[y * cw + x] = 1;
           }
         }
-        // burr cleanup scales with the letterform: bigger crops need wider
-        // close (heal notches) + open (shave spurs) to come out smooth
-        const rk = Math.max(1, Math.round(Math.max(cw, ch) / 550));
-        let clean = ST.raster.close(sub, cw, ch, rk);
-        clean = ST.raster.open(clean, cw, ch, rk);
+        // structural smoothing at letterform scale, capped by stroke width
+        // so thin strokes survive — same recipe as the manual studio
+        let clean = ST.raster.despeckle(sub, cw, ch, 0.04, 24);
+        const strokeW = ST.raster.strokeWidth(clean, cw, ch);
+        const rBase = (o.smoothing != null ? o.smoothing : 4) * 1.2 * (Math.max(cw, ch) / 700);
+        const r = Math.max(1, Math.min(Math.round(rBase), Math.floor(strokeW * 0.33) || 1));
+        clean = ST.raster.close(clean, cw, ch, r);
+        clean = ST.raster.open(clean, cw, ch, r);
         clean = ST.raster.fillHoles(clean, cw, ch, o.fillHoles);
         const paths = ST.trace.vectorize(clean, cw, ch, {});
         if (!paths.length) continue;
-        const ranked = ST.classify ? ST.classify.classifyPaths(paths) : null;
         candidates.push({
           crop: { x: cx0, y: cy0, w: cw, h: ch },
           mask: clean, w: cw, h: ch,
           paths,
-          ranked,
-          guess: ranked && ranked.length ? ranked[0].ch : '',
-          confidence: ranked ? ranked.confidence : 0,
         });
       }
     }

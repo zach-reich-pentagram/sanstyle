@@ -107,10 +107,27 @@ test('autoScale smoothing: big noisy contour comes out with far fewer segments',
   assert.ok(maxDev < 9, `stays near the mean radius (max dev ${maxDev.toFixed(1)}px)`);
 });
 
-test('classifier scoreFor prefers the right template', () => {
-  // scoring is browser-side (canvas templates) — here just assert the pure
-  // grid path used by scoreFor exists and behaves on hand-built probes
-  assert.strictEqual(typeof ST.classify.scoreFor, 'function');
+test('field blur + stroke width power the one-knob smoothing', () => {
+  const w = 200, h = 120;
+  // ribbon 20px tall → strokeWidth ≈ 2·area/perimeter ≈ 18-20
+  const m = new Uint8Array(w * h);
+  for (let y = 50; y < 70; y++) for (let x = 10; x < 190; x++) m[y * w + x] = 1;
+  const sw = ST.raster.strokeWidth(m, w, h);
+  assert.ok(sw > 16 && sw < 21, `ribbon stroke width ${sw.toFixed(1)}`);
+
+  // blur flattens a salt-and-pepper field toward its mean
+  const noisy = new Uint8Array(w * h);
+  for (let i = 0; i < noisy.length; i++) noisy[i] = (i * 2654435761 >>> 0) % 2 ? 255 : 0;
+  const blurred = ST.raster.blur(noisy, w, h, 3);
+  let dev = 0;
+  for (let i = 0; i < blurred.length; i++) dev = Math.max(dev, Math.abs(blurred[i] - 127.5));
+  assert.ok(dev < 80, `blurred checker deviates ${dev.toFixed(0)} from mean (raw: 127.5)`);
+
+  // colorDistMap: zero at the seed color, large far away
+  const data = new Uint8ClampedArray(4 * 2);
+  data.set([200, 30, 40, 255, 20, 200, 60, 255]);
+  const map = ST.raster.colorDistMap(data, 2, 1, [{ r: 200, g: 30, b: 40 }]);
+  assert.ok(map[0] < 1 && map[1] > 200, `distances ${map[0].toFixed(1)}, ${map[1].toFixed(1)}`);
 });
 
 test('classifier grid + scoring separates a bar from a ring', () => {

@@ -88,7 +88,6 @@
         return {
           paths: ex ? ex.paths.length : 0,
           ink: ex ? ex.inkCount : 0,
-          guess: ST.capture.guess && ST.capture.guess.length ? ST.capture.guess[0].ch : null,
         };
       },
       tagAndSubmit(ch) {
@@ -114,7 +113,6 @@
         glyphsMapped: ST.fontlive.glyphMaps[0] ? ST.fontlive.glyphMaps[0].size : 0,
         cycleFonts: ST.fontlive.glyphMaps.length,
         queue: Math.max(0, ST.batch.queue.length - ST.batch.idx),
-        reviewPhase: ST.batch.phase,
       }),
     };
   }

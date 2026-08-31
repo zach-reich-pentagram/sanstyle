@@ -107,23 +107,24 @@
         </div>
 
         <label class="slider-row">
-          <span>De-noise:</span>
-          <input type="range" id="inkSmooth" min="0" max="3" value="1" step="1">
-        </label>
-        <label class="slider-row">
-          <span>Speck filter:</span>
-          <input type="range" id="inkSpeck" min="0" max="20" value="5" step="1">
-        </label>
-        <label class="slider-row">
-          <span>Fill gaps:</span>
-          <input type="range" id="inkFill" min="0" max="75" value="5" step="1">
-        </label>
-        <label class="slider-row">
-          <span>Curve fit:</span>
-          <input type="range" id="inkDetail" min="0.6" max="3" value="1.2" step="0.2">
+          <span>Smoothing:</span>
+          <input type="range" id="inkSmoothing" min="0" max="10" value="4" step="1">
         </label>
 
-        <div class="block-box">
+        <details class="adv">
+          <summary>Fine tuning</summary>
+          <label class="slider-row">
+            <span>Speck filter:</span>
+            <input type="range" id="inkSpeck" min="0" max="20" value="5" step="1">
+          </label>
+          <label class="slider-row">
+            <span>Fill gaps:</span>
+            <input type="range" id="inkFill" min="0" max="75" value="6" step="1">
+          </label>
+          <label class="slider-row">
+            <span>Curve fit:</span>
+            <input type="range" id="inkDetail" min="0.6" max="3" value="1.2" step="0.2">
+          </label>
           <div class="btn-row">
             <button class="pill sm" id="blockToggle">Block out overlap</button>
             <button class="pill sm" id="blockClear">Clear</button>
@@ -136,8 +137,8 @@
             <span>Bridge:</span>
             <input type="range" id="inkBridge" min="0" max="36" value="14" step="1">
           </label>
-          <p>Paint over an intruding letter; the stroke underneath is inferred back through.</p>
-        </div>
+          <p>Block out: paint over an intruding letter; the stroke underneath is inferred back through.</p>
+        </details>
       </div>
     </div>
 
@@ -164,7 +165,6 @@
     <div class="panel-label">Letterform, fitted</div>
     <canvas id="previewCanvas" width="300" height="330"></canvas>
     <div class="fit-info" id="fitInfo"></div>
-    <button class="pill sm" id="guessBtn" style="display:none"></button>
     <div class="tag-row">
       <input id="charInput" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
       <button id="submitBtn" class="pill primary" disabled>Add to typeface</button>
@@ -369,41 +369,27 @@
     </div>
     <div class="modal-spinner" id="reviewSpinner" style="display:none">Analyzing…</div>
     <div class="modal-body" id="reviewBody">
-
-      <div id="reviewAsk">
-        <canvas id="reviewPhoto" width="656" height="400" class="review-photo"></canvas>
-        <div class="review-actions">
-          <label class="ctl">
-            <span>Which character do you see?</span>
-            <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" aria-label="Which character do you see?">
-          </label>
-          <button class="pill primary" id="reviewFind">Find it</button>
-          <button class="pill" id="reviewNext">Next photo</button>
-          <button class="pill" id="reviewEdit">Edit manually</button>
+      <div class="review-panes">
+        <div>
+          <div class="panel-label">Photo</div>
+          <canvas id="reviewSource" width="340" height="340"></canvas>
         </div>
-        <div class="dim" id="reviewHint"></div>
-      </div>
-
-      <div id="reviewResult" style="display:none">
-        <div class="review-panes">
-          <div>
-            <div class="panel-label">From the photo</div>
-            <canvas id="reviewSource" width="300" height="300"></canvas>
-          </div>
-          <div>
-            <div class="panel-label">Traced letterform</div>
-            <canvas id="reviewTrace" width="300" height="300"></canvas>
-          </div>
-        </div>
-        <div class="dim" id="reviewConf"></div>
-        <div class="review-actions">
-          <button class="pill primary" id="reviewAccept">Add to typeface</button>
-          <button class="pill" id="reviewAlt">Try another shape</button>
-          <button class="pill" id="reviewBack">Back</button>
-          <button class="pill" id="reviewEdit2">Edit manually</button>
+        <div>
+          <div class="panel-label">Traced letterform</div>
+          <canvas id="reviewTrace" width="340" height="340"></canvas>
         </div>
       </div>
-
+      <div class="dim" id="reviewHint"></div>
+      <div class="review-actions">
+        <label class="ctl">
+          <span>Character:</span>
+          <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
+        </label>
+        <button class="pill primary" id="reviewAccept">Add to typeface</button>
+        <button class="pill" id="reviewAlt">Try another shape</button>
+        <button class="pill" id="reviewEdit">Edit manually</button>
+        <button class="pill" id="reviewSkip">Skip photo</button>
+      </div>
     </div>
   </div>
 </div>
@@ -415,7 +401,6 @@
 <script src="js/trace.js"></script>
 <script src="js/fitting.js"></script>
 <script src="js/ttf.js"></script>
-<script src="js/classify.js"></script>
 <script src="js/auto.js"></script>
 <script src="js/heic.js"></script>
 <script src="js/store.js"></script>

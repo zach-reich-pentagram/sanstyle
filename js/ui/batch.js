@@ -1,10 +1,11 @@
 /* Sanstyle — ui/batch.js
- * The automated lane, letter-first. One photo at a time: you type the
- * character you can see, the machine finds the best-matching traced shape in
- * that photo and shows it; you add it, try another shape, fall back to the
- * manual studio, or move on. The first photo appears as soon as it's ready —
- * the rest fetch and analyze in the background (Drive photos prefetch ahead).
- * Closing the modal saves the rest for later.
+ * The review queue, one photo at a time: the photo on the left with the
+ * detected shape boxed, the smoothed trace on the right. Type the character,
+ * Add to typeface — the queue advances. A photo leaves the queue ONLY when
+ * its letterform was added or you hit Skip; Edit manually checks it out to
+ * the studio (added there → it clears; abandoned → it stays queued); Save
+ * for later parks everything, including across reloads for Drive photos.
+ * The first photo shows as soon as it's analyzed; the rest stream behind.
  */
 (function (g) {
   'use strict';
@@ -12,12 +13,10 @@
   const $ = ST.$;
 
   const batch = (ST.batch = {
-    queue: [],       // photos: {name, sourceId, canvas, angle, candidates, used:Set}
-    idx: 0,          // current photo (earlier ones are done)
-    phase: 'ask',    // ask | result
-    current: null,   // {char, matches:[candIdx...], mi}
+    queue: [],       // {name, sourceId, canvas, angle, candidates, ci}
+    idx: 0,          // photos before idx are resolved
+    checkedOut: null, // photo sent to the studio, awaiting its submit
     intakeActive: false,
-    intakeTotal: 0,
   });
 
   const modal = () => $('#reviewModal');
@@ -25,7 +24,9 @@
   function hide() { modal().classList.remove('open'); updateQueuePill(); }
   function isOpen() { return modal().classList.contains('open'); }
 
-  function remaining() { return Math.max(0, batch.queue.length - batch.idx); }
+  function remaining() {
+    return Math.max(0, batch.queue.length - batch.idx) + (batch.checkedOut ? 0 : 0);
+  }
 
   function updateQueuePill() {
     const pill = $('#queuePill');
@@ -52,18 +53,14 @@
       canvas: result.canvas,
       angle: result.angle,
       candidates: result.candidates,
-      used: new Set(),
+      ci: 0,
     });
-    // first ready photo replaces the spinner immediately
-    if (isOpen() && batch.idx === batch.queue.length - 1) {
-      renderCurrent();
-    } else if (isOpen()) {
-      setProgress();
-    }
+    if (isOpen() && batch.idx === batch.queue.length - 1) renderCurrent();
+    else if (isOpen()) setProgress();
     updateQueuePill();
     return result.candidates.length;
   }
-  batch.addCanvas = pushPhoto; // kept for hooks/tests
+  batch.addCanvas = pushPhoto;
 
   function startIntake() {
     batch.intakeActive = true;
@@ -112,7 +109,6 @@
     endIntake();
   };
 
-  // Drive inbox photos: prefetch two ahead so review never waits on the network.
   batch.addRemotePhotos = async function (photos) {
     if (!photos.length) return;
     startIntake();
@@ -175,153 +171,100 @@
     $('#reviewSpinner').style.display = 'none';
     $('#reviewBody').style.display = '';
     setProgress();
-    if (batch.phase === 'ask') renderAsk(item);
-    else renderResult(item);
-  }
-  batch.renderCurrent = renderCurrent;
 
-  function renderAsk(item) {
-    $('#reviewAsk').style.display = '';
-    $('#reviewResult').style.display = 'none';
+    const cand = item.candidates[item.ci] || null;
 
-    const cnv = $('#reviewPhoto');
-    const c = cnv.getContext('2d');
-    c.clearRect(0, 0, cnv.width, cnv.height);
-    const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
+    // left: the whole photo, current shape boxed
+    const srcC = $('#reviewSource');
+    const sc = srcC.getContext('2d');
+    sc.clearRect(0, 0, srcC.width, srcC.height);
+    const s = Math.min(srcC.width / item.canvas.width, srcC.height / item.canvas.height);
     const dw = item.canvas.width * s, dh = item.canvas.height * s;
-    const ox = (cnv.width - dw) / 2, oy = (cnv.height - dh) / 2;
-    c.imageSmoothingEnabled = true;
-    c.drawImage(item.canvas, ox, oy, dw, dh);
-    // faint boxes over what the detector found
-    c.strokeStyle = 'rgba(59,130,246,0.85)';
-    c.lineWidth = 1.5;
-    for (let i = 0; i < item.candidates.length; i++) {
-      if (item.used.has(i)) continue;
-      const cr = item.candidates[i].crop;
-      c.strokeRect(ox + cr.x * s, oy + cr.y * s, cr.w * s, cr.h * s);
+    const ox = (srcC.width - dw) / 2, oy = (srcC.height - dh) / 2;
+    sc.imageSmoothingEnabled = true;
+    sc.drawImage(item.canvas, ox, oy, dw, dh);
+    if (cand) {
+      sc.strokeStyle = '#3b82f6';
+      sc.lineWidth = 2;
+      sc.strokeRect(ox + cand.crop.x * s, oy + cand.crop.y * s, cand.crop.w * s, cand.crop.h * s);
+    }
+
+    // right: the smoothed trace
+    const traceC = $('#reviewTrace');
+    const tc = traceC.getContext('2d');
+    tc.clearRect(0, 0, traceC.width, traceC.height);
+    if (cand) {
+      const bb = ST.trace.boundsOf(cand.paths);
+      if (bb) {
+        const ts = Math.min((traceC.width - 24) / bb.w, (traceC.height - 24) / bb.h);
+        const tox = (traceC.width - bb.w * ts) / 2 - bb.x0 * ts;
+        const toy = (traceC.height - bb.h * ts) / 2 - bb.y0 * ts;
+        const path = new Path2D();
+        for (const p of cand.paths) {
+          const cs = p.cubics;
+          path.moveTo(tox + cs[0][0].x * ts, toy + cs[0][0].y * ts);
+          for (const cu of cs) {
+            path.bezierCurveTo(tox + cu[1].x * ts, toy + cu[1].y * ts,
+              tox + cu[2].x * ts, toy + cu[2].y * ts, tox + cu[3].x * ts, toy + cu[3].y * ts);
+          }
+          path.closePath();
+        }
+        tc.fillStyle = '#000';
+        tc.fill(path, 'nonzero');
+      }
     }
 
     const input = $('#reviewChar');
     input.value = '';
-    const unused = item.candidates.filter((_, i) => !item.used.has(i));
-    if (!unused.length) {
-      $('#reviewHint').textContent = item.candidates.length
-        ? 'Every detected shape in this photo has been used — next photo, or edit manually.'
-        : 'No letterforms detected in this photo — edit manually, or move on.';
-      $('#reviewFind').disabled = true;
+    if (!cand) {
+      $('#reviewHint').textContent = 'Nothing traced in this photo — Edit manually, or Skip.';
+      $('#reviewAccept').disabled = true;
+      $('#reviewAlt').disabled = true;
     } else {
-      $('#reviewFind').disabled = false;
-      const best = unused[0].guess;
+      $('#reviewAccept').disabled = false;
+      $('#reviewAlt').disabled = item.candidates.length < 2;
       $('#reviewHint').textContent =
-        `${unused.length} shape${unused.length === 1 ? '' : 's'} detected` +
-        (best ? ` · the machine's guess: “${best}”` : '') +
-        ' · type the character you see and hit Enter.';
+        `Shape ${item.ci + 1} of ${item.candidates.length} · type the character and add it. ` +
+        'If the trace grabbed a neighbor or looks off, Edit manually.';
     }
     setTimeout(() => input.focus(), 60);
   }
-
-  function renderResult(item) {
-    $('#reviewAsk').style.display = 'none';
-    $('#reviewResult').style.display = '';
-    const cur = batch.current;
-    const cand = item.candidates[cur.matches[cur.mi]];
-
-    const srcC = $('#reviewSource');
-    const sc = srcC.getContext('2d');
-    sc.clearRect(0, 0, srcC.width, srcC.height);
-    const crop = cand.crop;
-    const s = Math.min(srcC.width / crop.w, srcC.height / crop.h);
-    const dw = crop.w * s, dh = crop.h * s;
-    sc.imageSmoothingEnabled = true;
-    sc.drawImage(item.canvas, crop.x, crop.y, crop.w, crop.h,
-      (srcC.width - dw) / 2, (srcC.height - dh) / 2, dw, dh);
-
-    const traceC = $('#reviewTrace');
-    const tc = traceC.getContext('2d');
-    tc.clearRect(0, 0, traceC.width, traceC.height);
-    const bb = ST.trace.boundsOf(cand.paths);
-    if (bb) {
-      const ts = Math.min((traceC.width - 20) / bb.w, (traceC.height - 20) / bb.h);
-      const ox = (traceC.width - bb.w * ts) / 2 - bb.x0 * ts;
-      const oy = (traceC.height - bb.h * ts) / 2 - bb.y0 * ts;
-      const path = new Path2D();
-      for (const p of cand.paths) {
-        const cs = p.cubics;
-        path.moveTo(ox + cs[0][0].x * ts, oy + cs[0][0].y * ts);
-        for (const cu of cs) {
-          path.bezierCurveTo(ox + cu[1].x * ts, oy + cu[1].y * ts,
-            ox + cu[2].x * ts, oy + cu[2].y * ts, ox + cu[3].x * ts, oy + cu[3].y * ts);
-        }
-        path.closePath();
-      }
-      tc.fillStyle = '#000';
-      tc.fill(path, 'nonzero');
-    }
-
-    $('#reviewConf').textContent =
-      `Best match for “${cur.char}” · similarity ${Math.round(cur.scores[cur.mi] * 100)}%` +
-      (cur.matches.length > 1 ? ` · shape ${cur.mi + 1} of ${cur.matches.length}` : '') +
-      ' · if the trace grabbed a neighbor, Edit manually and block it out.';
-    $('#reviewAlt').disabled = cur.matches.length < 2;
-  }
+  batch.renderCurrent = renderCurrent;
 
   // ---------- actions ----------
-  batch.findChar = function () {
-    const item = batch.queue[batch.idx];
-    if (!item) return false;
-    const ch = ($('#reviewChar').value || '').slice(-1);
-    if (!ch || ch === ' ') { ST.toast('Type the character first.', 'warn'); return false; }
-    const scored = [];
-    for (let i = 0; i < item.candidates.length; i++) {
-      if (item.used.has(i)) continue;
-      scored.push({ i, score: ST.classify.scoreFor(item.candidates[i].paths, ch) });
-    }
-    if (!scored.length) { ST.toast('No unused shapes in this photo.', 'warn'); return false; }
-    scored.sort((a, b) => b.score - a.score);
-    batch.current = {
-      char: ch,
-      matches: scored.map((s) => s.i),
-      scores: scored.map((s) => s.score),
-      mi: 0,
-    };
-    batch.phase = 'result';
+  function advance() {
+    batch.idx++;
     renderCurrent();
-    return true;
-  };
-
-  batch.tryNext = function () {
-    if (!batch.current || batch.current.matches.length < 2) return;
-    batch.current.mi = (batch.current.mi + 1) % batch.current.matches.length;
-    renderCurrent();
-  };
-
-  batch.backToAsk = function () {
-    batch.phase = 'ask';
-    batch.current = null;
-    renderCurrent();
-  };
+  }
 
   batch.accept = function () {
     const item = batch.queue[batch.idx];
-    if (!item || !batch.current) return false;
-    const candIdx = batch.current.matches[batch.current.mi];
-    const cand = item.candidates[candIdx];
-    const ch = batch.current.char;
+    if (!item) return false;
+    const cand = item.candidates[item.ci];
+    if (!cand) return false;
+    const ch = ($('#reviewChar').value || '').slice(-1);
+    if (!ch || ch === ' ') { ST.toast('Type the character first.', 'warn'); return false; }
     const record = ST.metrics.buildRecord(ch, cand.paths);
     if (!record) { ST.toast('Could not fit that shape.', 'warn'); return false; }
     record.thumb = ST.capture.makeThumb(record);
     ST.store.addVariant(ch, record);
-    item.used.add(candIdx);
-    ST.toast(`“${ch}” added — same photo: type another letter, or go to the next photo.`);
-    batch.backToAsk();
+    if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
+    ST.toast(`“${ch}” added — next photo.`);
+    advance();
     return true;
   };
 
-  batch.nextPhoto = function () {
+  batch.tryNext = function () {
+    const item = batch.queue[batch.idx];
+    if (!item || item.candidates.length < 2) return;
+    item.ci = (item.ci + 1) % item.candidates.length;
+    renderCurrent();
+  };
+
+  batch.skip = function () {
     const item = batch.queue[batch.idx];
     if (item && item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
-    batch.idx++;
-    batch.backToAsk();
+    advance();
   };
 
   batch.editManually = function () {
@@ -329,10 +272,7 @@
     if (!item) return;
     ST.capture.useBitmap(item.canvas, item.canvas.width, item.canvas.height);
     ST.capture.skipFlatten();
-    // pre-lasso the current shape if one is selected, else the best unused
-    let cand = null;
-    if (batch.current) cand = item.candidates[batch.current.matches[batch.current.mi]];
-    else cand = item.candidates.find((_, i) => !item.used.has(i)) || item.candidates[0];
+    const cand = item.candidates[item.ci] || item.candidates[0];
     if (cand) {
       const cr = cand.crop;
       ST.capture.lasso = [
@@ -340,19 +280,31 @@
         { x: cr.x + cr.w, y: cr.y + cr.h }, { x: cr.x, y: cr.y + cr.h },
       ];
       ST.capture.runExtraction(true);
-      if (batch.current) $('#charInput').value = batch.current.char;
-      ST.capture.updatePreview();
     }
-    if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
-    batch.idx++;
-    batch.phase = 'ask';
-    batch.current = null;
+    // Checked out, NOT resolved: only a studio submit (or a later Skip)
+    // releases this photo from the queue.
+    batch.checkedOut = item;
     hide();
     if (g.__st && g.__st.switchTab) g.__st.switchTab('capture');
-    ST.toast('Loaded into the studio — lasso or block out, then tag and add. The queue is saved.');
+    ST.toast('Loaded into the studio. Adding it there clears the photo from the queue.');
+  };
+
+  // Called by the capture studio after any successful "Add to typeface".
+  batch.onStudioSubmit = function () {
+    if (!batch.checkedOut) return;
+    const item = batch.checkedOut;
+    batch.checkedOut = null;
+    const qi = batch.queue.indexOf(item);
+    if (qi >= 0 && qi >= batch.idx) {
+      if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
+      batch.queue.splice(qi, 1);
+      if (qi < batch.idx) batch.idx--;
+    }
+    updateQueuePill();
   };
 
   batch.close = function () {
+    batch.checkedOut = null;
     hide();
     if (remaining()) {
       ST.toast(`${remaining()} photo${remaining() === 1 ? '' : 's'} saved for later — reopen from “Review queue”.`);
@@ -360,6 +312,7 @@
   };
 
   batch.reopen = function () {
+    batch.checkedOut = null;
     if (remaining()) renderCurrent();
   };
 
@@ -369,22 +322,18 @@
       if (e.target.files.length) batch.addFiles(e.target.files);
       e.target.value = '';
     });
-    $('#reviewFind').addEventListener('click', batch.findChar);
     $('#reviewAccept').addEventListener('click', batch.accept);
     $('#reviewAlt').addEventListener('click', batch.tryNext);
-    $('#reviewBack').addEventListener('click', batch.backToAsk);
-    $('#reviewNext').addEventListener('click', batch.nextPhoto);
+    $('#reviewSkip').addEventListener('click', batch.skip);
     $('#reviewEdit').addEventListener('click', batch.editManually);
-    $('#reviewEdit2').addEventListener('click', batch.editManually);
     $('#reviewClose').addEventListener('click', batch.close);
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); batch.findChar(); }
+      if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }
     });
     g.addEventListener('keydown', (e) => {
       if (!isOpen()) return;
       if (e.key === 'Escape') { e.preventDefault(); batch.close(); }
-      else if (e.key === 'Enter' && batch.phase === 'result') { e.preventDefault(); batch.accept(); }
     });
     ST.store.on('change', updateQueuePill);
   };
