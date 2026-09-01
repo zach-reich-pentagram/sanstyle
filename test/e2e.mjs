@@ -346,6 +346,39 @@ await page.mouse.click(clickInfo.screen.x, clickInfo.screen.y);
 await page.waitForTimeout(400);
 const afterRealClick = await page.evaluate(() => ST.batch.queue[ST.batch.idx].candidates.length);
 check(afterRealClick > clickInfo.after, 'a real click on the photo pane traces too');
+// cut gesture through the N's middle: region shrinks, Undo restores
+const cutRes = await page.evaluate(() => {
+  const item = ST.batch.queue[ST.batch.idx];
+  const before = ST.raster.count(item.candidates[0].mask);
+  const c = item.canvas;
+  const cx = item.lastClick.x, cy = item.lastClick.y;
+  // a vertical cut just right of the click severs the right stem of the N
+  ST.batch.addCut(cx + 45, cy - 260, cx + 45, cy + 260);
+  const after = ST.raster.count(item.candidates[0].mask);
+  const undoVisible = document.getElementById('reviewUndoCut').style.display !== 'none';
+  ST.batch.undoCut();
+  const restored = ST.raster.count(item.candidates[0].mask);
+  return { before, after, restored, undoVisible, w: c.width };
+});
+check(cutRes.after < cutRes.before * 0.8 && cutRes.undoVisible,
+  `a cut across the letter removes the far side (${cutRes.before} → ${cutRes.after} px)`);
+check(cutRes.restored > cutRes.after, `Undo cut regrows the region (${cutRes.restored} px)`);
+
+// isolate: template-guided trim of the typed character
+const isoRes = await page.evaluate(() => {
+  const item = ST.batch.queue[ST.batch.idx];
+  const cand = item.candidates[0];
+  const found = ST.classify.locate(cand.mask, cand.w, cand.h, 'N');
+  document.getElementById('reviewChar').value = 'N';
+  document.getElementById('reviewChar').dispatchEvent(new Event('input'));
+  const ok = ST.batch.isolate();
+  return { found: found ? found.score : 0, ok, kind: item.candidates[0].kind,
+    label: document.getElementById('reviewIsolate').textContent };
+});
+check(isoRes.found > 0.2, `locate scores the N against its templates (${isoRes.found.toFixed(2)})`);
+check(isoRes.label === 'Isolate “N”', 'Isolate button names the typed character');
+check(isoRes.ok === true && isoRes.kind === 'isolated', 'Isolate produced a trimmed candidate');
+
 await page.fill('#reviewChar', 'N');
 await page.click('#reviewAccept');
 await page.waitForTimeout(250);

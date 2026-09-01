@@ -43,6 +43,44 @@ test('seeded: click grows exactly the painted letter, auto-calibrated', () => {
   assert.ok(Math.abs(bb.w - 210) < 14 && Math.abs(bb.h - 280) < 14, `trace bbox ${bb.w.toFixed(0)}×${bb.h.toFixed(0)} ≈ 210×280`);
 });
 
+test('seeded: dry-brush density — the click patch still grows to the whole letter', () => {
+  const w = 420, h = 420;
+  const rnd = ST.rng(11);
+  const data = new Uint8ClampedArray(w * h * 4);
+  const inL = (x, y) => (x >= 90 && x < 150 && y >= 60 && y < 340) || (x >= 90 && x < 300 && y >= 290 && y < 340);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = (y * w + x) * 4;
+      const n = (rnd() - 0.5) * 24;
+      if (inL(x, y)) {
+        // blocky density: 20px cells alternate between dense and faint paint
+        const dense = ((Math.floor(x / 20) + Math.floor(y / 20)) % 3) !== 0;
+        const k = dense ? 1.0 : 0.45;
+        data[p] = 175 + (190 - 175) * k + n; data[p + 1] = 172 + (40 - 172) * k + n; data[p + 2] = 165 + (50 - 165) * k + n;
+      } else {
+        data[p] = 175 + n; data[p + 1] = 172 + n; data[p + 2] = 165 + n;
+      }
+      data[p + 3] = 255;
+    }
+  }
+  const cnv = { width: w, height: h, getContext: () => ({ getImageData: () => ({ data }) }) };
+  const res = ST.extract.seeded(cnv, 120, 200, {});
+  assert.ok(res, 'extraction succeeded');
+  const bb = ST.trace.boundsOf(res.candidates[0].paths);
+  assert.ok(bb.w > 190 && bb.h > 260, `whole letter captured despite density gaps (${bb.w.toFixed(0)}×${bb.h.toFixed(0)})`);
+});
+
+test('seeded with a cut: a full-width junction is severed', () => {
+  const w = 400, h = 200;
+  // two blocks joined by a bridge as tall as the blocks (no thin contact)
+  const cnv = fakeCanvas(w, h, (x, y) => y >= 60 && y < 140 && x >= 40 && x < 360);
+  const whole = ST.extract.seeded(cnv, 80, 100, {});
+  assert.ok(whole && whole.region.w > 300, 'without a cut the region spans both blocks');
+  const cut = ST.extract.seeded(cnv, 80, 100, { cuts: [{ x0: 200, y0: 40, x1: 200, y1: 160, width: 12 }] });
+  assert.ok(cut, 'cut extraction succeeded');
+  assert.ok(cut.region.x + cut.region.w < 215, `cut region stops at the cut (right edge ${cut.region.x + cut.region.w})`);
+});
+
 test('seeded: click on the wall finds nothing paint-like', () => {
   const w = 200, h = 200;
   const cnv = fakeCanvas(w, h, (x, y) => x >= 80 && x < 120 && y >= 40 && y < 160);

@@ -216,28 +216,45 @@
 
     const input = $('#reviewChar');
     input.value = '';
+    $('#reviewUndoCut').style.display = item.cuts && item.cuts.length ? '' : 'none';
     if (!cand) {
       $('#reviewHint').textContent =
         'Nothing traced yet — click the letter in the photo to trace it, or Skip.';
       $('#reviewAccept').disabled = true;
       $('#reviewAlt').disabled = true;
+      $('#reviewIsolate').disabled = true;
     } else {
       $('#reviewAccept').disabled = false;
+      $('#reviewIsolate').disabled = false;
       $('#reviewAlt').disabled = item.candidates.length < 2;
-      const kind = cand.kind === 'separated' ? ' (separated from a touching neighbor)' : '';
+      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)' }[cand.kind] || '';
       $('#reviewHint').textContent =
-        `Shape ${item.ci + 1} of ${item.candidates.length}${kind} · type the character and add it. ` +
-        'Wrong shape? Click the letter you want in the photo.';
+        `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote} · type the character and add it. ` +
+        'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate.';
+    }
+    // draw any cuts on the photo pane
+    if (item.cuts && item.cuts.length) {
+      const c = srcC.getContext('2d');
+      c.strokeStyle = 'rgba(225,29,72,0.85)';
+      c.lineWidth = 3;
+      for (const cut of item.cuts) {
+        c.beginPath();
+        c.moveTo(ox + cut.x0 * s, oy + cut.y0 * s);
+        c.lineTo(ox + cut.x1 * s, oy + cut.y1 * s);
+        c.stroke();
+      }
     }
     setTimeout(() => input.focus(), 60);
   }
   batch.renderCurrent = renderCurrent;
 
+  // ---------- click-to-trace, cut, isolate ----------
   // Click-to-trace: canvas-pixel coordinates on the current photo.
   batch.clickTrace = function (x, y) {
     const item = batch.queue[batch.idx];
     if (!item) return 0;
-    const res = ST.extract.seeded(item.canvas, x, y, {});
+    item.lastClick = { x, y };
+    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null });
     if (!res) {
       ST.toast('Nothing paint-like under that click — try the middle of a stroke.', 'warn');
       return 0;
@@ -248,19 +265,121 @@
     return res.candidates.length;
   };
 
-  function onPhotoClick(e) {
+  function cutWidthFor(item) {
+    const cand = item.candidates[item.ci];
+    if (cand) {
+      const sw = ST.raster.strokeWidth(cand.mask, cand.w, cand.h);
+      if (sw > 2) return Math.max(6, Math.round(sw * 1.3));
+    }
+    return Math.max(8, Math.round(Math.max(item.canvas.width, item.canvas.height) * 0.012));
+  }
+
+  // A cut is a short stroke drawn across a junction; ink under it is removed
+  // before the region is grown again from the last click.
+  batch.addCut = function (x0, y0, x1, y1) {
     const item = batch.queue[batch.idx];
-    if (!item) return;
+    if (!item) return false;
+    item.cuts = item.cuts || [];
+    item.cuts.push({ x0, y0, x1, y1, width: cutWidthFor(item) });
+    const click = item.lastClick || { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    // re-grow from the click; if the click sat on the cut, nudge off it
+    let n = batch.clickTrace(click.x, click.y);
+    if (!n && item.lastClick) n = batch.clickTrace(item.lastClick.x, item.lastClick.y);
+    $('#reviewUndoCut').style.display = '';
+    return n > 0;
+  };
+
+  batch.undoCut = function () {
+    const item = batch.queue[batch.idx];
+    if (!item || !item.cuts || !item.cuts.length) return;
+    item.cuts.pop();
+    if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y);
+    else renderCurrent();
+    if (!item.cuts.length) $('#reviewUndoCut').style.display = 'none';
+  };
+
+  // "Isolate the 2": template-guided trim of the current shape to the typed
+  // character, keeping the piece under the last click.
+  batch.isolate = function () {
+    const item = batch.queue[batch.idx];
+    const cand = item && item.candidates[item.ci];
+    const ch = ($('#reviewChar').value || '').slice(-1);
+    if (!cand || !ch || ch === ' ') { ST.toast('Type the character first, then Isolate.', 'warn'); return false; }
+    if (!ST.classify) return false;
+    const lc = item.lastClick
+      ? { x: item.lastClick.x - cand.crop.x, y: item.lastClick.y - cand.crop.y }
+      : { x: cand.w / 2, y: cand.h / 2 };
+    const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y);
+    if (!res) {
+      ST.toast(`Couldn't find a confident “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
+      return false;
+    }
+    const clean = ST.extract.cleanMask(res.mask, cand.w, cand.h, 4);
+    const paths = ST.trace.vectorize(clean, cand.w, cand.h, {});
+    if (!paths.length) return false;
+    item.candidates.unshift({ crop: cand.crop, mask: clean, w: cand.w, h: cand.h, paths, kind: 'isolated' });
+    item.ci = 0;
+    const keep = $('#reviewChar').value;
+    renderCurrent();
+    $('#reviewChar').value = keep;
+    ST.toast(`Isolated a “${ch}” (match ${Math.round(res.score * 100)}%).`);
+    return true;
+  };
+
+  // Pane gesture: click = trace that letter, drag = cut across a junction.
+  let paneDrag = null;
+  function paneToCanvas(e) {
+    const item = batch.queue[batch.idx];
     const cnv = $('#reviewSource');
     const rect = cnv.getBoundingClientRect();
     const px = (e.clientX - rect.left) * (cnv.width / rect.width);
     const py = (e.clientY - rect.top) * (cnv.height / rect.height);
     const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
-    const dw = item.canvas.width * s, dh = item.canvas.height * s;
-    const ox = (cnv.width - dw) / 2, oy = (cnv.height - dh) / 2;
-    const x = (px - ox) / s, y = (py - oy) / s;
-    if (x < 0 || y < 0 || x >= item.canvas.width || y >= item.canvas.height) return;
-    batch.clickTrace(x, y);
+    const ox = (cnv.width - item.canvas.width * s) / 2, oy = (cnv.height - item.canvas.height * s) / 2;
+    return { x: (px - ox) / s, y: (py - oy) / s, s, ox, oy, px, py };
+  }
+
+  function onPanePointerDown(e) {
+    const item = batch.queue[batch.idx];
+    if (!item || e.button !== 0) return;
+    const p = paneToCanvas(e);
+    paneDrag = { start: p, last: p, moved: false };
+    $('#reviewSource').setPointerCapture(e.pointerId);
+  }
+
+  function onPanePointerMove(e) {
+    if (!paneDrag) return;
+    const p = paneToCanvas(e);
+    if (Math.hypot(p.px - paneDrag.start.px, p.py - paneDrag.start.py) > 6) paneDrag.moved = true;
+    paneDrag.last = p;
+    if (paneDrag.moved) {
+      renderCurrent();
+      const c = $('#reviewSource').getContext('2d');
+      c.strokeStyle = '#e11d48';
+      c.lineWidth = 3;
+      c.setLineDash([6, 4]);
+      c.beginPath();
+      c.moveTo(paneDrag.start.px, paneDrag.start.py);
+      c.lineTo(p.px, p.py);
+      c.stroke();
+      c.setLineDash([]);
+    }
+  }
+
+  function onPanePointerUp(e) {
+    if (!paneDrag) return;
+    const d = paneDrag;
+    paneDrag = null;
+    try { $('#reviewSource').releasePointerCapture(e.pointerId); } catch (err) { /* released */ }
+    const item = batch.queue[batch.idx];
+    if (!item) return;
+    const inside = (p) => p.x >= 0 && p.y >= 0 && p.x < item.canvas.width && p.y < item.canvas.height;
+    if (d.moved) {
+      if (inside(d.start) || inside(d.last)) batch.addCut(d.start.x, d.start.y, d.last.x, d.last.y);
+      else renderCurrent();
+    } else if (inside(d.start)) {
+      batch.clickTrace(d.start.x, d.start.y);
+    }
   }
 
   // ---------- actions ----------
@@ -360,7 +479,17 @@
     $('#reviewSkip').addEventListener('click', batch.skip);
     $('#reviewEdit').addEventListener('click', batch.editManually);
     $('#reviewClose').addEventListener('click', batch.close);
-    $('#reviewSource').addEventListener('click', onPhotoClick);
+    $('#reviewIsolate').addEventListener('click', batch.isolate);
+    $('#reviewUndoCut').addEventListener('click', batch.undoCut);
+    const pane = $('#reviewSource');
+    pane.addEventListener('pointerdown', onPanePointerDown);
+    pane.addEventListener('pointermove', onPanePointerMove);
+    pane.addEventListener('pointerup', onPanePointerUp);
+    pane.addEventListener('pointercancel', () => { paneDrag = null; });
+    $('#reviewChar').addEventListener('input', () => {
+      const ch = ($('#reviewChar').value || '').slice(-1);
+      $('#reviewIsolate').textContent = ch && ch !== ' ' ? `Isolate “${ch}”` : 'Isolate';
+    });
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }

@@ -150,6 +150,106 @@
     return { grid: gridded.grid, aspect: gridded.aspect, holes };
   };
 
+  // ---------- template-guided localization ("isolate the 2") ----------
+  function integralImage(mask, w, h) {
+    const I = new Float64Array((w + 1) * (h + 1));
+    for (let y = 1; y <= h; y++) {
+      let row = 0;
+      for (let x = 1; x <= w; x++) {
+        row += mask[(y - 1) * w + (x - 1)];
+        I[y * (w + 1) + x] = I[(y - 1) * (w + 1) + x] + row;
+      }
+    }
+    return (x0, y0, x1, y1) => // sum over [x0,x1) × [y0,y1)
+      I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
+  }
+
+  // Coverage grid of the mask inside box b (GRID×GRID, aspect preserved
+  // exactly like gridFromMask so it's comparable with the templates).
+  function gridInBox(sum, b) {
+    const s = Math.min(GRID / b.w, GRID / b.h);
+    const gw = Math.max(1, Math.round(b.w * s)), gh = Math.max(1, Math.round(b.h * s));
+    const ox = Math.floor((GRID - gw) / 2), oy = Math.floor((GRID - gh) / 2);
+    const grid = new Float32Array(GRID * GRID);
+    for (let gy = 0; gy < gh; gy++) {
+      const y0 = Math.floor(b.y + (gy / gh) * b.h), y1 = Math.max(y0 + 1, Math.floor(b.y + ((gy + 1) / gh) * b.h));
+      for (let gx = 0; gx < gw; gx++) {
+        const x0 = Math.floor(b.x + (gx / gw) * b.w), x1 = Math.max(x0 + 1, Math.floor(b.x + ((gx + 1) / gw) * b.w));
+        grid[(oy + gy) * GRID + (ox + gx)] = sum(x0, y0, x1, y1) / ((x1 - x0) * (y1 - y0));
+      }
+    }
+    return grid;
+  }
+
+  /**
+   * Where inside this (possibly fused) mask is the character `ch`?
+   * Searches boxes over positions, heights, and aspect multipliers, scoring
+   * the mask coverage inside each box against every template of `ch`.
+   * Returns { box: {x,y,w,h}, score } or null.
+   */
+  cls.locate = function (mask, w, h, ch) {
+    const bb = ST.raster.maskBounds(mask, w, h);
+    if (!bb) return null;
+    const tpls = cls.buildTemplates().filter((t) => t.ch === ch.toUpperCase() || t.ch === ch);
+    if (!tpls.length) return null;
+    const sum = integralImage(mask, w, h);
+    let best = null;
+    const hSteps = [1.0, 0.85, 0.72, 0.6, 0.5, 0.42];
+    const aMul = [0.75, 1.0, 1.3, 1.65];
+    for (const t of tpls) {
+      for (const hs of hSteps) {
+        const bh = Math.max(8, Math.round(bb.h * hs));
+        for (const am of aMul) {
+          const bw = Math.max(8, Math.min(Math.round(bh * t.aspect * am), bb.w));
+          const stepX = Math.max(2, Math.round((bb.w - bw) / 9));
+          const stepY = Math.max(2, Math.round((bb.h - bh) / 9));
+          for (let y = bb.y0; y + bh <= bb.y1 + 1; y += stepY) {
+            for (let x = bb.x0; x + bw <= bb.x1 + 1; x += stepX) {
+              const box = { x, y, w: bw, h: bh };
+              const fill = sum(x, y, x + bw, y + bh) / (bw * bh);
+              if (fill < 0.04) continue;
+              const score = cls.gridIoU(gridInBox(sum, box), t.grid);
+              if (!best || score > best.score) best = { box, score, ch: t.ch };
+              if (bw >= bb.w) break;
+            }
+            if (bh >= bb.h) break;
+          }
+        }
+      }
+    }
+    return best;
+  };
+
+  /**
+   * Trim a mask to the located character: keep ink inside the box (with a
+   * small margin) that is connected to the click. Returns {mask, score} or
+   * null when no confident match.
+   */
+  cls.isolate = function (mask, w, h, ch, cx, cy, minScore) {
+    const found = cls.locate(mask, w, h, ch);
+    if (!found || found.score < (minScore == null ? 0.26 : minScore)) return null;
+    const b = found.box;
+    const mx = Math.round(b.w * 0.07), my = Math.round(b.h * 0.07);
+    const x0 = Math.max(0, b.x - mx), x1 = Math.min(w, b.x + b.w + mx);
+    const y0 = Math.max(0, b.y - my), y1 = Math.min(h, b.y + b.h + my);
+    const boxed = new Uint8Array(w * h);
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) boxed[y * w + x] = mask[y * w + x];
+    // component under (or nearest to) the click, else the largest
+    let sx = Math.round(cx), sy = Math.round(cy);
+    if (!boxed[sy * w + sx]) {
+      let bd = Infinity;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        if (boxed[y * w + x]) {
+          const d = (x - cx) ** 2 + (y - cy) ** 2;
+          if (d < bd) { bd = d; sx = x; sy = y; }
+        }
+      }
+    }
+    const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
+    if (comp.count < 30) return null;
+    return { mask: comp.mask, score: found.score, box: found.box };
+  };
+
   /**
    * How well do these traced contours match one specific character?
    * Returns the best template score (0..1-ish) — used by the letter-first

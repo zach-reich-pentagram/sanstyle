@@ -387,7 +387,9 @@
           <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
         </label>
         <button class="pill primary" id="reviewAccept">Add to typeface</button>
+        <button class="pill" id="reviewIsolate" title="Trim the shape to the typed character">Isolate</button>
         <button class="pill" id="reviewAlt">Try another shape</button>
+        <button class="pill" id="reviewUndoCut" style="display:none">Undo cut</button>
         <button class="pill" id="reviewEdit">Edit manually</button>
         <button class="pill" id="reviewSkip">Skip photo</button>
       </div>
@@ -403,6 +405,7 @@
 <script src="js/fitting.js"></script>
 <script src="js/ttf.js"></script>
 <script src="js/auto.js"></script>
+<script src="js/classify.js"></script>
 <script src="js/extract.js"></script>
 <script src="js/heic.js"></script>
 <script src="js/store.js"></script>
