@@ -269,13 +269,23 @@
       const pass = $('#gateInput').value.trim();
       if (pass) sync.tryUnlock(pass, false);
     });
-    $('#syncPill').addEventListener('click', () => {
-      if (sync.status === 'error') {
-        ST.toast('Sync: ' + (sync.lastError || 'unknown error') + ' — retrying.', 'warn');
-        sync.pushNow();
-      } else {
-        sync.manualSync();
+    $('#syncPill').addEventListener('click', async () => {
+      if (sync.status !== 'error') { sync.manualSync(); return; }
+      // Explain the failure: probe each Drive folder + a write, then retry.
+      try {
+        const res = await sync.api('GET', 'api/diag');
+        const d = await res.json();
+        const line = (label, s) => `${label}: ${s.ok ? 'ok' : 'FAILED — ' + s.error}`;
+        ST.toast([
+          line('Google token', d.token),
+          line('Inbox folder', d.inbox),
+          line('Letterforms folder', d.library),
+          line('Write test', d.write),
+        ].join(' · '), 'warn');
+      } catch (e) {
+        ST.toast('Sync: ' + (sync.lastError || 'unknown error'), 'warn');
       }
+      sync.pushNow();
     });
     $('#inboxExtract').addEventListener('click', sync.extractPending);
     $('#inboxLater').addEventListener('click', () => {

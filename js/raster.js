@@ -120,6 +120,59 @@
     return out;
   };
 
+  // Per-pixel chroma (max−min of RGB): spray and marker are chromatic,
+  // walls are mostly gray — a far more reliable separator than luminance
+  // whenever the paint has any color at all.
+  raster.saturation = function (data, w, h) {
+    const out = new Uint8Array(w * h);
+    for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+      const r = data[p], g = data[p + 1], b = data[p + 2];
+      out[i] = Math.max(r, g, b) - Math.min(r, g, b);
+    }
+    return out;
+  };
+
+  // Connected region (4-neighborhood) of the predicate containing (sx, sy).
+  // pred(i) → truthy for pixels that belong. Returns {mask, count}.
+  raster.floodFrom = function (w, h, sx, sy, pred) {
+    const mask = new Uint8Array(w * h);
+    const start = sy * w + sx;
+    if (sx < 0 || sy < 0 || sx >= w || sy >= h || !pred(start)) return { mask, count: 0 };
+    const stack = new Int32Array(w * h);
+    let sp = 0, count = 0;
+    stack[sp++] = start;
+    mask[start] = 1;
+    while (sp) {
+      const j = stack[--sp];
+      count++;
+      const x = j % w, y = (j / w) | 0;
+      if (x > 0 && !mask[j - 1] && pred(j - 1)) { mask[j - 1] = 1; stack[sp++] = j - 1; }
+      if (x < w - 1 && !mask[j + 1] && pred(j + 1)) { mask[j + 1] = 1; stack[sp++] = j + 1; }
+      if (y > 0 && !mask[j - w] && pred(j - w)) { mask[j - w] = 1; stack[sp++] = j - w; }
+      if (y < h - 1 && !mask[j + w] && pred(j + w)) { mask[j + w] = 1; stack[sp++] = j + w; }
+    }
+    return { mask, count };
+  };
+
+  // Geodesic reconstruction: grow `marker` by `iters` single-pixel dilations,
+  // never leaving `limit`. Recovers a letter's full stroke width after an
+  // opening has broken its contact with a touching neighbor.
+  raster.reconstruct = function (marker, limit, w, h, iters) {
+    let cur = marker;
+    for (let k = 0; k < iters; k++) {
+      const d = raster.dilate(cur, w, h, 1);
+      const next = new Uint8Array(w * h);
+      let changed = false;
+      for (let i = 0; i < next.length; i++) {
+        next[i] = d[i] && limit[i] ? 1 : 0;
+        if (next[i] !== cur[i]) changed = true;
+      }
+      cur = next;
+      if (!changed) break;
+    }
+    return cur;
+  };
+
   // Ink pixels bordering background (4-neighborhood).
   raster.perimeter = function (mask, w, h) {
     let n = 0;

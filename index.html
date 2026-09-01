@@ -71,7 +71,7 @@
     <div class="step" id="step-lasso">
       <div class="step-head"><span class="step-num">3</span> Lasso</div>
       <div class="step-body">
-        <p>Loop one letterform — drag to draw, or place polygon points.</p>
+        <p>Click a letterform with the Click tool to trace it — or loop it: drag to draw, or place polygon points.</p>
         <div class="btn-row">
           <button class="pill sm" id="lassoReset">Reset loop</button>
         </div>
@@ -153,6 +153,7 @@
   <div class="stage-wrap">
     <canvas id="stage"></canvas>
     <div class="stage-tools seg">
+      <button id="toolClick" class="seg-btn" title="Click a letterform to trace it">Click</button>
       <button id="toolLasso" class="seg-btn on" title="Freehand lasso">Lasso</button>
       <button id="toolPoly" class="seg-btn" title="Polygon lasso — click points, click the first point or press Enter to close">Polygon</button>
       <button id="toolHand" class="seg-btn" title="Pan (or hold space)">Hand</button>
@@ -402,6 +403,7 @@
 <script src="js/fitting.js"></script>
 <script src="js/ttf.js"></script>
 <script src="js/auto.js"></script>
+<script src="js/extract.js"></script>
 <script src="js/heic.js"></script>
 <script src="js/store.js"></script>
 <script src="js/demo.js"></script>

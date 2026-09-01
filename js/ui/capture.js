@@ -753,6 +753,10 @@
     }
     if (ev.button !== 0 || cap.step === 'flatten') return;
 
+    if (cap.tool === 'click') {
+      cap.clickTrace(ip);
+      return;
+    }
     if (cap.blockArmed) {
       cap.blocks.push({ x: ip.x, y: ip.y, r: cap.blockR });
       dragging = { kind: 'block', last: ip };
@@ -882,12 +886,38 @@
     if (tool !== 'poly') cancelPoly();
     cap.eyedrop = false;
     $('#eyedropBtn') && $('#eyedropBtn').classList.remove('on');
-    for (const [id, t] of [['#toolLasso', 'lasso'], ['#toolPoly', 'poly'], ['#toolHand', 'hand']]) {
+    for (const [id, t] of [['#toolClick', 'click'], ['#toolLasso', 'lasso'], ['#toolPoly', 'poly'], ['#toolHand', 'hand']]) {
       const el = $(id);
       if (el) el.classList.toggle('on', tool === t);
     }
+    if (tool === 'click' && cap.img) setHint('Click the middle of a letterform to trace it.');
   }
   cap.setTool = setTool;
+
+  // Click-to-trace in the studio: seeded extraction becomes the current
+  // selection, expressed through the normal ink pipeline (paint color +
+  // calibrated range + a loop around the region) so every slider still works.
+  cap.clickTrace = function (ip) {
+    if (!cap.img) return false;
+    const res = ST.extract.seeded(cap.img, ip.x, ip.y, { smoothing: cap.ink.smoothing });
+    if (!res) {
+      ST.toast('Nothing paint-like under that click — try the middle of a stroke.', 'warn');
+      return false;
+    }
+    const r = res.region;
+    cap.lasso = [
+      { x: r.x, y: r.y }, { x: r.x + r.w, y: r.y },
+      { x: r.x + r.w, y: r.y + r.h }, { x: r.x, y: r.y + r.h },
+    ];
+    cap.polyPts = null;
+    cap.ink.seeds = [res.seed];
+    cap.ink.tol = ST.clamp(Math.round((res.tolerance - 8) / 3.4), 2, 90);
+    const tolEl = $('#inkTol'); if (tolEl) tolEl.value = cap.ink.tol;
+    syncInkMode('color');
+    updateSeedChips();
+    runExtraction(false);
+    return true;
+  };
 
   function setBlockArmed(on) {
     cap.blockArmed = on;
@@ -961,6 +991,7 @@
 
     $('#toolFit').addEventListener('click', fitView);
     $('#toolHand').addEventListener('click', () => setTool(cap.tool === 'hand' ? 'lasso' : 'hand'));
+    $('#toolClick').addEventListener('click', () => setTool('click'));
     $('#toolLasso').addEventListener('click', () => setTool('lasso'));
     $('#toolPoly').addEventListener('click', () => setTool('poly'));
 

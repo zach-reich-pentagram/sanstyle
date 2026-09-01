@@ -210,6 +210,24 @@ test('library PUT writes json + svgs and trashes orphaned svg mirrors', async ()
   assert.ok(upserts.some((c) => c.kind === 'create' && c.body.includes('library.json')), 'library.json written');
 });
 
+test('diag reports per-folder access, including a failed write', async () => {
+  const diagHandler = require('../api/diag.js');
+  stubFetch([
+    tokenRoute,
+    ['upload/drive/v3/files?', async () => ({ status: 403, json: { error: 'insufficient permissions' } })],
+    ['/drive/v3/files?', async (u) => ({
+      json: { files: decodeQuery(u).includes("'INBOX123456'") ? [{ id: 'a' }, { id: 'b' }] : [] },
+    })],
+  ]);
+  const res = mockRes();
+  await diagHandler(mockReq('GET', '/api/diag'), res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(res.json.token.ok && res.json.inbox.ok && res.json.library.ok);
+  assert.ok(res.json.inbox.detail.startsWith('2 file'));
+  assert.strictEqual(res.json.write.ok, false, 'write probe surfaces the 403');
+  assert.ok(/403/.test(res.json.write.error));
+});
+
 test('svgIdFromName parses mirror filenames', () => {
   assert.strictEqual(L.svgIdFromName('A-caps__abc123x.svg'), 'abc123x');
   assert.strictEqual(L.svgIdFromName('hash__9f2k1qz8.svg'), '9f2k1qz8');

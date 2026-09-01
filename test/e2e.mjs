@@ -91,6 +91,12 @@ const apiServer = createServer(async (req, res) => {
       return json(200, { ok: true, svgIds: [...cloud.svgs.keys()] });
     }
     if (url.pathname === '/api/inbox') return json(200, { photos: cloud.inbox });
+    if (url.pathname === '/api/diag') {
+      return json(200, {
+        token: { ok: true }, inbox: { ok: true, detail: `${cloud.inbox.length} file(s)` },
+        library: { ok: true }, write: { ok: true },
+      });
+    }
     if (url.pathname === '/api/photo') {
       const b = cloud.photoBytes.get(url.searchParams.get('id'));
       if (!b) return json(404, { error: 'nope' });
@@ -305,6 +311,72 @@ const afterT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T'
 check(afterT === beforeT + 1, 'Add to typeface stored the letterform');
 const closedAfter = await page.evaluate(() => !document.getElementById('reviewModal').classList.contains('open'));
 check(closedAfter, 'accepting the only photo finishes the queue');
+
+// click-to-trace: click the letter in the photo pane → seeded extraction
+console.log('\n— click-to-trace + studio auto-advance');
+const clickInfo = await page.evaluate(() => {
+  const wall = ST.demo.makeWall('N', 999);
+  ST.batch.addCanvas(wall.canvas, 'click-n');
+  ST.batch.reopen();
+  const b = wall.letterBox;
+  const item = ST.batch.queue[ST.batch.idx];
+  // demo walls draw the letter centred in letterBox; the N's diagonal
+  // passes through the centre
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  const before = item.candidates.length;
+  const n = ST.batch.clickTrace(cx, cy);
+  const cnv = document.getElementById('reviewSource');
+  const rect = cnv.getBoundingClientRect();
+  const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
+  const ox = (cnv.width - item.canvas.width * s) / 2, oy = (cnv.height - item.canvas.height * s) / 2;
+  return {
+    n, before, after: item.candidates.length,
+    kind: item.candidates[0].kind,
+    hint: document.getElementById('reviewHint').textContent,
+    screen: {
+      x: rect.left + (ox + cx * s) * (rect.width / cnv.width),
+      y: rect.top + (oy + cy * s) * (rect.height / cnv.height),
+    },
+  };
+});
+check(clickInfo.n >= 1 && clickInfo.after > clickInfo.before,
+  `clickTrace grew a traced letterform from one click (${clickInfo.n} candidate(s), kind ${clickInfo.kind})`);
+check(/Shape 1 of/.test(clickInfo.hint), 'clicked shape becomes the current one');
+await page.mouse.click(clickInfo.screen.x, clickInfo.screen.y);
+await page.waitForTimeout(400);
+const afterRealClick = await page.evaluate(() => ST.batch.queue[ST.batch.idx].candidates.length);
+check(afterRealClick > clickInfo.after, 'a real click on the photo pane traces too');
+await page.fill('#reviewChar', 'N');
+await page.click('#reviewAccept');
+await page.waitForTimeout(250);
+check((await page.evaluate(() => ST.store.slot('N').variants.length)) >= 2, 'click-traced N added');
+
+// studio round-trip: Edit manually → add in the studio → next photo pops up
+await page.evaluate(() => {
+  ST.batch.addCanvas(ST.demo.makeWall('E', 1001).canvas, 'studio-e');
+  ST.batch.addCanvas(ST.demo.makeWall('T', 1002).canvas, 'studio-t');
+  ST.batch.reopen();
+});
+await page.waitForTimeout(150);
+await page.click('#reviewEdit');
+await page.waitForTimeout(200);
+const inStudio = await page.evaluate(() => ({
+  step: ST.capture.step, queued: __st.state().queue,
+  open: document.getElementById('reviewModal').classList.contains('open'),
+}));
+check(inStudio.step === 'ink' && !inStudio.open && inStudio.queued === 2,
+  'Edit manually loads the studio and keeps the photo queued');
+await page.evaluate(() => __st.tagAndSubmit('E'));
+await page.waitForTimeout(500);
+const afterStudio = await page.evaluate(() => ({
+  queued: __st.state().queue,
+  open: document.getElementById('reviewModal').classList.contains('open'),
+  progress: document.getElementById('reviewProgress').textContent,
+}));
+check(afterStudio.queued === 1 && afterStudio.open,
+  `studio submit clears that photo and brings up the next (${afterStudio.progress})`);
+await page.click('#reviewSkip');
+await page.waitForTimeout(200);
 
 // skip-only removal: a photo stays queued through save-for-later
 await page.evaluate(() => __st.autoFromDemo('O'));

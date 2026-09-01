@@ -217,19 +217,51 @@
     const input = $('#reviewChar');
     input.value = '';
     if (!cand) {
-      $('#reviewHint').textContent = 'Nothing traced in this photo — Edit manually, or Skip.';
+      $('#reviewHint').textContent =
+        'Nothing traced yet — click the letter in the photo to trace it, or Skip.';
       $('#reviewAccept').disabled = true;
       $('#reviewAlt').disabled = true;
     } else {
       $('#reviewAccept').disabled = false;
       $('#reviewAlt').disabled = item.candidates.length < 2;
+      const kind = cand.kind === 'separated' ? ' (separated from a touching neighbor)' : '';
       $('#reviewHint').textContent =
-        `Shape ${item.ci + 1} of ${item.candidates.length} · type the character and add it. ` +
-        'If the trace grabbed a neighbor or looks off, Edit manually.';
+        `Shape ${item.ci + 1} of ${item.candidates.length}${kind} · type the character and add it. ` +
+        'Wrong shape? Click the letter you want in the photo.';
     }
     setTimeout(() => input.focus(), 60);
   }
   batch.renderCurrent = renderCurrent;
+
+  // Click-to-trace: canvas-pixel coordinates on the current photo.
+  batch.clickTrace = function (x, y) {
+    const item = batch.queue[batch.idx];
+    if (!item) return 0;
+    const res = ST.extract.seeded(item.canvas, x, y, {});
+    if (!res) {
+      ST.toast('Nothing paint-like under that click — try the middle of a stroke.', 'warn');
+      return 0;
+    }
+    item.candidates = res.candidates.concat(item.candidates);
+    item.ci = 0;
+    renderCurrent();
+    return res.candidates.length;
+  };
+
+  function onPhotoClick(e) {
+    const item = batch.queue[batch.idx];
+    if (!item) return;
+    const cnv = $('#reviewSource');
+    const rect = cnv.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (cnv.width / rect.width);
+    const py = (e.clientY - rect.top) * (cnv.height / rect.height);
+    const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
+    const dw = item.canvas.width * s, dh = item.canvas.height * s;
+    const ox = (cnv.width - dw) / 2, oy = (cnv.height - dh) / 2;
+    const x = (px - ox) / s, y = (py - oy) / s;
+    if (x < 0 || y < 0 || x >= item.canvas.width || y >= item.canvas.height) return;
+    batch.clickTrace(x, y);
+  }
 
   // ---------- actions ----------
   function advance() {
@@ -289,7 +321,8 @@
     ST.toast('Loaded into the studio. Adding it there clears the photo from the queue.');
   };
 
-  // Called by the capture studio after any successful "Add to typeface".
+  // Called by the capture studio after any successful "Add to typeface":
+  // clears the checked-out photo and brings up the next one automatically.
   batch.onStudioSubmit = function () {
     if (!batch.checkedOut) return;
     const item = batch.checkedOut;
@@ -298,9 +331,9 @@
     if (qi >= 0 && qi >= batch.idx) {
       if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
       batch.queue.splice(qi, 1);
-      if (qi < batch.idx) batch.idx--;
     }
     updateQueuePill();
+    if (remaining()) setTimeout(renderCurrent, 250);
   };
 
   batch.close = function () {
@@ -327,6 +360,7 @@
     $('#reviewSkip').addEventListener('click', batch.skip);
     $('#reviewEdit').addEventListener('click', batch.editManually);
     $('#reviewClose').addEventListener('click', batch.close);
+    $('#reviewSource').addEventListener('click', onPhotoClick);
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }

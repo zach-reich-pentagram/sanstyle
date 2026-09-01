@@ -104,12 +104,14 @@
         if (y < c.y0) c.y0 = y; if (y > c.y1) c.y1 = y;
       }
     }
+    // Filters stay permissive: tight-cropped, thin-stroked handstyles fill
+    // most of the frame and have low solidity — both are legitimate.
     let kept = comps.filter((c) => {
       const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
-      if (bw * bh > imgArea * 0.72) return false;              // the whole wall
-      if (c.area / (bw * bh) < 0.045) return false;            // wispy noise
+      if (bw * bh > imgArea * 0.96) return false;              // the whole wall
+      if (c.area / (bw * bh) < 0.02) return false;             // pure wisp
       const touchL = c.x0 <= 1, touchR = c.x1 >= w - 2, touchT = c.y0 <= 1, touchB = c.y1 >= h - 2;
-      if ((touchL + touchR + touchT + touchB) >= 2) return false; // clipped edge junk
+      if ((touchL + touchR + touchT + touchB) >= 3) return false; // frame-edge junk
       return true;
     });
     kept.sort((a, b) => b.area - a.area);
@@ -135,9 +137,40 @@
         groups.push({ labels: [c.label], x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, area: c.area });
       }
     }
-    // left-to-right reading order
-    groups.sort((a, b) => a.x0 - b.x0);
+    // most prominent first — the main letterform, not a stray tick
+    groups.sort((a, b) => b.area - a.area);
     return { groups, labels };
+  }
+
+  // Chromatic paint detection: if the image carries a clearly colored
+  // cluster against a mostly-gray wall, build the mask from color distance
+  // to that paint instead of luminance. Returns a mask or null.
+  function chromaticMask(data, W, H) {
+    const sat = ST.raster.saturation(data, W, H);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < sat.length; i++) hist[sat[i]]++;
+    const pct = (p) => {
+      let acc = 0;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= p * sat.length) return v; }
+      return 255;
+    };
+    const wallSat = pct(0.5), topSat = pct(0.97);
+    if (!(topSat > 60 && topSat - wallSat > 35)) return null;
+    const cut = wallSat + (topSat - wallSat) * 0.5;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0, p = 0; i < sat.length; i++, p += 4) {
+      if (sat[i] >= cut) { r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
+    }
+    if (n < 200) return null;
+    const seed = { r: r / n, g: g / n, b: b / n };
+    const field = ST.raster.blur(ST.raster.colorDistMap(data, W, H, [seed]), W, H, 2);
+    // Otsu on the (compressed) distance field separates paint from wall
+    const q = new Uint8Array(W * H);
+    for (let i = 0; i < q.length; i++) q[i] = Math.min(255, Math.round(field[i] * 0.6));
+    const t = ST.raster.otsu(q, null);
+    const mask = new Uint8Array(W * H);
+    for (let i = 0; i < q.length; i++) if (q[i] < t) mask[i] = 1;
+    return mask;
   }
 
   /**
@@ -192,11 +225,18 @@
       return { mask, det, n: det.groups ? det.groups.length : 0 };
     };
 
-    // bright wall → paint is probably dark; fall back to the other polarity
-    let first = tryPolarity(mean <= 128);
-    let second = null;
+    // colored paint on a gray wall → chroma beats luminance; otherwise
+    // bright wall → paint is probably dark, with the other polarity as fallback
+    let first = null;
+    const chroma = chromaticMask(img.data, W, H);
+    if (chroma) {
+      const m = ST.raster.open(chroma, W, H, 1);
+      const det = detectCandidates(m, W, H, area);
+      if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length };
+    }
+    if (!first) first = tryPolarity(mean <= 128);
     if (!first.n) {
-      second = tryPolarity(mean > 128);
+      const second = tryPolarity(mean > 128);
       if (second.n) first = second;
     }
     const { mask, det } = first;
@@ -215,15 +255,10 @@
             if (mask[gi] && want.has(det.labels[gi])) sub[y * cw + x] = 1;
           }
         }
-        // structural smoothing at letterform scale, capped by stroke width
-        // so thin strokes survive — same recipe as the manual studio
-        let clean = ST.raster.despeckle(sub, cw, ch, 0.04, 24);
-        const strokeW = ST.raster.strokeWidth(clean, cw, ch);
-        const rBase = (o.smoothing != null ? o.smoothing : 4) * 1.2 * (Math.max(cw, ch) / 700);
-        const r = Math.max(1, Math.min(Math.round(rBase), Math.floor(strokeW * 0.33) || 1));
-        clean = ST.raster.close(clean, cw, ch, r);
-        clean = ST.raster.open(clean, cw, ch, r);
-        clean = ST.raster.fillHoles(clean, cw, ch, o.fillHoles);
+        // same stroke-width-capped clean-up as click-to-trace and the studio
+        const clean = ST.extract
+          ? ST.extract.cleanMask(sub, cw, ch, o.smoothing != null ? o.smoothing : 4)
+          : ST.raster.fillHoles(ST.raster.close(sub, cw, ch, 1), cw, ch, o.fillHoles);
         const paths = ST.trace.vectorize(clean, cw, ch, {});
         if (!paths.length) continue;
         candidates.push({
