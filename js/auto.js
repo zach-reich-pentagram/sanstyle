@@ -142,35 +142,51 @@
     return { groups, labels };
   }
 
-  // Chromatic paint detection: if the image carries a clearly colored
-  // cluster against a mostly-gray wall, build the mask from color distance
-  // to that paint instead of luminance. Returns a mask or null.
-  function chromaticMask(data, W, H) {
-    const sat = ST.raster.saturation(data, W, H);
-    const hist = new Uint32Array(256);
-    for (let i = 0; i < sat.length; i++) hist[sat[i]]++;
-    const pct = (p) => {
-      let acc = 0;
-      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= p * sat.length) return v; }
-      return 255;
-    };
-    const wallSat = pct(0.5), topSat = pct(0.97);
-    if (!(topSat > 60 && topSat - wallSat > 35)) return null;
-    const cut = wallSat + (topSat - wallSat) * 0.5;
+  function meanWhere(data, field, pred) {
     let r = 0, g = 0, b = 0, n = 0;
-    for (let i = 0, p = 0; i < sat.length; i++, p += 4) {
-      if (sat[i] >= cut) { r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
+    for (let i = 0, p = 0; i < field.length; i++, p += 4) {
+      if (pred(field[i])) { r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
     }
-    if (n < 200) return null;
-    const seed = { r: r / n, g: g / n, b: b / n };
-    const field = ST.raster.blur(ST.raster.colorDistMap(data, W, H, [seed]), W, H, 2);
-    // Otsu on the (compressed) distance field separates paint from wall
-    const q = new Uint8Array(W * H);
-    for (let i = 0; i < q.length; i++) q[i] = Math.min(255, Math.round(field[i] * 0.6));
-    const t = ST.raster.otsu(q, null);
-    const mask = new Uint8Array(W * H);
-    for (let i = 0; i < q.length; i++) if (q[i] < t) mask[i] = 1;
-    return mask;
+    return n >= 200 ? { r: r / n, g: g / n, b: b / n } : null;
+  }
+
+  // Paint detection relative to the background. The wall/paper is the
+  // dominant color of the frame's border; paint is whatever contrasts most
+  // with it. The paint reference is the mean of the strongest-contrast
+  // pixels — a marker's dense core, not its bleed halo — refined once
+  // (k-means step), and the mask threshold sits where the boundary is
+  // sharpest, never past the paint↔background midpoint. Works for dark on
+  // light, light on dark, colored on gray, and red on pink paper alike.
+  // Returns a mask, or null when nothing contrasts with the background.
+  function paintMask(data, W, H) {
+    const R = ST.raster;
+    if (!ST.extract) return null;
+    const bg = ST.extract.backgroundColor(data, W, H);
+    if (!bg) return null;
+    const dbg = R.colorDistMap(data, W, H, [bg]);
+    // robust maximum contrast (99.9th percentile); the paint core is
+    // everything within 75% of it
+    const hist = new Uint32Array(1024);
+    for (let i = 0; i < dbg.length; i++) hist[Math.min(1023, dbg[i] | 0)]++;
+    let acc = 0, top = 0;
+    for (let v = 0; v < 1024; v++) { acc += hist[v]; if (acc >= dbg.length * 0.999) { top = v; break; } }
+    if (top < 70) return null;
+    let seed = meanWhere(data, dbg, (d) => d >= top * 0.75);
+    if (!seed) return null;
+    let field = R.colorDistMap(data, W, H, [seed]);
+    let sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
+    const refined = meanWhere(data, field, (d) => d < sep * 0.5);
+    if (refined) {
+      seed = refined;
+      field = R.colorDistMap(data, W, H, [seed]);
+      sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
+    }
+    if (sep < 60) return null;
+    field = R.blur(field, W, H, 2);
+    const cands = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230]
+      .filter((t) => t <= Math.max(40, sep * 0.55));
+    const best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
+    return best ? best.mask : null;
   }
 
   /**
@@ -225,12 +241,12 @@
       return { mask, det, n: det.groups ? det.groups.length : 0 };
     };
 
-    // colored paint on a gray wall → chroma beats luminance; otherwise
-    // bright wall → paint is probably dark, with the other polarity as fallback
+    // paint vs. background by color contrast first; luminance polarity
+    // guesses only as the fallback when nothing contrasts with the border
     let first = null;
-    const chroma = chromaticMask(img.data, W, H);
-    if (chroma) {
-      const m = ST.raster.open(chroma, W, H, 1);
+    const paint = paintMask(img.data, W, H);
+    if (paint) {
+      const m = ST.raster.open(paint, W, H, 1);
       const det = detectCandidates(m, W, H, area);
       if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length };
     }

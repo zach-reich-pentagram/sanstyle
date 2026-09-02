@@ -105,6 +105,56 @@ test('separateTouching: two bars joined by a thin bridge come apart', () => {
   assert.ok(kept > 100 * 80 * 0.9, `stroke width reconstructed (${kept} px of ~8000)`);
 });
 
+test('background estimate + click snap: a click beside the stroke seeds from the paint', () => {
+  const w = 420, h = 420;
+  const cnv = fakeCanvas(w, h, (x, y) =>
+    (x >= 90 && x < 150 && y >= 60 && y < 340) || (x >= 90 && x < 300 && y >= 290 && y < 340));
+  const data = cnv.getContext('2d').getImageData(0, 0, w, h).data;
+  const bg = ST.extract.backgroundColor(data, w, h);
+  assert.ok(bg && Math.abs(bg.r - 175) < 6 && Math.abs(bg.g - 172) < 6 && Math.abs(bg.b - 165) < 6,
+    `border ring votes the wall color (${bg && [bg.r, bg.g, bg.b].map((c) => c.toFixed(0))})`);
+  // 10 px left of the stem, on the wall
+  const res = ST.extract.seeded(cnv, 80, 200, {});
+  assert.ok(res, 'extraction succeeded from a near-miss click');
+  assert.ok(res.click.x >= 90 && res.click.x < 150, `click snapped onto the stem (x=${res.click.x})`);
+  const bb = ST.trace.boundsOf(res.candidates[0].paths);
+  assert.ok(Math.abs(bb.w - 210) < 14 && Math.abs(bb.h - 280) < 14, `whole L traced (${bb.w.toFixed(0)}×${bb.h.toFixed(0)})`);
+  // a click squarely on the paint stays (essentially) where it is
+  const on = ST.extract.seeded(cnv, 120, 200, {});
+  assert.ok(on && Math.abs(on.click.x - 120) <= 3 && Math.abs(on.click.y - 200) <= 3,
+    `a click on the paint is not moved (${on && on.click.x},${on && on.click.y})`);
+});
+
+test('trimSpurs: a neighbor stroke entering the box is cut off at its join', () => {
+  const w = 300, h = 300;
+  const full = new Uint8Array(w * h);
+  const bar = (x, y) => x >= 150 && x < 190 && y >= 40 && y < 260;   // the letter
+  const arm = (x, y) => x >= 20 && x < 150 && y >= 140 && y < 180;   // neighbor's stroke, touching the bar
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bar(x, y) || arm(x, y)) full[y * w + x] = 1;
+  const box = { x0: 130, y0: 20, x1: 210, y1: 280 };
+  const kept = new Uint8Array(w * h);
+  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) kept[y * w + x] = full[y * w + x];
+  const out = ST.extract.trimSpurs(full, kept, w, h, box);
+  assert.ok(!out[160 * w + 135], 'the arm stub inside the box is erased');
+  assert.ok(out[160 * w + 170] && out[60 * w + 170] && out[250 * w + 170], 'the bar is intact');
+  const barArea = 40 * 220;
+  const n = ST.raster.count(out);
+  assert.ok(n >= barArea * 0.98 && n <= barArea + 40 * 8, `only a sliver of the arm may remain (${n} px vs bar ${barArea})`);
+  // nothing enters the box → nothing changes
+  const same = ST.extract.trimSpurs(kept, kept, w, h, box);
+  assert.strictEqual(ST.raster.count(same), ST.raster.count(kept), 'no outside ink → untouched');
+  // the letter's own foot poking 30 px past a tight box is given back, not cut
+  const full2 = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (bar(x, y) || (y >= 230 && y < 260 && x >= 150 && x < 240)) full2[y * w + x] = 1; // bar + foot to x=240
+  }
+  const kept2 = new Uint8Array(w * h);
+  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) kept2[y * w + x] = full2[y * w + x];
+  const out2 = ST.extract.trimSpurs(full2, kept2, w, h, box);
+  assert.ok(out2[245 * w + 230], 'the overhanging foot is kept');
+  assert.strictEqual(ST.raster.count(out2), ST.raster.count(full2), 'nothing of the letter is lost');
+});
+
 test('floodFrom + reconstruct primitives', () => {
   const w = 10, h = 10;
   const m = new Uint8Array(w * h);

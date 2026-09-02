@@ -75,6 +75,50 @@
     );
   }
 
+  raster.colorDist = colorDist;
+
+  // The most common color in the image, or among the pixels `include(x, y)`
+  // accepts: a coarse 3-D histogram (16 levels per channel, smoothed over
+  // neighboring bins so texture noise straddling a bin edge doesn't split
+  // the vote), then the mean of the winning neighborhood. Sub-sampled so it
+  // stays cheap on big photos. → {r, g, b, frac} or null.
+  raster.dominantColor = function (data, w, h, include) {
+    const L = 16, N = L * L * L;
+    const counts = new Uint32Array(N);
+    const sr = new Float64Array(N), sg = new Float64Array(N), sb = new Float64Array(N);
+    const step = Math.max(1, Math.round(Math.sqrt((w * h) / 200000)));
+    let total = 0;
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        if (include && !include(x, y)) continue;
+        const p = (y * w + x) * 4;
+        const r = data[p], gg = data[p + 1], b = data[p + 2];
+        const bin = ((r >> 4) * L + (gg >> 4)) * L + (b >> 4);
+        counts[bin]++; sr[bin] += r; sg[bin] += gg; sb[bin] += b; total++;
+      }
+    }
+    if (!total) return null;
+    const neighborhood = (bin, fn) => {
+      const r = (bin / (L * L)) | 0, gg = ((bin / L) | 0) % L, b = bin % L;
+      for (let dr = -1; dr <= 1; dr++) for (let dg = -1; dg <= 1; dg++) for (let db = -1; db <= 1; db++) {
+        const rr = r + dr, g2 = gg + dg, bb = b + db;
+        if (rr < 0 || g2 < 0 || bb < 0 || rr >= L || g2 >= L || bb >= L) continue;
+        fn((rr * L + g2) * L + bb);
+      }
+    };
+    let best = -1, bn = 0;
+    for (let i = 0; i < N; i++) {
+      if (!counts[i]) continue;
+      let n = 0;
+      neighborhood(i, (j) => { n += counts[j]; });
+      if (n > bn) { bn = n; best = i; }
+    }
+    if (best < 0) return null;
+    let r = 0, gg = 0, b = 0, n = 0;
+    neighborhood(best, (j) => { r += sr[j]; gg += sg[j]; b += sb[j]; n += counts[j]; });
+    return { r: r / n, g: gg / n, b: b / n, frac: n / total };
+  };
+
   // Two-pass box blur over any numeric array → Float32Array. Blurring the
   // FIELD (luminance or color distance) before thresholding is what tames
   // chalky/textured paint: partial-coverage speckle at the edge averages
@@ -103,6 +147,57 @@
       }
     }
     return out;
+  };
+
+  // Gradient magnitude of a scalar field (central differences).
+  raster.gradientMag = function (field, w, h) {
+    const out = new Float32Array(w * h);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const gx = (field[i + 1] - field[i - 1]) * 0.5;
+        const gy = (field[i + w] - field[i - w]) * 0.5;
+        out[i] = Math.hypot(gx, gy);
+      }
+    }
+    return out;
+  };
+
+  // Mean gradient along a mask's boundary (ink pixels with a bg 4-neighbor).
+  // The paint→paper edge is steep; a bleed halo→paper edge is gradual, so
+  // the threshold whose boundary maximizes this sits on the real stroke edge.
+  raster.boundaryMeanGradient = function (mask, grad, w, h) {
+    let sum = 0, n = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!mask[i]) continue;
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
+            !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) {
+          sum += grad[i]; n++;
+        }
+      }
+    }
+    return { mean: n ? sum / n : 0, n };
+  };
+
+  // Global threshold on a distance field chosen by boundary sharpness,
+  // constrained to a plausible ink fraction. Returns {t, mask, score} or null.
+  raster.edgeOptimalThreshold = function (field, w, h, cands, minFrac, maxFrac) {
+    const grad = raster.gradientMag(field, w, h);
+    const total = w * h;
+    let best = null;
+    for (const t of cands) {
+      const mask = new Uint8Array(total);
+      let count = 0;
+      for (let i = 0; i < total; i++) if (field[i] <= t) { mask[i] = 1; count++; }
+      const frac = count / total;
+      if (frac < minFrac) continue;
+      if (frac > maxFrac) break;
+      const { mean } = raster.boundaryMeanGradient(mask, grad, w, h);
+      if (!best || mean > best.score * 1.02) best = { t, mask, score: mean };
+    }
+    return best;
   };
 
   // Min redmean distance to any seed color, per pixel → Float32Array.

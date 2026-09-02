@@ -1,13 +1,15 @@
 /* Sanstyle — extract.js
- * Click-to-trace: seeded letterform extraction. From one click on the paint
- * it (1) samples the paint color, (2) grows the connected region in a
- * blurred color-distance field with an auto-calibrated tolerance — stepping
- * the tolerance up until the region suddenly floods into the wall, and
- * stopping just before — (3) cleans it with stroke-width-capped morphology,
- * (4) if the region seems to include a touching neighbor, offers a separated
- * version (open to break the contact, keep the clicked piece, reconstruct
- * its stroke width), and (5) traces it. Used by the review queue and the
- * studio's Click tool.
+ * Click-to-trace: seeded letterform extraction. From one click near the
+ * paint it (1) snaps the click onto the paint — the strongest contrast
+ * against the background near the click, so a click that lands in a
+ * marker's bleed halo or just off a thin stroke still seeds from the stroke
+ * — (2) samples and refines the paint color, (3) grows the connected region
+ * in a blurred color-distance field at the tolerance whose boundary is
+ * sharpest, never past the midpoint between paint and background,
+ * (4) cleans it with stroke-width-capped morphology, (5) if the region
+ * seems to include a touching neighbor, offers a separated version (open to
+ * break the contact, keep the clicked piece, reconstruct its stroke width),
+ * and (6) traces it. Used by the review queue and the studio's Click tool.
  */
 (function (g) {
   'use strict';
@@ -15,35 +17,33 @@
   const R = ST.raster;
   const ex = (ST.extract = {});
 
-  const TOLERANCES = [18, 26, 36, 48, 62, 80, 100, 125, 155];
-
-  function seedColorAt(data, w, h, x, y) {
-    let r = 0, gg = 0, b = 0, n = 0;
+  // Paint color under a click: the mean of the 5×5 sample — restricted, when
+  // the background is known, to its most paint-like pixels, so a click near
+  // a stroke's edge samples the paint rather than a paint/paper blend.
+  function seedColorAt(data, w, h, x, y, bg) {
+    const px = [];
     for (let dy = -2; dy <= 2; dy++) {
       for (let dx = -2; dx <= 2; dx++) {
-        const px = x + dx, py = y + dy;
-        if (px < 0 || py < 0 || px >= w || py >= h) continue;
-        const p = (py * w + px) * 4;
-        r += data[p]; gg += data[p + 1]; b += data[p + 2]; n++;
+        const qx = x + dx, qy = y + dy;
+        if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+        const p = (qy * w + qx) * 4;
+        const c = { r: data[p], g: data[p + 1], b: data[p + 2], ink: 0 };
+        if (bg) c.ink = R.colorDist(c.r, c.g, c.b, bg.r, bg.g, bg.b);
+        px.push(c);
       }
+    }
+    let cut = 0;
+    if (bg) {
+      let max = 0;
+      for (const c of px) if (c.ink > max) max = c.ink;
+      cut = max * 0.8;
+    }
+    let r = 0, gg = 0, b = 0, n = 0;
+    for (const c of px) {
+      if (c.ink < cut) continue;
+      r += c.r; gg += c.g; b += c.b; n++;
     }
     return { r: r / n, g: gg / n, b: b / n };
-  }
-
-  // Paint/wall split from the field statistics in a window around the click
-  // (Otsu on the quantized color-distance), in field units.
-  function localOtsuTolerance(field, w, h, x, y) {
-    const win = Math.round(Math.max(w, h) * 0.35);
-    const x0 = Math.max(0, x - win), x1 = Math.min(w, x + win);
-    const y0 = Math.max(0, y - win), y1 = Math.min(h, y + win);
-    const q = new Uint8Array((x1 - x0) * (y1 - y0));
-    let k = 0;
-    for (let yy = y0; yy < y1; yy++) {
-      for (let xx = x0; xx < x1; xx++) {
-        q[k++] = Math.min(255, Math.round(field[yy * w + xx] * 0.5));
-      }
-    }
-    return R.otsu(q, null) / 0.5;
   }
 
   function leaks(mask, count, w, h, maxFrac) {
@@ -55,40 +55,40 @@
     return touch >= 3;
   }
 
-  // Grow at increasing tolerances up to (a bit past) the local Otsu split,
-  // keeping the loosest region that doesn't leak into the wall. Uneven paint
-  // density (dry-brush, chalk) makes the region grow in jumps as strokes
-  // connect — those jumps are the letter, not a leak, so leak detection is
-  // spatial (share of the image, frame coverage, borders touched), never
-  // growth-based.
+  // Grow at increasing tolerances and keep the region whose BOUNDARY is the
+  // sharpest: the paint→paper edge is a steep transition in the color-
+  // distance field, while a marker's bleed halo fades gradually. Choosing by
+  // edge strength (not by a color split, which lands inside the halo, and
+  // not by growth jumps, which uneven paint density also produces) is what
+  // keeps the region on the stroke instead of flooding the haze between
+  // letters. Leak detection stays spatial, and opts.maxTol (the paint↔
+  // background midpoint) bounds how far a textured boundary can tempt it.
+  const GROW_TOLERANCES = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230];
   function autoRegion(field, excl, w, h, x, y, opts) {
     const maxFrac = opts.maxFrac || 0.35;
     const minCount = opts.minCount || 150;
-    const tOtsu = localOtsuTolerance(field, w, h, x, y);
-    const cands = TOLERANCES.filter((t) => t <= tOtsu * 1.25).concat([tOtsu]).sort((a, b) => a - b);
-    if (!cands.length) cands.push(tOtsu);
+    const maxTol = opts.maxTol || Infinity;
     // If the click landed on a cut (or a hole), start from the nearest
     // usable pixel instead of failing.
     if (excl && excl[y * w + x]) {
-      const near = nearestWhere(w, h, x, y, 80, (i) => !excl[i] && field[i] <= cands[cands.length - 1]);
+      const near = nearestWhere(w, h, x, y, 80, (i) => !excl[i] && field[i] <= 100);
       if (near < 0) return null;
       x = near % w; y = (near / w) | 0;
     }
-    const steps = [];
-    for (const t of cands) {
+    const grad = R.gradientMag(field, w, h);
+    let best = null, fallback = null;
+    for (const t of GROW_TOLERANCES) {
+      if (t > maxTol) break;
       const res = R.floodFrom(w, h, x, y, (i) => field[i] <= t && !(excl && excl[i]));
       if (!res.count) continue;
       if (leaks(res.mask, res.count, w, h, maxFrac)) break;
-      steps.push({ t, ...res });
+      const { mean } = R.boundaryMeanGradient(res.mask, grad, w, h);
+      const step = { t, ...res, score: mean };
+      if (!fallback) fallback = step;
+      if (res.count < minCount) continue;
+      if (!best || mean > best.score * 1.02) best = step;
     }
-    if (!steps.length) return null;
-    // Once the region plateaus, take the earliest tolerance that already
-    // captured it — tighter to the paint, less haze at the edges.
-    const final = steps[steps.length - 1];
-    for (const s of steps) {
-      if (s.count >= minCount && s.count >= final.count * 0.85) return s;
-    }
-    return final;
+    return best || fallback;
   }
 
   function nearestWhere(w, h, x, y, radius, pred) {
@@ -105,6 +105,71 @@
     }
     return best;
   }
+
+  // Background reference: the dominant color of the frame's border ring.
+  // Even in a tight crop the border is mostly wall or paper, whereas the
+  // whole image's mode can be the paint itself. Falls back to the whole
+  // image when the border is too varied to vote.
+  ex.backgroundColor = function (data, w, h) {
+    const m = Math.max(3, Math.round(Math.min(w, h) * 0.08));
+    const ring = R.dominantColor(data, w, h, (x, y) => x < m || y < m || x >= w - m || y >= h - m);
+    if (ring && ring.frac >= 0.25) return ring;
+    return R.dominantColor(data, w, h, null) || ring;
+  };
+
+  // Move an imprecise click onto the paint. In the window around the click,
+  // contrast against the background is the paint-likeness; a click that is
+  // not already on strong contrast jumps to the nearest strongly contrasting
+  // pixel, and either way climbs to the densest paint nearby, so the seed
+  // is taken inside the stroke rather than on its blended edge. A click in
+  // a bleed halo or on the paper beside a thin stroke thus lands on it.
+  function snapToInk(data, w, h, x, y, radius, bg) {
+    const x0 = Math.max(0, x - radius), y0 = Math.max(0, y - radius);
+    const x1 = Math.min(w - 1, x + radius), y1 = Math.min(h - 1, y + radius);
+    const ww = x1 - x0 + 1, wh = y1 - y0 + 1;
+    const ink = new Float32Array(ww * wh);
+    for (let yy = 0; yy < wh; yy++) {
+      for (let xx = 0; xx < ww; xx++) {
+        const p = ((yy + y0) * w + (xx + x0)) * 4;
+        ink[yy * ww + xx] = R.colorDist(data[p], data[p + 1], data[p + 2], bg.r, bg.g, bg.b);
+      }
+    }
+    const sm = R.blur(ink, ww, wh, 2);
+    let max = 0;
+    for (let i = 0; i < sm.length; i++) if (sm[i] > max) max = sm[i];
+    if (max < 40) return { x, y, snapped: false };
+    let cur = (y - y0) * ww + (x - x0);
+    let snapped = false;
+    if (sm[cur] < max * 0.6) {
+      let best = -1, bd = Infinity;
+      for (let yy = 0; yy < wh; yy++) {
+        for (let xx = 0; xx < ww; xx++) {
+          if (sm[yy * ww + xx] < max * 0.7) continue;
+          const d = (xx + x0 - x) ** 2 + (yy + y0 - y) ** 2;
+          if (d < bd) { bd = d; best = yy * ww + xx; }
+        }
+      }
+      if (best < 0) return { x, y, snapped: false };
+      cur = best; snapped = true;
+    }
+    // climb to the local maximum of paint-likeness (the stroke's core)
+    for (let step = 0; step < radius * 2; step++) {
+      const cx = cur % ww, cy = (cur / ww) | 0;
+      let next = cur;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = cx + dx, ny = cy + dy;
+          if (nx < 0 || ny < 0 || nx >= ww || ny >= wh) continue;
+          const j = ny * ww + nx;
+          if (sm[j] > sm[next]) next = j;
+        }
+      }
+      if (next === cur || sm[next] - sm[cur] < max * 0.02) break; // on the plateau already
+      cur = next; snapped = true;
+    }
+    return { x: x0 + (cur % ww), y: y0 + ((cur / ww) | 0), snapped };
+  }
+  ex.snapToInk = snapToInk;
 
   // Rasterize cut strokes (canvas coords) into an exclusion mask.
   ex.cutMask = function (w, h, cuts) {
@@ -179,7 +244,10 @@
   }
 
   // Break weak contacts with touching neighbors: open, keep the piece under
-  // the click, reconstruct stroke width inside the original region.
+  // the click, reconstruct stroke width inside the original region. Only a
+  // split at a genuinely thin neck counts — a letter's own sharp corner or
+  // a full-width join must not be "separated" (that would hand back a
+  // fragment of the letter); those are what cuts and Isolate are for.
   ex.separateTouching = function (mask, w, h, x, y) {
     const sw = R.strokeWidth(mask, w, h);
     const r = Math.max(2, Math.round(sw * 0.45));
@@ -190,16 +258,152 @@
     if (!piece.count) return null;
     const rebuilt = R.reconstruct(piece.mask, mask, w, h, r + 1);
     const total = R.count(mask), got = R.count(rebuilt);
-    if (got < total * 0.72 && got > 80) return rebuilt;
-    return null;
+    // a real neighbor split leaves a substantial piece; crumbs are noise
+    if (!(got < total * 0.72 && got > Math.max(80, total * 0.12))) return null;
+    // the contact: ink left behind that touches the piece. A neck narrower
+    // than the stroke is a contact; anything wider is the letter itself.
+    let contact = 0;
+    for (let yy = 0; yy < h; yy++) {
+      for (let xx = 0; xx < w; xx++) {
+        const i = yy * w + xx;
+        if (!mask[i] || rebuilt[i]) continue;
+        if ((xx > 0 && rebuilt[i - 1]) || (xx < w - 1 && rebuilt[i + 1]) ||
+            (yy > 0 && rebuilt[i - w]) || (yy < h - 1 && rebuilt[i + w])) contact++;
+      }
+    }
+    return contact < sw * 0.7 ? rebuilt : null;
+  };
+
+  // Breadth-first walk into `mask` from the crossing pixels `seeds`. Along a
+  // single stroke each new layer is about as big as the last; when the
+  // front reaches the letter's own stroke it spreads both ways along it and
+  // the layers widen. Returns the spur mask up to just short of that join,
+  // or null when no join was found within maxLen steps.
+  function followSpur(mask, w, h, seeds, sw, maxLen) {
+    const dist = new Int32Array(w * h).fill(-1);
+    let frontier = seeds.slice();
+    for (const s of frontier) dist[s] = 0;
+    const layers = [frontier.length];
+    let junction = -1;
+    for (let k = 1; k <= maxLen && frontier.length; k++) {
+      const next = [];
+      for (const j of frontier) {
+        const x = j % w, y = (j / w) | 0;
+        if (x > 0 && mask[j - 1] && dist[j - 1] < 0) { dist[j - 1] = k; next.push(j - 1); }
+        if (x < w - 1 && mask[j + 1] && dist[j + 1] < 0) { dist[j + 1] = k; next.push(j + 1); }
+        if (y > 0 && mask[j - w] && dist[j - w] < 0) { dist[j - w] = k; next.push(j - w); }
+        if (y < h - 1 && mask[j + w] && dist[j + w] < 0) { dist[j + w] = k; next.push(j + w); }
+      }
+      layers.push(next.length);
+      frontier = next;
+      if (k >= 4) {
+        const win = layers.slice(1, Math.min(k - 1, 9)).sort((a, b) => a - b);
+        const base = win[win.length >> 1];
+        if (layers[k] > base * 1.6 && layers[k - 1] > base * 1.6) { junction = k - 1; break; }
+      }
+    }
+    if (junction < 0) return null;
+    // the front was already inside the letter's stroke when the widening
+    // registered: stop a little short and let the heal close the notch
+    const stop = Math.max(1, junction - Math.round(sw * 0.3));
+    const spur = new Uint8Array(w * h);
+    let n = 0;
+    for (let i = 0; i < dist.length; i++) if (dist[i] >= 0 && dist[i] < stop) { spur[i] = 1; n++; }
+    return n ? spur : null;
+  }
+
+  /**
+   * "Cut off the excess": after a template box has been placed on a fused
+   * shape, ink that enters the box from outside is either a bit of the
+   * letter itself poking past a box that fit it imperfectly — a long tail,
+   * a flourish: small, so it is given back — or a neighbor's stroke: big,
+   * so it is followed inward from where it crosses the box edge to where
+   * it merges into the letter, erased up to there, and the notch healed.
+   * `full` is the fused mask (outside still present), `kept` the boxed
+   * piece, box = {x0, y0, x1, y1} (exclusive x1/y1). Returns a mask.
+   */
+  ex.trimSpurs = function (full, kept, w, h, box) {
+    const sw = R.strokeWidth(kept, w, h);
+    const keptCount = R.count(kept);
+    if (!(sw > 1) || !keptCount) return kept;
+    const outside = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const inY = y >= box.y0 && y < box.y1;
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (full[i] && !(inY && x >= box.x0 && x < box.x1)) outside[i] = 1;
+      }
+    }
+    const { labels, sizes } = R.components(outside, w, h);
+    const maxLen = Math.round(Math.max(box.x1 - box.x0, box.y1 - box.y0) * 0.5);
+    let out = kept, erased = null, erasedCount = 0;
+    const touchesKept = (L) => {
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (labels[i] !== L) continue;
+          if ((x > 0 && kept[i - 1]) || (x < w - 1 && kept[i + 1]) ||
+              (y > 0 && kept[i - w]) || (y < h - 1 && kept[i + w])) return true;
+        }
+      }
+      return false;
+    };
+    for (let L = 1; L < sizes.length; L++) {
+      if (!touchesKept(L)) continue;
+      if (sizes[L] < keptCount * 0.2) {
+        // the letter's own overhang: give it back
+        const next = new Uint8Array(out);
+        for (let i = 0; i < next.length; i++) if (labels[i] === L) next[i] = 1;
+        out = next;
+        continue;
+      }
+      // kept pixels touching this outside component: where it crosses in
+      const cross = new Uint8Array(w * h);
+      let any = false;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (!out[i]) continue;
+          if ((x > 0 && labels[i - 1] === L) || (x < w - 1 && labels[i + 1] === L) ||
+              (y > 0 && labels[i - w] === L) || (y < h - 1 && labels[i + w] === L)) { cross[i] = 1; any = true; }
+        }
+      }
+      if (!any) continue;
+      const cc = R.components(cross, w, h);
+      for (let c = 1; c < cc.sizes.length; c++) {
+        const seeds = [];
+        for (let i = 0; i < cross.length; i++) if (cc.labels[i] === c) seeds.push(i);
+        const spur = followSpur(out, w, h, seeds, sw, maxLen);
+        if (!spur) continue;
+        const n = R.count(spur);
+        if (erasedCount + n > keptCount * 0.3) continue; // never eat the letter
+        const next = new Uint8Array(out);
+        erased = erased || new Uint8Array(w * h);
+        for (let i = 0; i < spur.length; i++) if (spur[i]) { next[i] = 0; erased[i] = 1; }
+        out = next;
+        erasedCount += n;
+      }
+    }
+    if (!erased) return out;
+    // heal: close the notch, only around what was erased, never adding ink
+    // the boxed piece didn't have
+    const r = Math.max(1, Math.ceil(sw / 2));
+    const closed = R.close(out, w, h, r);
+    const near = R.dilate(erased, w, h, r + 1);
+    for (let i = 0; i < out.length; i++) if (closed[i] && near[i] && kept[i]) out[i] = 1;
+    // and shave the shallow nub the spur leaves on the stroke
+    const opened = R.open(out, w, h, Math.max(1, Math.round(sw * 0.3)));
+    for (let i = 0; i < out.length; i++) if (near[i] && !opened[i]) out[i] = 0;
+    return out;
   };
 
   /**
    * Seeded extraction from a click at canvas pixel (x, y).
-   * Returns { seed, tolerance, region: {x,y,w,h}, candidates: [{crop, mask,
-   *   w, h, paths, kind}] } or null when nothing paint-like is under the
-   *   click. candidates[0] is the best guess (separated piece when a
-   *   touching neighbor was detected, else the whole region).
+   * Returns { seed, bg, click: {x,y}, tolerance, region: {x,y,w,h},
+   *   candidates: [{crop, mask, w, h, paths, kind}] } or null when nothing
+   *   paint-like is near the click. `click` is where the click snapped to;
+   *   candidates[0] is the best guess (separated piece when a touching
+   *   neighbor was detected, else the whole region).
    */
   ex.seeded = function (canvas, x, y, opts) {
     const o = Object.assign({ smoothing: 4, blur: 2, cuts: null }, opts || {});
@@ -207,11 +411,33 @@
     x = Math.round(x); y = Math.round(y);
     if (x < 0 || y < 0 || x >= w || y >= h) return null;
     const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-    const seed = seedColorAt(data, w, h, x, y);
+    const excl = ex.cutMask(w, h, o.cuts);
+    const bg = ex.backgroundColor(data, w, h);
+    if (bg) {
+      const snap = snapToInk(data, w, h, x, y, Math.max(6, Math.round(Math.max(w, h) * 0.03)), bg);
+      x = snap.x; y = snap.y;
+    }
+    // Reference color: the click sample first, then refined to the mean of
+    // the core region it grows — a single k-means step. A 5×5 sample sits
+    // wherever the pen happened to be densest; the stroke's mean is what
+    // the rest of the stroke is actually near.
+    let seed = seedColorAt(data, w, h, x, y, bg);
     let field = R.colorDistMap(data, w, h, [seed]);
     if (o.blur > 0) field = R.blur(field, w, h, o.blur);
-    const excl = ex.cutMask(w, h, o.cuts);
-    const grown = autoRegion(field, excl, w, h, x, y, {});
+    const core = R.floodFrom(w, h, x, y, (i) => field[i] <= 60 && !(excl && excl[i]));
+    if (core.count >= 60 && core.count < w * h * 0.3) {
+      let r = 0, g = 0, b = 0;
+      for (let i = 0, p = 0; i < core.mask.length; i++, p += 4) {
+        if (core.mask[i]) { r += data[p]; g += data[p + 1]; b += data[p + 2]; }
+      }
+      seed = { r: r / core.count, g: g / core.count, b: b / core.count };
+      field = R.colorDistMap(data, w, h, [seed]);
+      if (o.blur > 0) field = R.blur(field, w, h, o.blur);
+    }
+    // never grow past the midpoint between paint and background: beyond it
+    // a pixel is more paper than paint whatever the boundary looks like
+    const sep = bg ? R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b) : Infinity;
+    const grown = autoRegion(field, excl, w, h, x, y, { maxTol: Math.max(40, sep * 0.55) });
     if (!grown || grown.count < 40) return null;
 
     const crop = bboxOf(grown.mask, w, h, 12);
@@ -229,6 +455,6 @@
     if (separated) push(separated, 'separated');
     push(whole, 'whole');
     if (!candidates.length) return null;
-    return { seed, tolerance: grown.t, region: crop, candidates };
+    return { seed, bg, click: { x, y }, tolerance: grown.t, region: crop, candidates };
   };
 })(typeof window !== 'undefined' ? window : globalThis);

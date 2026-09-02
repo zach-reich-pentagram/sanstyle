@@ -259,6 +259,7 @@
       ST.toast('Nothing paint-like under that click — try the middle of a stroke.', 'warn');
       return 0;
     }
+    if (res.click) item.lastClick = res.click;
     item.candidates = res.candidates.concat(item.candidates);
     item.ci = 0;
     renderCurrent();
@@ -266,12 +267,14 @@
   };
 
   function cutWidthFor(item) {
+    const maxDim = Math.max(item.canvas.width, item.canvas.height);
     const cand = item.candidates[item.ci];
     if (cand) {
       const sw = ST.raster.strokeWidth(cand.mask, cand.w, cand.h);
-      if (sw > 2) return Math.max(6, Math.round(sw * 1.3));
+      // a fused blob reports a bloated stroke width; keep the cut a cut
+      if (sw > 2) return Math.max(6, Math.min(Math.round(sw * 1.3), Math.round(maxDim * 0.04)));
     }
-    return Math.max(8, Math.round(Math.max(item.canvas.width, item.canvas.height) * 0.012));
+    return Math.max(8, Math.round(maxDim * 0.012));
   }
 
   // A cut is a short stroke drawn across a junction; ink under it is removed
@@ -314,10 +317,22 @@
       ST.toast(`Couldn't find a confident “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
       return false;
     }
-    const clean = ST.extract.cleanMask(res.mask, cand.w, cand.h, 4);
-    const paths = ST.trace.vectorize(clean, cand.w, cand.h, {});
+    // neighbors' strokes that enter the box get cut off at their join
+    const trimmed = res.margin ? ST.extract.trimSpurs(cand.mask, res.mask, cand.w, cand.h, res.margin) : res.mask;
+    const clean = ST.extract.cleanMask(trimmed, cand.w, cand.h, 4);
+    // re-crop to the isolated letter so the photo pane boxes just it
+    const bb = ST.raster.maskBounds(clean, cand.w, cand.h);
+    if (!bb) return false;
+    const pad = 10;
+    const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
+    const x1 = Math.min(cand.w, bb.x1 + 1 + pad), y1 = Math.min(cand.h, bb.y1 + 1 + pad);
+    const cw = x1 - x0, chh = y1 - y0;
+    const sub = new Uint8Array(cw * chh);
+    for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) sub[y * cw + x] = clean[(y + y0) * cand.w + (x + x0)];
+    const paths = ST.trace.vectorize(sub, cw, chh, {});
     if (!paths.length) return false;
-    item.candidates.unshift({ crop: cand.crop, mask: clean, w: cand.w, h: cand.h, paths, kind: 'isolated' });
+    const crop = { x: cand.crop.x + x0, y: cand.crop.y + y0, w: cw, h: chh };
+    item.candidates.unshift({ crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated' });
     item.ci = 0;
     const keep = $('#reviewChar').value;
     renderCurrent();

@@ -181,20 +181,142 @@
     return grid;
   }
 
+  // Chamfer distance transform on a GRID×GRID binary grid (two-pass, 1/√2
+  // weights): each cell's distance to the nearest ink cell.
+  function distanceTransform(bin) {
+    const INF = 1e6, D = 1.41421;
+    const d = new Float32Array(GRID * GRID);
+    for (let i = 0; i < d.length; i++) d[i] = bin[i] ? 0 : INF;
+    for (let y = 0; y < GRID; y++) {
+      for (let x = 0; x < GRID; x++) {
+        const i = y * GRID + x;
+        let v = d[i];
+        if (x > 0) v = Math.min(v, d[i - 1] + 1);
+        if (y > 0) {
+          v = Math.min(v, d[i - GRID] + 1);
+          if (x > 0) v = Math.min(v, d[i - GRID - 1] + D);
+          if (x < GRID - 1) v = Math.min(v, d[i - GRID + 1] + D);
+        }
+        d[i] = v;
+      }
+    }
+    for (let y = GRID - 1; y >= 0; y--) {
+      for (let x = GRID - 1; x >= 0; x--) {
+        const i = y * GRID + x;
+        let v = d[i];
+        if (x < GRID - 1) v = Math.min(v, d[i + 1] + 1);
+        if (y < GRID - 1) {
+          v = Math.min(v, d[i + GRID] + 1);
+          if (x < GRID - 1) v = Math.min(v, d[i + GRID + 1] + D);
+          if (x > 0) v = Math.min(v, d[i + GRID - 1] + D);
+        }
+        d[i] = v;
+      }
+    }
+    return d;
+  }
+
+  function binarize(grid, t) {
+    const b = new Uint8Array(grid.length);
+    for (let i = 0; i < grid.length; i++) b[i] = grid[i] > t ? 1 : 0;
+    return b;
+  }
+
+  // Shape match that doesn't care about stroke weight: how close the probe's
+  // ink lies to the template's (precision) and how much of the template's
+  // ink the probe reaches (recall), combined as their harmonic mean. Unlike
+  // plain IoU it doesn't reward a small box where a lone stroke looks fat —
+  // a box must cover the whole letter to score.
+  const SIGMA2 = 2 * 1.6 * 1.6;
+  function chamferScore(probeGrid, tpl) {
+    if (!tpl.bin) { tpl.bin = binarize(tpl.grid, 0.3); tpl.dt = distanceTransform(tpl.bin); }
+    const pb = binarize(probeGrid, 0.2);
+    let pn = 0;
+    for (let i = 0; i < pb.length; i++) pn += pb[i];
+    if (!pn) return 0;
+    const pd = distanceTransform(pb);
+    let prec = 0, rec = 0, tn = 0;
+    for (let i = 0; i < pb.length; i++) {
+      if (pb[i]) prec += Math.exp(-(tpl.dt[i] * tpl.dt[i]) / SIGMA2);
+      if (tpl.bin[i]) { rec += Math.exp(-(pd[i] * pd[i]) / SIGMA2); tn++; }
+    }
+    prec /= pn; rec /= tn || 1;
+    return prec + rec > 0 ? (2 * prec * rec) / (prec + rec) : 0;
+  }
+  cls.chamferScore = chamferScore;
+
+  function boxIoU(a, b) {
+    const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+    const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+    const inter = ix * iy;
+    return inter / (a.w * a.h + b.w * b.h - inter);
+  }
+
+  // The ink inside box `b` that is connected (within the box) to the click:
+  // a letter is one connected stroke system, so a box that scores well only
+  // thanks to a neighbor's disconnected piece loses that piece here.
+  function componentInBox(mask, w, h, b, cx, cy) {
+    const x0 = Math.max(0, b.x), y0 = Math.max(0, b.y);
+    const x1 = Math.min(w, b.x + b.w), y1 = Math.min(h, b.y + b.h);
+    const boxed = new Uint8Array(w * h);
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) boxed[y * w + x] = mask[y * w + x];
+    let sx = Math.round(cx), sy = Math.round(cy);
+    if (sx < x0 || sy < y0 || sx >= x1 || sy >= y1) return null;
+    if (!boxed[sy * w + sx]) {
+      const rad = Math.max(4, Math.round(Math.max(w, h) * 0.03));
+      let bd = Infinity, bi = -1;
+      for (let y = Math.max(y0, sy - rad); y < Math.min(y1, sy + rad + 1); y++) {
+        for (let x = Math.max(x0, sx - rad); x < Math.min(x1, sx + rad + 1); x++) {
+          if (!boxed[y * w + x]) continue;
+          const d = (x - cx) ** 2 + (y - cy) ** 2;
+          if (d < bd) { bd = d; bi = y * w + x; }
+        }
+      }
+      if (bi < 0) return null;
+      sx = bi % w; sy = (bi / w) | 0;
+    }
+    const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
+    if (!comp.count) return null;
+    return { mask: comp.mask, count: comp.count, sum: integralImage(comp.mask, w, h) };
+  }
+
   /**
    * Where inside this (possibly fused) mask is the character `ch`?
    * Searches boxes over positions, heights, and aspect multipliers, scoring
-   * the mask coverage inside each box against every template of `ch`.
-   * Returns { box: {x,y,w,h}, score } or null.
+   * the mask coverage inside each box against every template of `ch` with
+   * the stroke-weight-agnostic chamfer match. With opts.cx/cy (the click
+   * that traced the shape) only boxes around the click count, and the best
+   * few are re-scored on the ink connected to the click inside the box.
+   * Returns { box: {x,y,w,h}, score, ch, coarse } or null.
    */
-  cls.locate = function (mask, w, h, ch) {
+  cls.locate = function (mask, w, h, ch, opts) {
+    const o = opts || {};
     const bb = ST.raster.maskBounds(mask, w, h);
     if (!bb) return null;
     const tpls = cls.buildTemplates().filter((t) => t.ch === ch.toUpperCase() || t.ch === ch);
     if (!tpls.length) return null;
     const sum = integralImage(mask, w, h);
-    let best = null;
-    const hSteps = [1.0, 0.85, 0.72, 0.6, 0.5, 0.42];
+    const hasClick = Number.isFinite(o.cx) && Number.isFinite(o.cy);
+    const holds = (b) => {
+      if (!hasClick) return true;
+      const mx = b.w * 0.05, my = b.h * 0.05;
+      return o.cx >= b.x - mx && o.cx < b.x + b.w + mx && o.cy >= b.y - my && o.cy < b.y + b.h + my;
+    };
+    // a short list of distinct candidates (non-max suppression on overlap)
+    const cands = [];
+    const consider = (box, score, tpl) => {
+      for (let i = 0; i < cands.length; i++) {
+        if (boxIoU(cands[i].box, box) >= 0.5) {
+          if (score > cands[i].score) cands[i] = { box, score, tpl };
+          return;
+        }
+      }
+      if (cands.length < 12) { cands.push({ box, score, tpl }); return; }
+      let worst = 0;
+      for (let i = 1; i < cands.length; i++) if (cands[i].score < cands[worst].score) worst = i;
+      if (score > cands[worst].score) cands[worst] = { box, score, tpl };
+    };
+    const hSteps = [1.0, 0.92, 0.85, 0.78, 0.72, 0.66, 0.6, 0.55, 0.5, 0.46, 0.42];
     const aMul = [0.75, 1.0, 1.3, 1.65];
     for (const t of tpls) {
       for (const hs of hSteps) {
@@ -206,10 +328,10 @@
           for (let y = bb.y0; y + bh <= bb.y1 + 1; y += stepY) {
             for (let x = bb.x0; x + bw <= bb.x1 + 1; x += stepX) {
               const box = { x, y, w: bw, h: bh };
-              const fill = sum(x, y, x + bw, y + bh) / (bw * bh);
-              if (fill < 0.04) continue;
-              const score = cls.gridIoU(gridInBox(sum, box), t.grid);
-              if (!best || score > best.score) best = { box, score, ch: t.ch };
+              if (holds(box)) {
+                const fill = sum(x, y, x + bw, y + bh) / (bw * bh);
+                if (fill >= 0.04) consider(box, chamferScore(gridInBox(sum, box), t), t);
+              }
               if (bw >= bb.w) break;
             }
             if (bh >= bb.h) break;
@@ -217,17 +339,47 @@
         }
       }
     }
-    return best;
+    if (!cands.length) return null;
+    cands.sort((a, b) => b.score - a.score);
+    const coarse = { box: cands[0].box, score: cands[0].score };
+    let scoreOf = (b, tpl) => chamferScore(gridInBox(sum, b), tpl);
+    if (hasClick) {
+      scoreOf = (b, tpl) => {
+        const comp = componentInBox(mask, w, h, b, o.cx, o.cy);
+        return comp ? chamferScore(gridInBox(comp.sum, b), tpl) : 0;
+      };
+      for (const c of cands) c.score = scoreOf(c.box, c.tpl);
+      cands.sort((a, b) => b.score - a.score);
+    }
+    let best = { box: cands[0].box, score: cands[0].score, ch: cands[0].tpl.ch, tpl: cands[0].tpl };
+    if (o.refine === false) return { box: best.box, score: best.score, ch: best.ch, coarse };
+    // tighten: hill-climb each box edge until the match stops improving,
+    // so the box hugs the letter rather than the coarse search grid
+    const moves = [[1, 0, 0, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, -1, 0],
+      [0, 0, 0, 1], [0, 0, 0, -1], [-1, 0, 1, 0], [0, -1, 0, 1]];
+    let step = Math.max(2, Math.round(Math.max(best.box.w, best.box.h) * 0.04));
+    while (step >= 1) {
+      let improved = false;
+      for (const [mx, my, mw, mh] of moves) {
+        const b = { x: best.box.x + mx * step, y: best.box.y + my * step, w: best.box.w + mw * step, h: best.box.h + mh * step };
+        if (b.w < 8 || b.h < 8 || b.x < 0 || b.y < 0 || b.x + b.w > w || b.y + b.h > h || !holds(b)) continue;
+        const score = scoreOf(b, best.tpl);
+        if (score > best.score + 1e-4) { best = { box: b, score, ch: best.ch, tpl: best.tpl }; improved = true; break; }
+      }
+      if (!improved) step = Math.floor(step / 2);
+    }
+    return { box: best.box, score: best.score, ch: best.ch, coarse };
   };
 
   /**
    * Trim a mask to the located character: keep ink inside the box (with a
-   * small margin) that is connected to the click. Returns {mask, score} or
-   * null when no confident match.
+   * small margin) that is connected to the click. Returns {mask, score,
+   * box, margin: {x0,y0,x1,y1} (the box actually cut along)} or null when
+   * no confident match.
    */
   cls.isolate = function (mask, w, h, ch, cx, cy, minScore) {
-    const found = cls.locate(mask, w, h, ch);
-    if (!found || found.score < (minScore == null ? 0.26 : minScore)) return null;
+    const found = cls.locate(mask, w, h, ch, { cx, cy });
+    if (!found || found.score < (minScore == null ? 0.45 : minScore)) return null;
     const b = found.box;
     const mx = Math.round(b.w * 0.07), my = Math.round(b.h * 0.07);
     const x0 = Math.max(0, b.x - mx), x1 = Math.min(w, b.x + b.w + mx);
@@ -247,7 +399,7 @@
     }
     const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
     if (comp.count < 30) return null;
-    return { mask: comp.mask, score: found.score, box: found.box };
+    return { mask: comp.mask, score: found.score, box: found.box, margin: { x0, y0, x1, y1 } };
   };
 
   /**

@@ -40,23 +40,34 @@ Ink controls: automatic Otsu thresholding or **Pick paint** color matching
   back through the blocked zone with a morphological inference of where the
   hidden edge continues. Brush size and bridge reach are adjustable.
 
-A classifier guesses the character from the traced shape as a one-tap
-suggestion; case-sensitive tagging stays yours.
-
 **Auto capture (single or batch).** Select one or many photos: each is
-auto-straightened (gradient-orientation deskew), letter-sized paint blobs are
-detected and traced, and a character prediction is made for each. Everything
-lands in a review queue — photo crop and traced letterform side by side, the
-guess prefilled with its confidence — where you **Add**, retag, **Skip**, or
-**Edit manually** (drops that photo into the manual studio, pre-lassoed).
-Nothing enters the typeface without your yes.
+auto-straightened (gradient-orientation deskew) and its paint is separated
+from the wall or paper by color contrast against the background — the paper
+is the frame's dominant color, paint is whatever contrasts most with it, and
+the threshold sits where the boundary is sharpest, never past the midpoint
+between the two. That keeps marker strokes stroke-thin on fibrous paper
+instead of swallowing the pink bleed halo around them. Everything lands in a
+review queue — the photo with the shape boxed, the traced letterform beside
+it — where you type the character and **Add**, **Skip**, or **Edit manually**
+(drops that photo into the manual studio, pre-lassoed). A photo leaves the
+queue only when its letterform was added or skipped.
 
 ![Review queue](docs/shots/review.png)
 
-The predictions come from geometric template matching (normalized-grid IoU +
-counter count + aspect against system-font renders) — deliberately simple,
-fully local, and always human-confirmed. Swapping in a stronger model later
-only means replacing `js/classify.js`.
+**Click the letter you see.** If the detected shape isn't the one you want,
+click the letter in the photo: the click snaps to the densest paint nearby
+(a click in the halo or just off a thin stroke still seeds from the stroke),
+the paint color is sampled and refined, and the connected stroke region is
+grown at the tolerance whose edge is sharpest. Fused with a neighbor? Drag a
+short cut across the join and the region regrows without it — or type the
+character and **Isolate**: a stroke-weight-agnostic template search (two-way
+chamfer match against system-font renders, scored on the ink connected to
+your click) finds where that character sits inside the fused shape, keeps
+what's inside, gives back any of the letter's own overhang the box clipped,
+and follows each neighbor stroke that enters the box to where it joins the
+letter, cutting it off there.
+
+![Isolate a fused 2](docs/shots/isolate-2.png)
 
 ## The optical fitting
 

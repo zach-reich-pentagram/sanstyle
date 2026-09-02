@@ -384,6 +384,71 @@ await page.click('#reviewAccept');
 await page.waitForTimeout(250);
 check((await page.evaluate(() => ST.store.slot('N').variants.length)) >= 2, 'click-traced N added');
 
+// fused letters on fibrous paper: a red-marker "F2" whose F touches the 2,
+// with a pink bleed halo. Auto and a click in the halo must both stay
+// stroke-thin (no solid masses), and Isolate “2” must cut the F off.
+console.log('\n— fused marker letters: halo click + Isolate');
+const f2Res = await page.evaluate(() => {
+  const W = 900, H = 1100;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  x.fillStyle = '#ece8e2'; x.fillRect(0, 0, W, H);
+  const img = x.getImageData(0, 0, W, H);
+  let s = 3;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = (rnd() - 0.5) * 22;
+    img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n;
+  }
+  x.putImageData(img, 0, 0);
+  const d2r = Math.PI / 180;
+  const a0 = [560 + 150 * Math.cos(200 * d2r), 300 + 140 * Math.sin(200 * d2r)];
+  const a1 = [560 + 150 * Math.cos(416 * d2r), 300 + 140 * Math.sin(416 * d2r)];
+  const strokes = (lw, style) => {
+    x.lineWidth = lw; x.strokeStyle = style; x.lineCap = 'round'; x.lineJoin = 'round';
+    x.beginPath();
+    x.moveTo(160, 150); x.lineTo(160, 900);
+    x.moveTo(160, 160); x.lineTo(470, 160);
+    x.moveTo(160, 520); x.lineTo(430, 520);
+    x.moveTo(a0[0], a0[1]); x.ellipse(560, 300, 150, 140, 0, 200 * d2r, 416 * d2r);
+    x.lineTo(330, 880); x.lineTo(820, 860);
+    x.stroke();
+  };
+  strokes(26 * 4, 'rgba(236,172,176,0.55)'); // bleed halo
+  strokes(26, '#b91e2d');
+  ST.batch.addCanvas(c, 'f2');
+  ST.batch.reopen();
+  const item = ST.batch.queue[ST.batch.idx];
+  const auto = item.candidates[0];
+  const autoFill = auto ? ST.raster.count(auto.mask) / (auto.w * auto.h) : 1;
+  // click 18 px right of the 2's diagonal at y=700 — in the halo, not on the paint
+  const cx = Math.round(a1[0] + (330 - a1[0]) * ((700 - a1[1]) / (880 - a1[1])));
+  const n = ST.batch.clickTrace(cx + 18, 700);
+  const clicked = item.candidates[0];
+  const clickFill = ST.raster.count(clicked.mask) / (clicked.w * clicked.h);
+  const clickedBB = ST.raster.maskBounds(clicked.mask, clicked.w, clicked.h);
+  const located = ST.classify.locate(clicked.mask, clicked.w, clicked.h, '2');
+  document.getElementById('reviewChar').value = '2';
+  document.getElementById('reviewChar').dispatchEvent(new Event('input'));
+  const ok = ST.batch.isolate();
+  const iso = item.candidates[0];
+  const bb = ST.raster.maskBounds(iso.mask, iso.w, iso.h);
+  return {
+    autoFill, n, clickFill, ok, kind: iso.kind, snapped: item.lastClick,
+    fusedWidth: clickedBB.w, score: located ? located.score : 0,
+    left: iso.crop.x + bb.x0, width: bb.w, fill: ST.raster.count(iso.mask) / (bb.w * bb.h),
+  };
+});
+check(f2Res.autoFill < 0.3, `auto keeps marker strokes thin on fibrous paper (fill ${f2Res.autoFill.toFixed(2)} of crop)`);
+check(f2Res.n >= 1 && f2Res.clickFill < 0.3 && f2Res.snapped.x <= f2Res.snapped.x && f2Res.fusedWidth > 600,
+  `a click in the bleed halo snaps to the paint and traces the fused F2 (fill ${f2Res.clickFill.toFixed(2)}, ${f2Res.fusedWidth} px wide)`);
+check(f2Res.ok === true && f2Res.kind === 'isolated', `Isolate “2” found the 2 in the fused shape (match ${f2Res.score.toFixed(2)})`);
+check(f2Res.left > 250 && f2Res.width > 480 && f2Res.width < 600,
+  `Isolate cut the F off and kept the whole 2, tail included (starts at x=${f2Res.left}, ${f2Res.width} px wide)`);
+check(f2Res.fill < 0.4, `isolated 2 is a stroke shape, not a filled block (fill ${f2Res.fill.toFixed(2)} of its box)`);
+await page.screenshot({ path: path.join(SHOTS, 'isolate-2.png') });
+await page.evaluate(() => ST.batch.skip());
+
 // studio round-trip: Edit manually → add in the studio → next photo pops up
 await page.evaluate(() => {
   ST.batch.addCanvas(ST.demo.makeWall('E', 1001).canvas, 'studio-e');
