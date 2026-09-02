@@ -208,8 +208,10 @@
   }
 
   // Scale-aware clean-up shared with the studio: shave fingers, heal gaps,
-  // never thinner than a third of the stroke.
-  ex.cleanMask = function (mask, w, h, smoothing) {
+  // never thinner than a third of the stroke — then round the stroke ends:
+  // a marker can't draw anything sharper than its tip, so needle points
+  // thinner than the thin side of the tip become round caps.
+  ex.cleanMask = function (mask, w, h, smoothing, opts) {
     const sm = smoothing == null ? 4 : smoothing;
     let m = R.despeckle(mask, w, h, 0.04, 24);
     if (sm > 0) {
@@ -220,9 +222,36 @@
         m = R.close(m, w, h, r);
         m = R.open(m, w, h, r);
       }
+      if (!(opts && opts.noRound)) m = ex.roundEnds(m, w, h, null);
     }
     m = R.fillHoles(m, w, h, 0.06);
+    m = R.despeckle(m, w, h, 0.04, 24);
     return m;
+  };
+
+  // Round stroke ends (everywhere, or only inside `region`): prune what a
+  // disk of ~70% of the thin strokes' half-width can't reach, keeping thin
+  // stretches that hold the shape together.
+  ex.roundEnds = function (mask, w, h, region) {
+    const dt = R.distanceTransform(mask, w, h);
+    const rt = R.thinRadius(mask, w, h, dt, region);
+    const r = Math.round(rt * 0.7);
+    return r >= 2 ? R.pruneThin(mask, w, h, r, region) : mask;
+  };
+
+  // Where a cut sliced through the strokes, round the sliced ends with a
+  // cap sized to the strokes that touch the cut (a cut through a thin bar
+  // must not erase it, so the radius comes from the thinner side).
+  ex.roundCutEnds = function (mask, w, h, band) {
+    const dt = R.distanceTransform(mask, w, h);
+    const ring = R.dilate(band, w, h, 2);
+    let rmax = 0;
+    for (let i = 0; i < ring.length; i++) if (ring[i] && dt[i] > rmax) rmax = dt[i];
+    if (rmax < 2) return mask;
+    const near = R.dilate(band, w, h, Math.ceil(rmax * 2) + 2);
+    const rt = R.thinRadius(mask, w, h, dt, near);
+    const r = Math.round((rt || rmax) * 0.9);
+    return r >= 2 ? R.pruneThin(mask, w, h, r, near) : mask;
   };
 
   // Nearest ink pixel to (x,y) within radius, or -1.
@@ -274,17 +303,25 @@
     return contact < sw * 0.7 ? rebuilt : null;
   };
 
-  // Breadth-first walk into `mask` from the crossing pixels `seeds`. Along a
-  // single stroke each new layer is about as big as the last; when the
-  // front reaches the letter's own stroke it spreads both ways along it and
-  // the layers widen. Returns the spur mask up to just short of that join,
-  // or null when no join was found within maxLen steps.
-  function followSpur(mask, w, h, seeds, sw, maxLen) {
+  // Breadth-first walk into `mask` from the crossing pixels `seeds`. The
+  // join is where the front first lands on ink the template expects (the
+  // letter proper, via isLetter), or — failing that — where the layers
+  // widen because the front spread both ways along the letter's stroke.
+  // Returns the spur mask up to just short of the join, or null when no
+  // join was found within maxLen steps.
+  function followSpur(mask, w, h, seeds, sw, maxLen, isLetter, slack) {
     const dist = new Int32Array(w * h).fill(-1);
     let frontier = seeds.slice();
     for (const s of frontier) dist[s] = 0;
     const layers = [frontier.length];
-    let junction = -1;
+    let junction = -1, guided = -1;
+    const onLetter = (list) => {
+      if (!isLetter || !list.length) return false;
+      let n = 0;
+      for (const j of list) if (isLetter(j)) n++;
+      return n >= list.length * 0.6;
+    };
+    if (onLetter(frontier)) return null; // the crossing already sits on the letter
     for (let k = 1; k <= maxLen && frontier.length; k++) {
       const next = [];
       for (const j of frontier) {
@@ -296,16 +333,21 @@
       }
       layers.push(next.length);
       frontier = next;
+      // the template's ink begins here; keep looking a little further for
+      // the actual join (the widening), which places the cut more exactly
+      if (guided < 0 && onLetter(next)) guided = k;
+      if (guided >= 0 && k > guided + (slack || 0)) { junction = guided; break; }
       if (k >= 4) {
         const win = layers.slice(1, Math.min(k - 1, 9)).sort((a, b) => a - b);
         const base = win[win.length >> 1];
-        if (layers[k] > base * 1.6 && layers[k - 1] > base * 1.6) { junction = k - 1; break; }
+        if (layers[k] > base * 1.6 && layers[k - 1] > base * 1.6) { junction = k - 1; guided = -1; break; }
       }
     }
+    if (junction < 0 && guided >= 0) junction = guided;
     if (junction < 0) return null;
-    // the front was already inside the letter's stroke when the widening
-    // registered: stop a little short and let the heal close the notch
-    const stop = Math.max(1, junction - Math.round(sw * 0.3));
+    // a widening registers only once the front is inside the letter's
+    // stroke: stop a little short and let the heal close the notch
+    const stop = Math.max(1, guided >= 0 ? junction : junction - Math.round(sw * 0.3));
     const spur = new Uint8Array(w * h);
     let n = 0;
     for (let i = 0; i < dist.length; i++) if (dist[i] >= 0 && dist[i] < stop) { spur[i] = 1; n++; }
@@ -320,12 +362,23 @@
    * so it is followed inward from where it crosses the box edge to where
    * it merges into the letter, erased up to there, and the notch healed.
    * `full` is the fused mask (outside still present), `kept` the boxed
-   * piece, box = {x0, y0, x1, y1} (exclusive x1/y1). Returns a mask.
+   * piece, box = {x0, y0, x1, y1} (exclusive x1/y1). `guide`, when given,
+   * is {box: {x,y,w,h}, cells} — the template's placement and its
+   * letterCells — and tells the walk where the letter's own ink begins.
+   * Returns a mask.
    */
-  ex.trimSpurs = function (full, kept, w, h, box) {
+  ex.trimSpurs = function (full, kept, w, h, box, guide) {
     const sw = R.strokeWidth(kept, w, h);
     const keptCount = R.count(kept);
     if (!(sw > 1) || !keptCount) return kept;
+    let isLetter = null, slack = 0;
+    if (guide && guide.cells && ST.classify && ST.classify.cellOf) {
+      isLetter = (i) => {
+        const c = ST.classify.cellOf(guide.box, i % w, (i / w) | 0);
+        return c >= 0 && guide.cells[c] === 1;
+      };
+      slack = Math.round((1.5 * Math.max(guide.box.w, guide.box.h)) / ST.classify.GRID);
+    }
     const outside = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
       const inY = y >= box.y0 && y < box.y1;
@@ -337,23 +390,38 @@
     const { labels, sizes } = R.components(outside, w, h);
     const maxLen = Math.round(Math.max(box.x1 - box.x0, box.y1 - box.y0) * 0.5);
     let out = kept, erased = null, erasedCount = 0;
-    const touchesKept = (L) => {
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const i = y * w + x;
-          if (labels[i] !== L) continue;
-          if ((x > 0 && kept[i - 1]) || (x < w - 1 && kept[i + 1]) ||
-              (y > 0 && kept[i - w]) || (y < h - 1 && kept[i + w])) return true;
-        }
+    const n = sizes.length;
+    const touches = new Uint8Array(n);
+    const bx0 = new Int32Array(n).fill(w), by0 = new Int32Array(n).fill(h);
+    const bx1 = new Int32Array(n).fill(-1), by1 = new Int32Array(n).fill(-1);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const L = labels[i];
+        if (!L) continue;
+        if (x < bx0[L]) bx0[L] = x; if (x > bx1[L]) bx1[L] = x;
+        if (y < by0[L]) by0[L] = y; if (y > by1[L]) by1[L] = y;
+        if ((x > 0 && kept[i - 1]) || (x < w - 1 && kept[i + 1]) ||
+            (y > 0 && kept[i - w]) || (y < h - 1 && kept[i + w])) touches[L] = 1;
       }
-      return false;
-    };
-    for (let L = 1; L < sizes.length; L++) {
-      if (!touchesKept(L)) continue;
-      if (sizes[L] < keptCount * 0.2) {
-        // the letter's own overhang: give it back
+    }
+    const boxDim = Math.max(box.x1 - box.x0, box.y1 - box.y0);
+    const sliced = new Uint8Array(w * h);
+    let anySliced = false;
+    for (let L = 1; L < n; L++) {
+      if (!touches[L]) continue;
+      // a neighbor reaches well beyond the box; anything short is the
+      // letter's own overhang past a box that fit it imperfectly
+      const reach = Math.max(bx1[L] - bx0[L] + 1, by1[L] - by0[L] + 1);
+      const neighbor = reach >= boxDim * 0.3 && sizes[L] >= 3 * sw * sw;
+      if (!neighbor) {
         const next = new Uint8Array(out);
-        for (let i = 0; i < next.length; i++) if (labels[i] === L) next[i] = 1;
+        for (let y = by0[L]; y <= by1[L]; y++) {
+          for (let x = bx0[L]; x <= bx1[L]; x++) {
+            const i = y * w + x;
+            if (labels[i] === L) next[i] = 1;
+          }
+        }
         out = next;
         continue;
       }
@@ -373,10 +441,15 @@
       for (let c = 1; c < cc.sizes.length; c++) {
         const seeds = [];
         for (let i = 0; i < cross.length; i++) if (cc.labels[i] === c) seeds.push(i);
-        const spur = followSpur(out, w, h, seeds, sw, maxLen);
-        if (!spur) continue;
-        const n = R.count(spur);
-        if (erasedCount + n > keptCount * 0.3) continue; // never eat the letter
+        const spur = followSpur(out, w, h, seeds, sw, maxLen, isLetter, slack);
+        const n = spur ? R.count(spur) : 0;
+        if (!spur || erasedCount + n > keptCount * 0.3) {
+          // no join found (or it would eat the letter): the box edge itself
+          // is the cut — round that sliced face
+          for (const s of seeds) sliced[s] = 1;
+          anySliced = true;
+          continue;
+        }
         const next = new Uint8Array(out);
         erased = erased || new Uint8Array(w * h);
         for (let i = 0; i < spur.length; i++) if (spur[i]) { next[i] = 0; erased[i] = 1; }
@@ -384,16 +457,18 @@
         erasedCount += n;
       }
     }
-    if (!erased) return out;
-    // heal: close the notch, only around what was erased, never adding ink
-    // the boxed piece didn't have
-    const r = Math.max(1, Math.ceil(sw / 2));
-    const closed = R.close(out, w, h, r);
-    const near = R.dilate(erased, w, h, r + 1);
-    for (let i = 0; i < out.length; i++) if (closed[i] && near[i] && kept[i]) out[i] = 1;
-    // and shave the shallow nub the spur leaves on the stroke
-    const opened = R.open(out, w, h, Math.max(1, Math.round(sw * 0.3)));
-    for (let i = 0; i < out.length; i++) if (near[i] && !opened[i]) out[i] = 0;
+    if (erased) {
+      // heal: close the notch, only around what was erased, never adding
+      // ink the boxed piece didn't have
+      const r = Math.max(1, Math.ceil(sw / 2));
+      const closed = R.close(out, w, h, r);
+      const near = R.dilate(erased, w, h, r + 1);
+      for (let i = 0; i < out.length; i++) if (closed[i] && near[i] && kept[i]) out[i] = 1;
+      // and shave the shallow nub the spur leaves on the stroke
+      const opened = R.open(out, w, h, Math.max(1, Math.round(sw * 0.3)));
+      for (let i = 0; i < out.length; i++) if (near[i] && !opened[i]) out[i] = 0;
+    }
+    if (anySliced) out = ex.roundCutEnds(out, w, h, R.dilate(sliced, w, h, 2));
     return out;
   };
 
@@ -444,7 +519,9 @@
     if (!crop) return null;
     const sub = cropMask(grown.mask, w, crop);
     const lx = x - crop.x, ly = y - crop.y;
-    const whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing);
+    let whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing, { noRound: o.noRound });
+    // a cut slices the stroke flat; give the sliced ends a marker's round cap
+    if (excl && !o.noRound) whole = ex.roundCutEnds(whole, crop.w, crop.h, cropMask(excl, w, crop));
 
     const candidates = [];
     const push = (mask, kind) => {

@@ -443,10 +443,81 @@ check(f2Res.autoFill < 0.3, `auto keeps marker strokes thin on fibrous paper (fi
 check(f2Res.n >= 1 && f2Res.clickFill < 0.3 && f2Res.snapped.x <= f2Res.snapped.x && f2Res.fusedWidth > 600,
   `a click in the bleed halo snaps to the paint and traces the fused F2 (fill ${f2Res.clickFill.toFixed(2)}, ${f2Res.fusedWidth} px wide)`);
 check(f2Res.ok === true && f2Res.kind === 'isolated', `Isolate “2” found the 2 in the fused shape (match ${f2Res.score.toFixed(2)})`);
-check(f2Res.left > 250 && f2Res.width > 480 && f2Res.width < 600,
-  `Isolate cut the F off and kept the whole 2, tail included (starts at x=${f2Res.left}, ${f2Res.width} px wide)`);
+check(f2Res.left > 250 && f2Res.width > 480 && f2Res.width < 530,
+  `Isolate cut the F off at the join and kept the whole 2, tail included (starts at x=${f2Res.left}, ${f2Res.width} px wide)`);
 check(f2Res.fill < 0.4, `isolated 2 is a stroke shape, not a filled block (fill ${f2Res.fill.toFixed(2)} of its box)`);
 await page.screenshot({ path: path.join(SHOTS, 'isolate-2.png') });
+await page.evaluate(() => ST.batch.skip());
+
+// a chisel-marker "#" (thick verticals, thin horizontals with fading,
+// tapering ends), leaning so it gets auto-straightened, fused with a
+// neighbor's diagonal at the top right. Auto must find one fused shape,
+// Isolate “#” must cut the diagonal off and keep the whole #, and the thin
+// bars must end in round caps rather than needle points.
+console.log('\n— chisel marker #: deskew, Isolate, round stroke ends');
+const hashRes = await page.evaluate(() => {
+  const W = 900, H = 1000;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  x.fillStyle = '#eeeae4'; x.fillRect(0, 0, W, H);
+  const img = x.getImageData(0, 0, W, H);
+  let s = 5;
+  const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 0; i < img.data.length; i += 4) { const n = (rnd() - 0.5) * 24; img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n; }
+  x.putImageData(img, 0, 0);
+  const lean = 60;
+  const strokes = [
+    [[300, 200], [300 + lean, 800], 30, 0.08], [[470, 190], [470 + lean, 800], 30, 0.08],
+    [[200, 420], [700, 400], 14, 0.14], [[180, 600], [680, 585], 14, 0.14],
+    [[478, 200], [820, 60], 22, 0.1], [[820, 60], [880, 300], 22, 0.1],
+  ];
+  x.lineCap = 'round';
+  for (const [a, b, w] of strokes) {
+    x.lineWidth = w + 70; x.strokeStyle = 'rgba(236,170,175,0.45)';
+    x.beginPath(); x.moveTo(a[0], a[1]); x.lineTo(b[0], b[1]); x.stroke();
+  }
+  for (const [a, b, w, taper] of strokes) {
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const n = Math.ceil(len / 3);
+    for (let i = 0; i < n; i++) {
+      const t0 = i / n, t1 = (i + 1) / n, tm = (t0 + t1) / 2;
+      const k = Math.min(1, Math.min(tm, 1 - tm) / taper);
+      x.lineWidth = w * (0.35 + 0.65 * Math.sqrt(k));
+      x.strokeStyle = `rgba(186,28,44,${(0.45 + 0.55 * k).toFixed(3)})`;
+      x.beginPath();
+      x.moveTo(a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0);
+      x.lineTo(a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1);
+      x.stroke();
+    }
+  }
+  ST.batch.addCanvas(c, 'hash');
+  ST.batch.reopen();
+  const item = ST.batch.queue[ST.batch.idx];
+  const auto = item.candidates[0];
+  const out = { angle: item.angle, n: item.candidates.length, autoFill: auto ? ST.raster.count(auto.mask) / (auto.w * auto.h) : 1 };
+  document.getElementById('reviewChar').value = '#';
+  out.ok = ST.batch.isolate();
+  const iso = item.candidates[0];
+  const bb = ST.raster.maskBounds(iso.mask, iso.w, iso.h);
+  out.kind = iso.kind;
+  out.bounds = { x: bb.x0 + iso.crop.x, y: bb.y0 + iso.crop.y, w: bb.w, h: bb.h };
+  out.canvasW = item.canvas.width;
+  // stroke-end bluntness: the leftmost ink of the isolated shape (a thin
+  // bar's tip) and how tall the ink is 6 px in from it
+  let tipX = Infinity, tipY = 0;
+  for (let y = 0; y < iso.h; y++) for (let xx = 0; xx < iso.w; xx++) if (iso.mask[y * iso.w + xx] && xx < tipX) { tipX = xx; tipY = y; }
+  let tall = 0;
+  for (let y = 0; y < iso.h; y++) if (iso.mask[y * iso.w + Math.min(iso.w - 1, tipX + 6)]) tall++;
+  out.tip = { tall };
+  return out;
+});
+check(hashRes.angle !== 0 && hashRes.n === 1 && hashRes.autoFill < 0.3,
+  `leaning # auto-straightened (${hashRes.angle}°) into one thin-stroked shape (fill ${hashRes.autoFill.toFixed(2)})`);
+check(hashRes.ok === true && hashRes.kind === 'isolated', 'Isolate “#” accepted the fused shape');
+check(hashRes.bounds.w > 400 && hashRes.bounds.w < 560 && hashRes.bounds.x + hashRes.bounds.w < hashRes.canvasW * 0.8,
+  `Isolate cut the neighbor's diagonal off and kept the whole # (${hashRes.bounds.w}×${hashRes.bounds.h})`);
+check(hashRes.tip.tall >= 9, `thin bars end in round caps, not needle points (${hashRes.tip.tall} px tall 6 px from the tip)`);
+await page.screenshot({ path: path.join(SHOTS, 'isolate-hash.png') });
 await page.evaluate(() => ST.batch.skip());
 
 // studio round-trip: Edit manually → add in the studio → next photo pops up

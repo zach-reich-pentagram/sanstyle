@@ -70,6 +70,10 @@
     return best;
   };
 
+  // Rotate onto a canvas big enough to hold the whole photo. The corners
+  // the photo no longer covers are filled with its background color, not
+  // left transparent (black): black corners would otherwise read as the
+  // strongest "paint" in the frame.
   function rotateCanvas(src, deg) {
     const rad = (-deg * Math.PI) / 180;
     const s = Math.abs(Math.sin(rad)), c = Math.abs(Math.cos(rad));
@@ -78,6 +82,14 @@
     const out = g.document.createElement('canvas');
     out.width = W; out.height = H;
     const ctx = out.getContext('2d');
+    let fill = { r: 128, g: 128, b: 128 };
+    try {
+      const d = src.getContext('2d').getImageData(0, 0, src.width, src.height).data;
+      const bg = ST.extract ? ST.extract.backgroundColor(d, src.width, src.height) : null;
+      if (bg) fill = bg;
+    } catch (e) { /* tainted canvas: gray corners */ }
+    ctx.fillStyle = `rgb(${Math.round(fill.r)},${Math.round(fill.g)},${Math.round(fill.b)})`;
+    ctx.fillRect(0, 0, W, H);
     ctx.translate(W / 2, H / 2);
     ctx.rotate(rad);
     ctx.drawImage(src, -src.width / 2, -src.height / 2);

@@ -317,8 +317,9 @@
       ST.toast(`Couldn't find a confident “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
       return false;
     }
-    // neighbors' strokes that enter the box get cut off at their join
-    const trimmed = res.margin ? ST.extract.trimSpurs(cand.mask, res.mask, cand.w, cand.h, res.margin) : res.mask;
+    // neighbors' strokes that enter the box get cut off where the letter begins
+    const guide = res.grid ? { box: res.box, cells: ST.classify.letterCells(res.grid) } : null;
+    const trimmed = res.margin ? ST.extract.trimSpurs(cand.mask, res.mask, cand.w, cand.h, res.margin, guide) : res.mask;
     const clean = ST.extract.cleanMask(trimmed, cand.w, cand.h, 4);
     // re-crop to the isolated letter so the photo pane boxes just it
     const bb = ST.raster.maskBounds(clean, cand.w, cand.h);

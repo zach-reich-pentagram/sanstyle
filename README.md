@@ -64,8 +64,13 @@ character and **Isolate**: a stroke-weight-agnostic template search (two-way
 chamfer match against system-font renders, scored on the ink connected to
 your click) finds where that character sits inside the fused shape, keeps
 what's inside, gives back any of the letter's own overhang the box clipped,
-and follows each neighbor stroke that enters the box to where it joins the
-letter, cutting it off there.
+and follows each neighbor stroke that enters the box to where the template
+says the letter begins, cutting it off there.
+
+Stroke ends get a marker's round cap: nothing a pen draws is sharper than
+its tip, so needle points thinner than the thin side of the tip (measured
+from the distance transform of the shape) are pruned back to a cap — and
+where a cut sliced a stroke flat, the sliced face is capped the same way.
 
 ![Isolate a fused 2](docs/shots/isolate-2.png)
 

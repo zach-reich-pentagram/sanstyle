@@ -164,6 +164,37 @@
       I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
   }
 
+  // Grid cell of pixel (x, y) for box b, or -1 outside the box — the same
+  // mapping gridInBox uses, so template cells line up with pixels.
+  cls.cellOf = function (b, x, y) {
+    if (x < b.x || y < b.y || x >= b.x + b.w || y >= b.y + b.h) return -1;
+    const s = Math.min(GRID / b.w, GRID / b.h);
+    const gw = Math.max(1, Math.round(b.w * s)), gh = Math.max(1, Math.round(b.h * s));
+    const ox = Math.floor((GRID - gw) / 2), oy = Math.floor((GRID - gh) / 2);
+    const gx = Math.min(gw - 1, Math.floor(((x - b.x) / b.w) * gw));
+    const gy = Math.min(gh - 1, Math.floor(((y - b.y) / b.h) * gh));
+    return (oy + gy) * GRID + (ox + gx);
+  };
+
+  // Where a template expects ink (cells with real coverage; `spread` cells
+  // of widening if a looser notion is wanted). → Uint8Array(GRID*GRID)
+  cls.letterCells = function (grid, spread) {
+    const on = new Uint8Array(GRID * GRID);
+    const sp = spread || 0;
+    for (let y = 0; y < GRID; y++) {
+      for (let x = 0; x < GRID; x++) {
+        if (grid[y * GRID + x] <= 0.15) continue;
+        for (let dy = -sp; dy <= sp; dy++) {
+          for (let dx = -sp; dx <= sp; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 0 && ny >= 0 && nx < GRID && ny < GRID) on[ny * GRID + nx] = 1;
+          }
+        }
+      }
+    }
+    return on;
+  };
+
   // Coverage grid of the mask inside box b (GRID×GRID, aspect preserved
   // exactly like gridFromMask so it's comparable with the templates).
   function gridInBox(sum, b) {
@@ -255,7 +286,20 @@
   // The ink inside box `b` that is connected (within the box) to the click:
   // a letter is one connected stroke system, so a box that scores well only
   // thanks to a neighbor's disconnected piece loses that piece here.
-  function componentInBox(mask, w, h, b, cx, cy) {
+  // Nearest ink pixel to (cx, cy) in the whole mask, as [x, y] or null.
+  function nearestInkTo(mask, w, h, cx, cy) {
+    let bd = Infinity, bi = -1;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!mask[y * w + x]) continue;
+        const d = (x - cx) ** 2 + (y - cy) ** 2;
+        if (d < bd) { bd = d; bi = y * w + x; }
+      }
+    }
+    return bi < 0 ? null : [bi % w, (bi / w) | 0];
+  }
+
+  function componentInBox(mask, w, h, b, cx, cy, start) {
     const x0 = Math.max(0, b.x), y0 = Math.max(0, b.y);
     const x1 = Math.min(w, b.x + b.w), y1 = Math.min(h, b.y + b.h);
     const boxed = new Uint8Array(w * h);
@@ -263,17 +307,10 @@
     let sx = Math.round(cx), sy = Math.round(cy);
     if (sx < x0 || sy < y0 || sx >= x1 || sy >= y1) return null;
     if (!boxed[sy * w + sx]) {
-      const rad = Math.max(4, Math.round(Math.max(w, h) * 0.03));
-      let bd = Infinity, bi = -1;
-      for (let y = Math.max(y0, sy - rad); y < Math.min(y1, sy + rad + 1); y++) {
-        for (let x = Math.max(x0, sx - rad); x < Math.min(x1, sx + rad + 1); x++) {
-          if (!boxed[y * w + x]) continue;
-          const d = (x - cx) ** 2 + (y - cy) ** 2;
-          if (d < bd) { bd = d; bi = y * w + x; }
-        }
-      }
-      if (bi < 0) return null;
-      sx = bi % w; sy = (bi / w) | 0;
+      // the click (or a fallback at the shape's center, which for a "#" or
+      // an "O" is empty space) → the nearest ink, precomputed once
+      if (!start || !boxed[start[1] * w + start[0]]) return null;
+      sx = start[0]; sy = start[1];
     }
     const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
     if (!comp.count) return null;
@@ -344,15 +381,16 @@
     const coarse = { box: cands[0].box, score: cands[0].score };
     let scoreOf = (b, tpl) => chamferScore(gridInBox(sum, b), tpl);
     if (hasClick) {
+      const start = nearestInkTo(mask, w, h, o.cx, o.cy);
       scoreOf = (b, tpl) => {
-        const comp = componentInBox(mask, w, h, b, o.cx, o.cy);
+        const comp = componentInBox(mask, w, h, b, o.cx, o.cy, start);
         return comp ? chamferScore(gridInBox(comp.sum, b), tpl) : 0;
       };
       for (const c of cands) c.score = scoreOf(c.box, c.tpl);
       cands.sort((a, b) => b.score - a.score);
     }
     let best = { box: cands[0].box, score: cands[0].score, ch: cands[0].tpl.ch, tpl: cands[0].tpl };
-    if (o.refine === false) return { box: best.box, score: best.score, ch: best.ch, coarse };
+    if (o.refine === false) return { box: best.box, score: best.score, ch: best.ch, grid: best.tpl.grid, coarse };
     // tighten: hill-climb each box edge until the match stops improving,
     // so the box hugs the letter rather than the coarse search grid
     const moves = [[1, 0, 0, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, -1, 0],
@@ -368,7 +406,7 @@
       }
       if (!improved) step = Math.floor(step / 2);
     }
-    return { box: best.box, score: best.score, ch: best.ch, coarse };
+    return { box: best.box, score: best.score, ch: best.ch, grid: best.tpl.grid, coarse };
   };
 
   /**
@@ -399,7 +437,7 @@
     }
     const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
     if (comp.count < 30) return null;
-    return { mask: comp.mask, score: found.score, box: found.box, margin: { x0, y0, x1, y1 } };
+    return { mask: comp.mask, score: found.score, box: found.box, grid: found.grid, margin: { x0, y0, x1, y1 } };
   };
 
   /**

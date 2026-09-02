@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { loadST } = require('./loader');
 
-const ST = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'extract.js']);
+const ST = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js']);
 
 // A fake canvas: enough of the 2D API for extract.seeded.
 function fakeCanvas(w, h, paint) {
@@ -153,6 +153,65 @@ test('trimSpurs: a neighbor stroke entering the box is cut off at its join', () 
   const out2 = ST.extract.trimSpurs(full2, kept2, w, h, box);
   assert.ok(out2[245 * w + 230], 'the overhanging foot is kept');
   assert.strictEqual(ST.raster.count(out2), ST.raster.count(full2), 'nothing of the letter is lost');
+});
+
+test('roundEnds: needle-sharp stroke ends become caps, thin bridges survive', () => {
+  const w = 300, h = 120;
+  const m = new Uint8Array(w * h);
+  // a 20-px bar whose left end tapers to a 60-px needle, plus a 10-px bridge to a block on the right
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let ink = false;
+      if (x >= 80 && x < 200 && y >= 50 && y < 70) ink = true;                         // bar
+      if (x >= 20 && x < 80) { const half = ((x - 20) / 60) * 10; ink = Math.abs(y - 60) < half; } // needle taper
+      if (x >= 200 && x < 240 && y >= 55 && y < 65) ink = true;                        // thin bridge
+      if (x >= 240 && x < 290 && y >= 30 && y < 90) ink = true;                        // block
+      if (ink) m[y * w + x] = 1;
+    }
+  }
+  const out = ST.extract.roundEnds(m, w, h, null);
+  assert.ok(!out[60 * w + 30], 'the needle tip is gone');
+  assert.ok(out[60 * w + 100] && out[52 * w + 100], 'the bar is intact');
+  assert.ok(out[60 * w + 220], 'the thin bridge that connects the block is kept');
+  assert.ok(out[60 * w + 260], 'the block is intact');
+  // the new left end is blunt: a few px in from the new tip the bar is already several px tall
+  let tip = w;
+  for (let x = 0; x < w; x++) { let any = false; for (let y = 0; y < h; y++) if (out[y * w + x]) { any = true; break; } if (any) { tip = x; break; } }
+  let tall = 0;
+  for (let y = 0; y < h; y++) if (out[y * w + tip + 3]) tall++;
+  assert.ok(tip > 26 && tall >= 6, `blunt cap (${tall} px tall 3 px in from the tip at x=${tip})`);
+});
+
+test('trimSpurs with a template guide: a neighbor joining a stroke END is cut at the letter, not deeper', () => {
+  const w = 300, h = 300;
+  const full = new Uint8Array(w * h);
+  const bar = (x, y) => x >= 130 && x < 160 && y >= 120 && y < 260;     // the letter: a vertical bar
+  const foot = (x, y) => x >= 100 && x < 200 && y >= 240 && y < 260;    // with a foot
+  const spur = (x, y) => x >= 130 && x < 160 && y >= 0 && y < 120;      // neighbor continues the bar upward, far
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bar(x, y) || foot(x, y) || spur(x, y)) full[y * w + x] = 1;
+  // the template box: the letter with a generous top (40 px of the neighbor inside)
+  const box = { x0: 90, y0: 80, x1: 210, y1: 270 };
+  const kept = new Uint8Array(w * h);
+  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) kept[y * w + x] = full[y * w + x];
+  // guide: the letter's true ink gridded into the box
+  const lb = { x: box.x0, y: box.y0, w: box.x1 - box.x0, h: box.y1 - box.y0 };
+  const G = ST.classify.GRID, grid = new Float32Array(G * G), cnt = new Float32Array(G * G);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const ci = ST.classify.cellOf(lb, x, y);
+    if (ci < 0) continue;
+    cnt[ci]++; if (bar(x, y) || foot(x, y)) grid[ci]++;
+  }
+  for (let i = 0; i < grid.length; i++) grid[i] = cnt[i] ? grid[i] / cnt[i] : 0;
+  const out = ST.extract.trimSpurs(full, kept, w, h, box, { box: lb, cells: ST.classify.letterCells(grid) });
+  assert.ok(!out[90 * w + 145], 'the neighbor stub inside the box is erased');
+  assert.ok(out[125 * w + 145] && out[140 * w + 145], 'the bar keeps its top');
+  assert.ok(out[250 * w + 110], 'the foot is intact');
+  const n = ST.raster.count(out), letter = 30 * 140 + 100 * 20 - 30 * 20;
+  assert.ok(n >= letter * 0.95 && n <= letter * 1.12, `letter preserved, at most a cell of stub left (${n} px vs ${letter})`);
+  // unguided, the walk finds no widening along a straight continuation and
+  // must fall back to slicing at the box edge rather than eating the bar
+  const plain = ST.extract.trimSpurs(full, kept, w, h, box, null);
+  assert.ok(plain[125 * w + 145] && plain[140 * w + 145] && plain[200 * w + 145], 'without a guide the bar is never eaten');
 });
 
 test('floodFrom + reconstruct primitives', () => {

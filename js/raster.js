@@ -268,6 +268,133 @@
     return cur;
   };
 
+  // Chamfer distance transform (two passes, 1 / √2 steps): each ink pixel's
+  // distance to the nearest background pixel (the frame edge counts as
+  // background); 0 off the ink.
+  raster.distanceTransform = function (mask, w, h) {
+    const INF = 1e6, D = Math.SQRT2;
+    const d = new Float32Array(w * h);
+    for (let i = 0; i < d.length; i++) d[i] = mask[i] ? INF : 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!mask[i]) continue;
+        let v = d[i];
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) v = 1;
+        if (x > 0) v = Math.min(v, d[i - 1] + 1);
+        if (y > 0) {
+          v = Math.min(v, d[i - w] + 1);
+          if (x > 0) v = Math.min(v, d[i - w - 1] + D);
+          if (x < w - 1) v = Math.min(v, d[i - w + 1] + D);
+        }
+        d[i] = v;
+      }
+    }
+    for (let y = h - 1; y >= 0; y--) {
+      for (let x = w - 1; x >= 0; x--) {
+        const i = y * w + x;
+        if (!mask[i]) continue;
+        let v = d[i];
+        if (x < w - 1) v = Math.min(v, d[i + 1] + 1);
+        if (y < h - 1) {
+          v = Math.min(v, d[i + w] + 1);
+          if (x < w - 1) v = Math.min(v, d[i + w + 1] + D);
+          if (x > 0) v = Math.min(v, d[i + w - 1] + D);
+        }
+        d[i] = v;
+      }
+    }
+    return d;
+  };
+
+  // Half-width of the thinner strokes: a low percentile (default 20th) of
+  // the distance transform along its ridge — the medial axis — optionally
+  // only inside `region`. A chisel marker's thin side, in pixels.
+  raster.thinRadius = function (mask, w, h, dt, region, pct) {
+    const d = dt || raster.distanceTransform(mask, w, h);
+    const vals = [];
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const v = d[i];
+        if (v < 1.5 || (region && !region[i])) continue;
+        if (v >= d[i - 1] && v >= d[i + 1] && v >= d[i - w] && v >= d[i + w] &&
+            v >= d[i - w - 1] && v >= d[i - w + 1] && v >= d[i + w - 1] && v >= d[i + w + 1]) vals.push(v);
+      }
+    }
+    if (!vals.length) return 0;
+    vals.sort((a, b) => a - b);
+    return vals[Math.min(vals.length - 1, Math.floor(vals.length * (pct == null ? 0.2 : pct)))];
+  };
+
+  // Remove what an opening of radius r would remove — EXCEPT thin stretches
+  // that hold the shape together. Needle-sharp stroke ends become round
+  // caps (nothing a marker draws is sharper than its tip), side burrs go,
+  // a thin section in the middle of a stroke stays. `region` limits where
+  // pruning may happen.
+  raster.pruneThin = function (mask, w, h, r, region) {
+    if (!(r >= 1)) return mask;
+    const opened = raster.open(mask, w, h, r);
+    const removed = new Uint8Array(w * h);
+    let any = false;
+    for (let i = 0; i < removed.length; i++) {
+      if (mask[i] && !opened[i] && (!region || region[i])) { removed[i] = 1; any = true; }
+    }
+    if (!any) return mask;
+    const { labels, sizes } = raster.components(removed, w, h);
+    const n = sizes.length;
+    const bx0 = new Int32Array(n).fill(w), by0 = new Int32Array(n).fill(h);
+    const bx1 = new Int32Array(n).fill(-1), by1 = new Int32Array(n).fill(-1);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const L = labels[y * w + x];
+        if (!L) continue;
+        if (x < bx0[L]) bx0[L] = x; if (x > bx1[L]) bx1[L] = x;
+        if (y < by0[L]) by0[L] = y; if (y > by1[L]) by1[L] = y;
+      }
+    }
+    const out = new Uint8Array(mask);
+    const m = 2 * r + 2;
+    // a "side" must be a real stroke, not a crumb that happened to survive
+    // the opening: judge each touched piece by its whole size
+    const go = raster.components(opened, w, h);
+    const minSide = Math.max(12 * r * r, raster.count(mask) * 0.01);
+    for (let L = 1; L < n; L++) {
+      const x0 = Math.max(0, bx0[L] - m), y0 = Math.max(0, by0[L] - m);
+      const x1 = Math.min(w - 1, bx1[L] + m), y1 = Math.min(h - 1, by1[L] + m);
+      const ww = x1 - x0 + 1, wh = y1 - y0 + 1;
+      const local = new Uint8Array(ww * wh);
+      for (let y = 0; y < wh; y++) for (let x = 0; x < ww; x++) local[y * ww + x] = opened[(y + y0) * w + (x + x0)];
+      const lc = raster.components(local, ww, wh);
+      // which pieces of the opened shape does this sliver touch, locally —
+      // two distinct local pieces can be one global stroke (a ring), and
+      // that still counts as two sides
+      const touched = new Map(); // local label → global size
+      const touch = (li, gi) => { if (local[li]) touched.set(lc.labels[li], go.sizes[go.labels[gi]]); };
+      for (let y = 0; y < wh; y++) {
+        for (let x = 0; x < ww; x++) {
+          const gi = (y + y0) * w + (x + x0);
+          if (labels[gi] !== L) continue;
+          const li = y * ww + x;
+          if (x > 0) touch(li - 1, gi - 1);
+          if (x < ww - 1) touch(li + 1, gi + 1);
+          if (y > 0) touch(li - ww, gi - w);
+          if (y < wh - 1) touch(li + ww, gi + w);
+        }
+      }
+      let sides = 0;
+      for (const size of touched.values()) if (size >= minSide) sides++;
+      if (sides >= 2) continue; // a bridge between two strokes: keep it
+      for (let y = by0[L]; y <= by1[L]; y++) {
+        for (let x = bx0[L]; x <= bx1[L]; x++) {
+          const i = y * w + x;
+          if (labels[i] === L) out[i] = 0;
+        }
+      }
+    }
+    return out;
+  };
+
   // Ink pixels bordering background (4-neighborhood).
   raster.perimeter = function (mask, w, h) {
     let n = 0;
