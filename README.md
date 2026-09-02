@@ -62,10 +62,13 @@ grown at the tolerance whose edge is sharpest. Fused with a neighbor? Drag a
 short cut across the join and the region regrows without it — or type the
 character and **Isolate**: a stroke-weight-agnostic template search (two-way
 chamfer match against system-font renders, scored on the ink connected to
-your click) finds where that character sits inside the fused shape, keeps
-what's inside, gives back any of the letter's own overhang the box clipped,
-and follows each neighbor stroke that enters the box to where the template
-says the letter begins, cutting it off there.
+your click) finds where that character sits inside the fused shape. The
+shape is then read as strokes — skeletonized, cut into pieces at junctions
+and at sharp corners — and every stroke that leaves that box by more than a
+couple of stroke widths is a neighbor's: it is dropped at its join, whether
+it meets the letter side-on or continues one of its strokes around a
+corner, and the cut face is healed and capped. The letter's own overhang
+past an imperfect box stays.
 
 Stroke ends get a marker's round cap: nothing a pen draws is sharper than
 its tip, so needle points thinner than the thin side of the tip (measured

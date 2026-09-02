@@ -269,10 +269,11 @@
   };
 
   // Chamfer distance transform (two passes, 1 / √2 steps): each ink pixel's
-  // distance to the nearest background pixel (the frame edge counts as
-  // background); 0 off the ink.
-  raster.distanceTransform = function (mask, w, h) {
+  // distance to the nearest background pixel; 0 off the ink. The frame edge
+  // counts as background unless opts.borderInk (then the frame is open).
+  raster.distanceTransform = function (mask, w, h, opts) {
     const INF = 1e6, D = Math.SQRT2;
+    const borderInk = !!(opts && opts.borderInk);
     const d = new Float32Array(w * h);
     for (let i = 0; i < d.length; i++) d[i] = mask[i] ? INF : 0;
     for (let y = 0; y < h; y++) {
@@ -280,7 +281,7 @@
         const i = y * w + x;
         if (!mask[i]) continue;
         let v = d[i];
-        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) v = 1;
+        if (!borderInk && (x === 0 || y === 0 || x === w - 1 || y === h - 1)) v = 1;
         if (x > 0) v = Math.min(v, d[i - 1] + 1);
         if (y > 0) {
           v = Math.min(v, d[i - w] + 1);
@@ -355,10 +356,11 @@
     }
     const out = new Uint8Array(mask);
     const m = 2 * r + 2;
-    // a "side" must be a real stroke, not a crumb that happened to survive
-    // the opening: judge each touched piece by its whole size
+    // a "side" must be a real stroke, not a crumb or the blob at the end of
+    // a fading tail that happened to survive the opening: judge each
+    // touched piece by its whole size against the letter
     const go = raster.components(opened, w, h);
-    const minSide = Math.max(12 * r * r, raster.count(mask) * 0.01);
+    const minSide = Math.max(12 * r * r, raster.count(mask) * 0.025);
     for (let L = 1; L < n; L++) {
       const x0 = Math.max(0, bx0[L] - m), y0 = Math.max(0, by0[L] - m);
       const x1 = Math.min(w - 1, bx1[L] + m), y1 = Math.min(h - 1, by1[L] + m);
@@ -393,6 +395,44 @@
       }
     }
     return out;
+  };
+
+  // Zhang–Suen thinning → one-pixel-wide, 8-connected skeleton of the ink.
+  raster.thin = function (mask, w, h) {
+    const img = new Uint8Array(mask);
+    const bb = raster.maskBounds(img, w, h);
+    if (!bb) return img;
+    const x0 = Math.max(1, bb.x0), y0 = Math.max(1, bb.y0), x1 = Math.min(w - 2, bb.x1), y1 = Math.min(h - 2, bb.y1);
+    // the frame edge is treated as background: clear the outermost ring
+    for (let x = 0; x < w; x++) { img[x] = 0; img[(h - 1) * w + x] = 0; }
+    for (let y = 0; y < h; y++) { img[y * w] = 0; img[y * w + w - 1] = 0; }
+    const del = [];
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let step = 0; step < 2; step++) {
+        del.length = 0;
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const i = y * w + x;
+            if (!img[i]) continue;
+            const p2 = img[i - w], p3 = img[i - w + 1], p4 = img[i + 1], p5 = img[i + w + 1];
+            const p6 = img[i + w], p7 = img[i + w - 1], p8 = img[i - 1], p9 = img[i - w - 1];
+            const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+            if (B < 2 || B > 6) continue;
+            let A = 0;
+            if (!p2 && p3) A++; if (!p3 && p4) A++; if (!p4 && p5) A++; if (!p5 && p6) A++;
+            if (!p6 && p7) A++; if (!p7 && p8) A++; if (!p8 && p9) A++; if (!p9 && p2) A++;
+            if (A !== 1) continue;
+            if (step === 0) { if (p2 * p4 * p6 || p4 * p6 * p8) continue; }
+            else if (p2 * p4 * p8 || p2 * p6 * p8) continue;
+            del.push(i);
+          }
+        }
+        if (del.length) { changed = true; for (const i of del) img[i] = 0; }
+      }
+    }
+    return img;
   };
 
   // Ink pixels bordering background (4-neighborhood).
@@ -495,8 +535,28 @@
     return out;
   }
 
-  raster.dilate = (m, w, h, r) => (r <= 0 ? m : r <= 3 ? morphDisk(m, w, h, r, true) : dilateBox(m, w, h, r));
-  raster.erode = (m, w, h, r) => (r <= 0 ? m : r <= 3 ? morphDisk(m, w, h, r, false) : erodeBox(m, w, h, r));
+  // Disk morphology at any radius in O(n): a dilation by a disk of radius r
+  // is every pixel within r of the ink (distance transform of the
+  // background), an erosion every ink pixel farther than r from the
+  // background. Isotropic, unlike a box, which is √2 thinner across
+  // diagonal strokes — a diagonal stroke must not vanish under an opening
+  // an upright one survives.
+  function dilateDisk(mask, w, h, r) {
+    const inv = new Uint8Array(w * h);
+    for (let i = 0; i < inv.length; i++) inv[i] = mask[i] ? 0 : 1;
+    const dt = raster.distanceTransform(inv, w, h, { borderInk: true });
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) out[i] = mask[i] || dt[i] <= r ? 1 : 0;
+    return out;
+  }
+  function erodeDisk(mask, w, h, r) {
+    const dt = raster.distanceTransform(mask, w, h);
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) out[i] = mask[i] && dt[i] > r ? 1 : 0;
+    return out;
+  }
+  raster.dilate =(m, w, h, r) => (r <= 0 ? m : r <= 3 ? morphDisk(m, w, h, r, true) : dilateDisk(m, w, h, r));
+  raster.erode = (m, w, h, r) => (r <= 0 ? m : r <= 3 ? morphDisk(m, w, h, r, false) : erodeDisk(m, w, h, r));
   raster.close = (m, w, h, r) => raster.erode(raster.dilate(m, w, h, r), w, h, r);
   raster.open = (m, w, h, r) => raster.dilate(raster.erode(m, w, h, r), w, h, r);
 
@@ -582,7 +642,9 @@
     const base = new Uint8Array(w * h);
     for (let i = 0; i < maskA.length; i++) base[i] = maskA[i] && !maskX[i] ? 1 : 0;
     if (!r || r <= 0) return base;
-    const closed = raster.close(base, w, h, r);
+    // a box closing on purpose: it bridges a gap up to 2r wide whatever the
+    // stroke's thickness, which is the point of blocking something out
+    const closed = erodeBox(dilateBox(base, w, h, r), w, h, r);
     const out = Uint8Array.from(base);
     for (let i = 0; i < out.length; i++) {
       if (closed[i] && maskX[i]) out[i] = 1;

@@ -164,37 +164,6 @@
       I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
   }
 
-  // Grid cell of pixel (x, y) for box b, or -1 outside the box — the same
-  // mapping gridInBox uses, so template cells line up with pixels.
-  cls.cellOf = function (b, x, y) {
-    if (x < b.x || y < b.y || x >= b.x + b.w || y >= b.y + b.h) return -1;
-    const s = Math.min(GRID / b.w, GRID / b.h);
-    const gw = Math.max(1, Math.round(b.w * s)), gh = Math.max(1, Math.round(b.h * s));
-    const ox = Math.floor((GRID - gw) / 2), oy = Math.floor((GRID - gh) / 2);
-    const gx = Math.min(gw - 1, Math.floor(((x - b.x) / b.w) * gw));
-    const gy = Math.min(gh - 1, Math.floor(((y - b.y) / b.h) * gh));
-    return (oy + gy) * GRID + (ox + gx);
-  };
-
-  // Where a template expects ink (cells with real coverage; `spread` cells
-  // of widening if a looser notion is wanted). → Uint8Array(GRID*GRID)
-  cls.letterCells = function (grid, spread) {
-    const on = new Uint8Array(GRID * GRID);
-    const sp = spread || 0;
-    for (let y = 0; y < GRID; y++) {
-      for (let x = 0; x < GRID; x++) {
-        if (grid[y * GRID + x] <= 0.15) continue;
-        for (let dy = -sp; dy <= sp; dy++) {
-          for (let dx = -sp; dx <= sp; dx++) {
-            const nx = x + dx, ny = y + dy;
-            if (nx >= 0 && ny >= 0 && nx < GRID && ny < GRID) on[ny * GRID + nx] = 1;
-          }
-        }
-      }
-    }
-    return on;
-  };
-
   // Coverage grid of the mask inside box b (GRID×GRID, aspect preserved
   // exactly like gridFromMask so it's comparable with the templates).
   function gridInBox(sum, b) {
@@ -390,7 +359,7 @@
       cands.sort((a, b) => b.score - a.score);
     }
     let best = { box: cands[0].box, score: cands[0].score, ch: cands[0].tpl.ch, tpl: cands[0].tpl };
-    if (o.refine === false) return { box: best.box, score: best.score, ch: best.ch, grid: best.tpl.grid, coarse };
+    if (o.refine === false) return { box: best.box, score: best.score, ch: best.ch, coarse };
     // tighten: hill-climb each box edge until the match stops improving,
     // so the box hugs the letter rather than the coarse search grid
     const moves = [[1, 0, 0, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, -1, 0],
@@ -406,7 +375,7 @@
       }
       if (!improved) step = Math.floor(step / 2);
     }
-    return { box: best.box, score: best.score, ch: best.ch, grid: best.tpl.grid, coarse };
+    return { box: best.box, score: best.score, ch: best.ch, coarse };
   };
 
   /**
@@ -437,7 +406,7 @@
     }
     const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
     if (comp.count < 30) return null;
-    return { mask: comp.mask, score: found.score, box: found.box, grid: found.grid, margin: { x0, y0, x1, y1 } };
+    return { mask: comp.mask, score: found.score, box: found.box, margin: { x0, y0, x1, y1 } };
   };
 
   /**

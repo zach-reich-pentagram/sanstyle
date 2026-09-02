@@ -427,7 +427,9 @@ const f2Res = await page.evaluate(() => {
   const clicked = item.candidates[0];
   const clickFill = ST.raster.count(clicked.mask) / (clicked.w * clicked.h);
   const clickedBB = ST.raster.maskBounds(clicked.mask, clicked.w, clicked.h);
-  const located = ST.classify.locate(clicked.mask, clicked.w, clicked.h, '2');
+  const lc = { x: item.lastClick.x - clicked.crop.x, y: item.lastClick.y - clicked.crop.y };
+  const located = ST.classify.isolate(clicked.mask, clicked.w, clicked.h, '2', lc.x, lc.y);
+  const strokeInfo = located ? ST.extract.isolateStrokes(clicked.mask, clicked.w, clicked.h, located.margin, lc.x, lc.y) : null;
   document.getElementById('reviewChar').value = '2';
   document.getElementById('reviewChar').dispatchEvent(new Event('input'));
   const ok = ST.batch.isolate();
@@ -436,6 +438,7 @@ const f2Res = await page.evaluate(() => {
   return {
     autoFill, n, clickFill, ok, kind: iso.kind, snapped: item.lastClick,
     fusedWidth: clickedBB.w, score: located ? located.score : 0,
+    box: located ? located.box : null, strokes: strokeInfo ? { strokes: strokeInfo.strokes, foreign: strokeInfo.foreign } : null,
     left: iso.crop.x + bb.x0, width: bb.w, fill: ST.raster.count(iso.mask) / (bb.w * bb.h),
   };
 });
@@ -444,7 +447,7 @@ check(f2Res.n >= 1 && f2Res.clickFill < 0.3 && f2Res.snapped.x <= f2Res.snapped.
   `a click in the bleed halo snaps to the paint and traces the fused F2 (fill ${f2Res.clickFill.toFixed(2)}, ${f2Res.fusedWidth} px wide)`);
 check(f2Res.ok === true && f2Res.kind === 'isolated', `Isolate “2” found the 2 in the fused shape (match ${f2Res.score.toFixed(2)})`);
 check(f2Res.left > 250 && f2Res.width > 480 && f2Res.width < 530,
-  `Isolate cut the F off at the join and kept the whole 2, tail included (starts at x=${f2Res.left}, ${f2Res.width} px wide)`);
+  `Isolate cut the F off at the join and kept the whole 2, tail included (starts at x=${f2Res.left}, ${f2Res.width} px wide; box ${JSON.stringify(f2Res.box)}, strokes ${JSON.stringify(f2Res.strokes)})`);
 check(f2Res.fill < 0.4, `isolated 2 is a stroke shape, not a filled block (fill ${f2Res.fill.toFixed(2)} of its box)`);
 await page.screenshot({ path: path.join(SHOTS, 'isolate-2.png') });
 await page.evaluate(() => ST.batch.skip());

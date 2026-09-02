@@ -5,18 +5,27 @@ const { loadST } = require('./loader');
 
 const ST = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'auto.js']);
 
-test('fast box morphology matches disk for straight gaps', () => {
-  const w = 60, h = 20;
+test('disk morphology at any radius: closing heals a crack, and is isotropic', () => {
+  const w = 60, h = 30;
   const m = new Uint8Array(w * h);
-  // two bars with an 8px gap
-  for (let y = 8; y < 12; y++) {
+  // two 12px-tall bars with an 8px gap (a crack across a stroke)
+  for (let y = 6; y < 18; y++) {
     for (let x = 5; x < 25; x++) m[y * w + x] = 1;
     for (let x = 33; x < 55; x++) m[y * w + x] = 1;
   }
-  const closed = ST.raster.close(m, w, h, 6); // r>3 → box path
-  assert.ok(closed[10 * w + 29], 'gap bridged by close(6)');
-  const still = ST.raster.close(m, w, h, 2);  // r<=3 → disk path
-  assert.ok(!still[10 * w + 29], 'close(2) must not bridge an 8px gap');
+  const closed = ST.raster.close(m, w, h, 6); // r>3 → distance-transform disk
+  assert.ok(closed[12 * w + 29], 'crack bridged by close(6)');
+  const still = ST.raster.close(m, w, h, 2);  // r<=3 → exact small disk
+  assert.ok(!still[12 * w + 29], 'close(2) must not bridge an 8px gap');
+  // an opening of radius 8 keeps a 20px-wide diagonal stroke (a box would
+  // read it as 14px wide and erase it)
+  const W = 120, H = 120;
+  const d = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (Math.abs(x - y) < 20 / Math.SQRT2 && x + y > 40 && x + y < 200) d[y * W + x] = 1;
+  }
+  const opened = ST.raster.open(d, W, H, 8);
+  assert.ok(opened[60 * W + 60] && opened[80 * W + 80], 'diagonal stroke survives a disk opening');
 });
 
 test('fillHoles: small spray gaps close, big counters survive', () => {

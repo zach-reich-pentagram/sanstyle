@@ -125,34 +125,29 @@ test('background estimate + click snap: a click beside the stroke seeds from the
     `a click on the paint is not moved (${on && on.click.x},${on && on.click.y})`);
 });
 
-test('trimSpurs: a neighbor stroke entering the box is cut off at its join', () => {
+test('isolateStrokes: a neighbor stroke joining the letter at a T is dropped at the join', () => {
   const w = 300, h = 300;
   const full = new Uint8Array(w * h);
   const bar = (x, y) => x >= 150 && x < 190 && y >= 40 && y < 260;   // the letter
-  const arm = (x, y) => x >= 20 && x < 150 && y >= 140 && y < 180;   // neighbor's stroke, touching the bar
+  const arm = (x, y) => x >= 5 && x < 150 && y >= 140 && y < 180;    // neighbor's stroke, touching the bar
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bar(x, y) || arm(x, y)) full[y * w + x] = 1;
   const box = { x0: 130, y0: 20, x1: 210, y1: 280 };
-  const kept = new Uint8Array(w * h);
-  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) kept[y * w + x] = full[y * w + x];
-  const out = ST.extract.trimSpurs(full, kept, w, h, box);
-  assert.ok(!out[160 * w + 135], 'the arm stub inside the box is erased');
+  const res = ST.extract.isolateStrokes(full, w, h, box, 170, 100);
+  assert.ok(res && res.foreign >= 1, `the arm is recognized as a stroke that leaves the box (${res && res.strokes} strokes, ${res && res.foreign} foreign)`);
+  const out = res.mask;
+  assert.ok(!out[160 * w + 60] && !out[160 * w + 125], 'the arm is gone, stub included');
   assert.ok(out[160 * w + 170] && out[60 * w + 170] && out[250 * w + 170], 'the bar is intact');
   const barArea = 40 * 220;
   const n = ST.raster.count(out);
-  assert.ok(n >= barArea * 0.98 && n <= barArea + 40 * 8, `only a sliver of the arm may remain (${n} px vs bar ${barArea})`);
-  // nothing enters the box → nothing changes
-  const same = ST.extract.trimSpurs(kept, kept, w, h, box);
-  assert.strictEqual(ST.raster.count(same), ST.raster.count(kept), 'no outside ink → untouched');
-  // the letter's own foot poking 30 px past a tight box is given back, not cut
+  assert.ok(n >= barArea * 0.97 && n <= barArea + 40 * 10, `at most a nub of the arm remains (${n} px vs bar ${barArea})`);
+  // the letter's own foot poking 30 px past a tight box is not a neighbor
   const full2 = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     if (bar(x, y) || (y >= 230 && y < 260 && x >= 150 && x < 240)) full2[y * w + x] = 1; // bar + foot to x=240
   }
-  const kept2 = new Uint8Array(w * h);
-  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) kept2[y * w + x] = full2[y * w + x];
-  const out2 = ST.extract.trimSpurs(full2, kept2, w, h, box);
-  assert.ok(out2[245 * w + 230], 'the overhanging foot is kept');
-  assert.strictEqual(ST.raster.count(out2), ST.raster.count(full2), 'nothing of the letter is lost');
+  const res2 = ST.extract.isolateStrokes(full2, w, h, box, 170, 100);
+  assert.ok(res2 && res2.foreign === 0 && res2.mask[245 * w + 230], 'the overhanging foot is kept');
+  assert.strictEqual(ST.raster.count(res2.mask), ST.raster.count(full2), 'nothing of the letter is lost');
 });
 
 test('roundEnds: needle-sharp stroke ends become caps, thin bridges survive', () => {
@@ -182,36 +177,28 @@ test('roundEnds: needle-sharp stroke ends become caps, thin bridges survive', ()
   assert.ok(tip > 26 && tall >= 6, `blunt cap (${tall} px tall 3 px in from the tip at x=${tip})`);
 });
 
-test('trimSpurs with a template guide: a neighbor joining a stroke END is cut at the letter, not deeper', () => {
+test('isolateStrokes: a neighbor joining a stroke END around a corner is cut at the corner', () => {
   const w = 300, h = 300;
   const full = new Uint8Array(w * h);
   const bar = (x, y) => x >= 130 && x < 160 && y >= 120 && y < 260;     // the letter: a vertical bar
   const foot = (x, y) => x >= 100 && x < 200 && y >= 240 && y < 260;    // with a foot
-  const spur = (x, y) => x >= 130 && x < 160 && y >= 0 && y < 120;      // neighbor continues the bar upward, far
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bar(x, y) || foot(x, y) || spur(x, y)) full[y * w + x] = 1;
-  // the template box: the letter with a generous top (40 px of the neighbor inside)
+  // neighbor: a diagonal from the bar's top going up-right, far beyond the box
+  const diag = (x, y) => {
+    const t = ((x - 145) + (120 - y)) / 2;                                // along the 45° line
+    const d = Math.abs((x - 145) - (120 - y)) / Math.SQRT2;               // distance from it
+    return t >= 0 && t <= 200 && d < 15;
+  };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bar(x, y) || foot(x, y) || diag(x, y)) full[y * w + x] = 1;
+  // the template box: the letter with a generous top (some of the neighbor inside)
   const box = { x0: 90, y0: 80, x1: 210, y1: 270 };
-  const kept = new Uint8Array(w * h);
-  for (let y = box.y0; y < box.y1; y++) for (let x = box.x0; x < box.x1; x++) kept[y * w + x] = full[y * w + x];
-  // guide: the letter's true ink gridded into the box
-  const lb = { x: box.x0, y: box.y0, w: box.x1 - box.x0, h: box.y1 - box.y0 };
-  const G = ST.classify.GRID, grid = new Float32Array(G * G), cnt = new Float32Array(G * G);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const ci = ST.classify.cellOf(lb, x, y);
-    if (ci < 0) continue;
-    cnt[ci]++; if (bar(x, y) || foot(x, y)) grid[ci]++;
-  }
-  for (let i = 0; i < grid.length; i++) grid[i] = cnt[i] ? grid[i] / cnt[i] : 0;
-  const out = ST.extract.trimSpurs(full, kept, w, h, box, { box: lb, cells: ST.classify.letterCells(grid) });
-  assert.ok(!out[90 * w + 145], 'the neighbor stub inside the box is erased');
-  assert.ok(out[125 * w + 145] && out[140 * w + 145], 'the bar keeps its top');
+  const res = ST.extract.isolateStrokes(full, w, h, box, 145, 200);
+  assert.ok(res && res.foreign >= 1, `the diagonal is a stroke of its own that leaves the box (${res && res.strokes} strokes, ${res && res.foreign} foreign)`);
+  const out = res.mask;
+  assert.ok(!out[95 * w + 170] && !out[60 * w + 205], 'the diagonal is gone, inside the box too');
+  assert.ok(out[130 * w + 145] && out[140 * w + 145] && out[200 * w + 145], 'the bar keeps its top');
   assert.ok(out[250 * w + 110], 'the foot is intact');
   const n = ST.raster.count(out), letter = 30 * 140 + 100 * 20 - 30 * 20;
-  assert.ok(n >= letter * 0.95 && n <= letter * 1.12, `letter preserved, at most a cell of stub left (${n} px vs ${letter})`);
-  // unguided, the walk finds no widening along a straight continuation and
-  // must fall back to slicing at the box edge rather than eating the bar
-  const plain = ST.extract.trimSpurs(full, kept, w, h, box, null);
-  assert.ok(plain[125 * w + 145] && plain[140 * w + 145] && plain[200 * w + 145], 'without a guide the bar is never eaten');
+  assert.ok(n >= letter * 0.93 && n <= letter * 1.1, `letter preserved (${n} px vs ${letter})`);
 });
 
 test('floodFrom + reconstruct primitives', () => {
