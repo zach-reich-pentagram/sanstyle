@@ -177,6 +177,30 @@ test('roundEnds: needle-sharp stroke ends become caps, thin bridges survive', ()
   assert.ok(tip > 26 && tall >= 6, `blunt cap (${tall} px tall 3 px in from the tip at x=${tip})`);
 });
 
+test('isolateStrokes: the letter\'s own long leg past a short box is kept; a small counter is not filled', () => {
+  const w = 300, h = 320;
+  const full = new Uint8Array(w * h);
+  // a "#"-like corner: a bar with a long leg hanging below it, free-ended
+  const bar = (x, y) => x >= 40 && x < 260 && y >= 100 && y < 130;
+  const leg = (x, y) => x >= 80 && x < 110 && y >= 60 && y < 220;        // 90 px below the bar
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (bar(x, y) || leg(x, y)) full[y * w + x] = 1;
+  // a template box that stops 30 px under the bar: most of the leg is outside
+  const box = { x0: 20, y0: 40, x1: 280, y1: 160 };
+  const res = ST.extract.isolateStrokes(full, w, h, box, 150, 115);
+  assert.ok(res && res.foreign === 0, `a free-ended leg is never a neighbor (${res && res.foreign} foreign)`);
+  assert.ok(res.mask[210 * w + 95] && res.mask[180 * w + 95], 'the leg is intact down to its end');
+  // fill-gaps: a fat ring's small counter (well over a stroke width across) stays; a speckle fills
+  const W = 200, H = 200, ring = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const d = Math.hypot(x - 100, y - 100);
+    if (d < 90 && d > 30) ring[y * W + x] = 1;          // stroke 60 px wide, counter 60 px across (~11% of the shape)
+    if (Math.hypot(x - 100, y - 40) < 3) ring[y * W + x] = 0; // a 6 px speckle hole in the stroke
+  }
+  const clean = ST.extract.cleanMask(ring, W, H, 4);
+  assert.ok(!clean[100 * W + 100], 'the counter survives fill-gaps');
+  assert.ok(clean[40 * W + 100], 'the speckle hole is filled');
+});
+
 test('isolateStrokes: a neighbor joining a stroke END around a corner is cut at the corner', () => {
   const w = 300, h = 300;
   const full = new Uint8Array(w * h);

@@ -214,17 +214,25 @@
   ex.cleanMask = function (mask, w, h, smoothing, opts) {
     const sm = smoothing == null ? 4 : smoothing;
     let m = R.despeckle(mask, w, h, 0.04, 24);
+    const sw = R.strokeWidth(m, w, h);
     if (sm > 0) {
-      const sw = R.strokeWidth(m, w, h);
-      const rBase = sm * 1.2 * (Math.max(w, h) / 700);
-      const r = Math.max(0, Math.min(Math.round(rBase), Math.floor(sw * 0.33)));
+      // the radius follows the knob and the photo's size, but never grows
+      // past what the THINNEST strokes can take (a chisel marker's thin
+      // side is far thinner than the average stroke): fibers and burrs are
+      // thin, so a modest disk still removes them
+      const rt = R.thinRadius(m, w, h);
+      const rBase = sm * 1.6 * (Math.max(w, h) / 700);
+      const r = Math.max(0, Math.min(Math.round(rBase), Math.floor(sw * 0.33), rt > 0 ? Math.floor(rt * 0.7) : 99));
       if (r > 0) {
         m = R.close(m, w, h, r);
         m = R.open(m, w, h, r);
       }
       if (!(opts && opts.noRound)) m = ex.roundEnds(m, w, h, null);
     }
-    m = R.fillHoles(m, w, h, 0.06);
+    // fill speckle gaps — holes smaller than the pen could leave on purpose
+    // (well under a stroke width across); a counter, even a small one in a
+    // fat letter, is never that small
+    m = R.fillHoles(m, w, h, 0.06, sw > 0 ? (0.6 * sw) * (0.6 * sw) : undefined);
     m = R.despeckle(m, w, h, 0.04, 24);
     return m;
   };
@@ -248,9 +256,10 @@
     let rmax = 0;
     for (let i = 0; i < ring.length; i++) if (ring[i] && dt[i] > rmax) rmax = dt[i];
     if (rmax < 2) return mask;
+    // the cap is nearly the stroke's own half-width, so an oblique slice's
+    // wedge is pruned back to a proper round end instead of a point
     const near = R.dilate(band, w, h, Math.ceil(rmax * 2) + 2);
-    const rt = R.thinRadius(mask, w, h, dt, near);
-    const r = Math.round((rt || rmax) * 0.9);
+    const r = Math.round(rmax * 0.85);
     return r >= 2 ? R.pruneThin(mask, w, h, r, near) : mask;
   };
 
@@ -434,27 +443,53 @@
     if (!(sw > 1)) return null;
     const graph = strokeGraph(mask, w, h, sw);
     if (!graph.segments.length) return null;
-    // A neighbor's stroke reaches well beyond the box, or lives mostly
-    // outside it, or crosses the box edge to meet the letter side-on at a T
-    // inside while carrying on into more strokes outside. The letter's own
-    // bar end, tail or flourish past an imperfect box reaches a little way,
-    // lives mostly inside, and simply ends out there.
+    // A neighbor's stroke reaches far beyond the box, or crosses the box
+    // edge and carries on into more strokes out there — either joining the
+    // letter side-on at a T inside, or living mostly outside. The letter's
+    // own leg, bar end, tail or flourish past an imperfect box (a template
+    // never knows how long a handstyle's legs are) reaches a modest way and
+    // simply ends out there, so a free end outside is never a neighbor's.
     const boxDim = Math.max(box.x1 - box.x0, box.y1 - box.y0);
-    const farLimit = Math.max(3 * sw, boxDim * 0.15);
+    const farLimit = Math.max(sw, boxDim * 0.25);
     const beyond = (i) => {
       const x = i % w, y = (i / w) | 0;
       return Math.max(0, box.x0 - x, x - (box.x1 - 1), box.y0 - y, y - (box.y1 - 1));
     };
-    const foreign = new Uint8Array(graph.segments.length + 1);
-    let nForeign = 0;
-    graph.segments.forEach((s, k) => {
+    // reach is measured on the skeleton, which stops half a stroke short of
+    // the stroke's actual end
+    const stats = graph.segments.map((s) => {
       let far = 0, outside = 0;
       for (const p of s.pixels) { const d = beyond(p); if (d > far) far = d; if (d > 0) outside++; }
-      const frac = outside / s.pixels.length;
-      const teesInside = s.ends.some((e) => e >= 0 && graph.junction[e] && beyond(e) === 0);
-      const goesOn = s.ends.some((e) => e >= 0 && beyond(e) > 0 && !graph.endpoint[e]);
-      if (far > farLimit || (far > 2 * sw && frac > 0.6) || (far > sw && teesInside && goesOn)) { foreign[k + 1] = 1; nForeign++; }
+      return { far: far > 0 ? far + sw / 2 : 0, frac: outside / s.pixels.length };
     });
+    const atNode = new Map(); // node pixel → segment indices meeting there
+    graph.segments.forEach((s, k) => {
+      for (const e of s.ends) if (e >= 0) { if (!atNode.has(e)) atNode.set(e, []); atNode.get(e).push(k); }
+    });
+    const foreign = new Uint8Array(graph.segments.length + 1);
+    const anchoredInside = (s) => s.ends.some((e) => e >= 0 && beyond(e) === 0);
+    // pass 1: a stroke that reaches far, or hangs entirely outside the box
+    // (neither end inside), is a neighbor's
+    graph.segments.forEach((s, k) => {
+      const { far } = stats[k];
+      if (far > farLimit || (far > sw && !anchoredInside(s))) foreign[k + 1] = 1;
+    });
+    // pass 2: a stroke anchored inside — at a T with the letter, or with
+    // most of its length outside — that continues past an outside end into
+    // a junction or into a neighbor's stroke is a neighbor's too. One that
+    // simply ends out there (a leg, a bar end, a tail) is the letter's.
+    const info = [];
+    graph.segments.forEach((s, k) => {
+      const { far, frac } = stats[k];
+      const teesInside = s.ends.some((e) => e >= 0 && graph.junction[e] && beyond(e) === 0);
+      const goesOn = far > sw && s.ends.some((e) => e >= 0 && beyond(e) > 0 && !graph.endpoint[e] &&
+        (graph.junction[e] || (atNode.get(e) || []).some((j) => j !== k && foreign[j + 1])));
+      if (!foreign[k + 1] && goesOn && (teesInside || (far > 2 * sw && frac > 0.6))) foreign[k + 1] = 1;
+      info.push({ len: s.pixels.length, far: Math.round(far), frac: +frac.toFixed(2), teesInside, goesOn, foreign: !!foreign[k + 1],
+        ends: s.ends.map((e) => (e < 0 ? '-' : (graph.junction[e] ? 'T' : graph.endpoint[e] ? 'end' : 'corner') + (beyond(e) > 0 ? '(out)' : '(in)'))) });
+    });
+    let nForeign = 0;
+    for (let k = 1; k < foreign.length; k++) if (foreign[k]) nForeign++;
     // every ink pixel belongs to its nearest skeleton piece (nodes and any
     // stray skeleton pixels count as the letter's)
     const id = new Int32Array(w * h).fill(-1);
@@ -515,7 +550,7 @@
       }
       result = ex.roundCutEnds(result, w, h, R.dilate(face, w, h, 2));
     }
-    return { mask: result, removed: nRemoved, strokes: graph.segments.length, foreign: nForeign };
+    return { mask: result, removed: nRemoved, strokes: graph.segments.length, foreign: nForeign, farLimit, info };
   };
 
   /**

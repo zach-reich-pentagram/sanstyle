@@ -155,6 +155,11 @@
   }
 
   // ---------- rendering ----------
+  function syncIsolateLabel() {
+    const ch = ($('#reviewChar').value || '').slice(-1);
+    $('#reviewIsolate').textContent = ch && ch !== ' ' ? `Isolate “${ch}”` : 'Isolate';
+  }
+
   function renderCurrent() {
     const item = batch.queue[batch.idx];
     if (!item) {
@@ -216,6 +221,7 @@
 
     const input = $('#reviewChar');
     input.value = '';
+    syncIsolateLabel();
     $('#reviewUndoCut').style.display = item.cuts && item.cuts.length ? '' : 'none';
     if (!cand) {
       $('#reviewHint').textContent =
@@ -337,6 +343,7 @@
     const keep = $('#reviewChar').value;
     renderCurrent();
     $('#reviewChar').value = keep;
+    syncIsolateLabel();
     ST.toast(`Isolated a “${ch}” (match ${Math.round(res.score * 100)}%).`);
     return true;
   };
@@ -501,10 +508,7 @@
     pane.addEventListener('pointermove', onPanePointerMove);
     pane.addEventListener('pointerup', onPanePointerUp);
     pane.addEventListener('pointercancel', () => { paneDrag = null; });
-    $('#reviewChar').addEventListener('input', () => {
-      const ch = ($('#reviewChar').value || '').slice(-1);
-      $('#reviewIsolate').textContent = ch && ch !== ' ' ? `Isolate “${ch}”` : 'Isolate';
-    });
+    $('#reviewChar').addEventListener('input', syncIsolateLabel);
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }

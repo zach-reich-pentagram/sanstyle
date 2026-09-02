@@ -606,7 +606,9 @@
   // most maxFrac of the TOTAL shape (ink + that hole) — measured this way,
   // spray gaps sit near 0 while an O's counter is ~50%, so the slider can
   // reach both regimes: small values heal infill, cranked values go solid.
-  raster.fillHoles = function (mask, w, h, maxFrac) {
+  // An optional maxArea (px) caps what may fill regardless of fraction: a
+  // fat letter's small counter is a real feature, not a gap.
+  raster.fillHoles = function (mask, w, h, maxFrac, maxArea) {
     if (!maxFrac || maxFrac <= 0) return mask;
     const inkArea = raster.count(mask);
     if (!inkArea) return mask;
@@ -625,6 +627,7 @@
     const fillLabel = new Uint8Array(sizes.length);
     for (let L = 1; L < sizes.length; L++) {
       if (touchesBorder[L]) continue;
+      if (maxArea != null && sizes[L] > maxArea) continue;
       if (sizes[L] <= maxFrac * (inkArea + sizes[L])) fillLabel[L] = 1;
     }
     const out = Uint8Array.from(mask);
