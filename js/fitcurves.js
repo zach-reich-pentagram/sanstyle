@@ -138,16 +138,20 @@
     return V.norm({ x: (v1.x + v2.x) / 2, y: (v1.y + v2.y) / 2 });
   }
 
+  // A cubic that IS the straight chord a→b.
+  function straight(a, b) {
+    const d = V.sub(b, a);
+    return [a, V.add(a, V.scale(d, 1 / 3)), V.add(a, V.scale(d, 2 / 3)), b];
+  }
+
   function fitCubic(pts, first, last, tHat1, tHat2, errSq, out, depth, span) {
     const nPts = last - first + 1;
     if (nPts === 2) {
-      const dist = V.dist(pts[first], pts[last]) / 3;
-      out.push([
-        pts[first],
-        V.add(pts[first], V.scale(tHat1, dist)),
-        V.add(pts[last], V.scale(tHat2, dist)),
-        pts[last],
-      ]);
+      // Simplification keeps only the two ends of a straight stretch, so
+      // the chord IS the shape here. Building the curve from the end
+      // tangents instead — measured across the corner or cap the stretch
+      // runs into — bows a straight edge out by a third of its length.
+      out.push(straight(pts[first], pts[last]));
       return;
     }
     let u = chordLengthParameterize(pts, first, last);
@@ -166,7 +170,8 @@
     }
 
     if (depth > 24 || splitPoint <= first || splitPoint >= last) {
-      out.push(bez);
+      // can't split further: never emit a curve that misses its points
+      for (let i = first; i < last; i++) out.push(straight(pts[i], pts[i + 1]));
       return;
     }
     const tHatCenter = computeCenterTangent(pts, splitPoint, span, first, last);

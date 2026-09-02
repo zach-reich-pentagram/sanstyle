@@ -294,13 +294,17 @@
         let pp = resampleClosed(loop, step);
         const rad = Math.max(1, Math.round((size * 0.02) / step));
         pp = boxSmoothClosed(pp, rad, 2);
-        pts = V.rdpClosed(pp, o.rdpEps);
+        // The fitter gets the DENSE points. Simplifying first strips a
+        // straight stretch down to its two ends, and a fit checked only at
+        // two or three points can bow out by a third of the stretch with
+        // nobody noticing; with a point every couple of pixels the error
+        // check sees every bulge.
+        pts = pp;
         fitErr = o.fitErr * Math.max(1, size * 0.0065);
         cornerSpan = Math.max(cornerSpan, size * 0.02);
         tanSpan = Math.max(tanSpan, size * 0.045);
       } else {
-        pts = smoothClosed(loop, o.smoothIter);
-        pts = V.rdpClosed(pts, o.rdpEps);
+        pts = smoothClosed(loop, o.smoothIter); // dense, for the same reason
       }
       if (pts.length < 3) continue;
       const cubics = fitLoop(pts, (o.cornerDeg * Math.PI) / 180, fitErr, cornerSpan, tanSpan);
