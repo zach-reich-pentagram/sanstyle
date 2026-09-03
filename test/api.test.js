@@ -53,6 +53,7 @@ function stubFetch(routes) {
         return {
           ok: out.status ? out.status < 400 : true,
           status: out.status || 200,
+          headers: { get: (k) => (out.headers || {})[String(k).toLowerCase()] || null },
           json: async () => out.json,
           text: async () => JSON.stringify(out.json || {}),
           // slice out of Buffer's shared pool slab
@@ -226,6 +227,82 @@ test('diag reports per-folder access, including a failed write', async () => {
   assert.ok(res.json.inbox.detail.startsWith('2 file'));
   assert.strictEqual(res.json.write.ok, false, 'write probe surfaces the 403');
   assert.ok(/403/.test(res.json.write.error));
+});
+
+test('diag names the storage-quota failure and its fix', async () => {
+  const diagHandler = require('../api/diag.js');
+  stubFetch([
+    tokenRoute,
+    ['upload/drive/v3/files?', async () => ({
+      status: 403,
+      json: { error: { code: 403, message: 'Service Accounts do not have storage quota. Leverage shared drives for file storage.' } },
+    })],
+    ['/drive/v3/files?', async () => ({ json: { files: [] } })],
+  ]);
+  const res = mockRes();
+  await diagHandler(mockReq('GET', '/api/diag'), res);
+  assert.strictEqual(res.json.mode, 'service');
+  assert.strictEqual(res.json.write.ok, false);
+  assert.ok(/GOOGLE_OAUTH_REFRESH_TOKEN/.test(res.json.write.hint), 'hint names the env vars of the fix');
+  assert.ok(/Shared Drive/.test(res.json.write.hint), 'hint names the Shared Drive alternative');
+});
+
+test('user sign-in mode: a refresh token becomes the access token, no service account needed', async () => {
+  const saved = { email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL, key: process.env.GOOGLE_SERVICE_ACCOUNT_KEY };
+  process.env.GOOGLE_OAUTH_CLIENT_ID = 'cid.apps.googleusercontent.com';
+  process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'csecret';
+  process.env.GOOGLE_OAUTH_REFRESH_TOKEN = 'rtok';
+  delete process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  delete process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+  L.resetTokenCache();
+  try {
+    assert.strictEqual(L.authMode(), 'user');
+    assert.ok(L.configured());
+    stubFetch([
+      ['oauth2.googleapis.com/token', async (u, opts) => {
+        const p = new URLSearchParams(opts.body.toString());
+        assert.strictEqual(p.get('grant_type'), 'refresh_token');
+        assert.strictEqual(p.get('refresh_token'), 'rtok');
+        assert.strictEqual(p.get('client_id'), 'cid.apps.googleusercontent.com');
+        assert.strictEqual(p.get('client_secret'), 'csecret');
+        return { json: { access_token: 'usertok', expires_in: 3600 } };
+      }],
+      ['googleapis.com/drive/v3/files?', async (u, opts) => {
+        assert.strictEqual(opts.headers.authorization, 'Bearer usertok');
+        return { json: { files: [] } };
+      }],
+    ]);
+    const res = mockRes();
+    await inboxHandler(mockReq('GET', '/api/inbox'), res);
+    assert.strictEqual(res.statusCode, 200);
+    assert.deepStrictEqual(res.json.photos, []);
+    const d = mockRes();
+    await require('../api/diag.js')(mockReq('GET', '/api/diag'), d);
+    assert.strictEqual(d.json.mode, 'user');
+  } finally {
+    delete process.env.GOOGLE_OAUTH_CLIENT_ID;
+    delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+    delete process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
+    process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL = saved.email;
+    process.env.GOOGLE_SERVICE_ACCOUNT_KEY = saved.key;
+    L.resetTokenCache();
+  }
+});
+
+test('photo endpoint sizes Drive thumbnails on request', async () => {
+  let asked = null;
+  stubFetch([
+    tokenRoute,
+    ['lh3.googleusercontent.com', async (u) => { asked = u; return { json: null, buffer: Buffer.alloc(600, 1) }; }],
+    ['/drive/v3/files/ph_inside1234?', async () => ({
+      json: { id: 'ph_inside1234', name: 'x.jpg', mimeType: 'image/jpeg', parents: ['INBOX123456'], thumbnailLink: 'https://lh3.googleusercontent.com/abc=s220' },
+    })],
+  ]);
+  const res = mockRes();
+  await photoHandler(mockReq('GET', '/api/photo?id=ph_inside1234&size=400'), res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.ok(asked && asked.endsWith('=s400'), `thumbnail fetched at the requested size (${asked})`);
+  assert.strictEqual(res.body.length, 600);
 });
 
 test('svgIdFromName parses mirror filenames', () => {

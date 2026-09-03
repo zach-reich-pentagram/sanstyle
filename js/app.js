@@ -11,7 +11,9 @@
     ST.$$('.tab-btn').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
     ST.$$('.tab').forEach((s) => s.classList.toggle('active', s.id === 'tab-' + name));
     if (name === 'capture' && ST.capture) ST.capture.requestDraw();
+    if (name === 'glyphs' && ST.glyphsUI && ST.glyphsUI.refreshPhotos) ST.glyphsUI.refreshPhotos(true);
   }
+  ST.switchTab = switchTab;
 
   // ---------- design playground ----------
   const DESIGN_VARS = [
@@ -74,26 +76,12 @@
     g.__st = {
       ST,
       switchTab,
+      // a demo wall goes through the same queue as any photo
       loadDemo: (ch) => ST.capture.loadDemo(ch),
-      lassoDemoLetter() {
-        const wall = ST.capture.lastDemo;
-        if (!wall) throw new Error('no demo loaded');
-        const b = wall.letterBox;
-        ST.capture.lasso = [
-          { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
-          { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h },
-        ];
-        ST.capture.runExtraction(true);
-        const ex = ST.capture.extract;
-        return {
-          paths: ex ? ex.paths.length : 0,
-          ink: ex ? ex.inkCount : 0,
-        };
-      },
       tagAndSubmit(ch) {
-        $('#charInput').value = ch;
+        $('#reviewChar').value = ch;
         ST.capture.updatePreview();
-        return ST.capture.submit();
+        return ST.batch.accept();
       },
       autoFromDemo(ch) {
         const wall = ST.demo.makeWall(ch, 555 + ch.charCodeAt(0));
@@ -109,7 +97,8 @@
       },
       state: () => ({
         chars: ST.store.filledChars(),
-        step: ST.capture.step,
+        current: ST.capture.item ? ST.capture.item.name : null,
+        shapes: ST.capture.item ? ST.capture.item.candidates.length : 0,
         glyphsMapped: ST.fontlive.glyphMaps[0] ? ST.fontlive.glyphMaps[0].size : 0,
         cycleFonts: ST.fontlive.glyphMaps.length,
         queue: Math.max(0, ST.batch.queue.length - ST.batch.idx),

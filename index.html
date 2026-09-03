@@ -28,124 +28,47 @@
 
   <aside class="steps">
     <div class="step active" id="step-wall">
-      <div class="step-head"><span class="step-num">1</span> Wall</div>
+      <div class="step-head"><span class="step-num">1</span> Photos</div>
       <div class="step-body">
-        <input type="file" id="fileInput" accept="image/*,.heic,.heif" hidden>
-        <input type="file" id="autoInput" accept="image/*,.heic,.heif" multiple hidden>
+        <input type="file" id="fileInput" accept="image/*,.heic,.heif" multiple hidden>
         <div class="btn-row">
-          <button class="pill sm" id="uploadBtn">Upload photo</button>
+          <button class="pill sm" id="uploadBtn">Upload photos</button>
           <button class="pill sm" id="demoBtn">Demo wall</button>
         </div>
-        <div class="btn-row">
-          <button class="pill sm" id="autoBtn">Auto capture (batch ok)</button>
+        <div class="btn-row" id="driveRow" style="display:none">
+          <button class="pill sm" id="rescanBtn" title="Queue every photo in the Drive inbox again, including ones already used">Re-scan Drive photos</button>
         </div>
         <label class="check-row" id="driveStoreRow" style="display:none">
           <input type="checkbox" id="driveStoreToggle" checked>
           <span>Store uploads in the Drive inbox</span>
         </label>
-        <p>Auto capture straightens the photo, finds the letterforms, and asks you to confirm each one. iPhone HEIC photos work.</p>
+        <p>Each photo is straightened and its letterform found, then shown here for you to confirm. iPhone HEIC photos work.</p>
       </div>
     </div>
 
-    <div class="step" id="step-flatten">
-      <div class="step-head"><span class="step-num">2</span> Straighten</div>
+    <div class="step locked" id="step-shape">
+      <div class="step-head"><span class="step-num">2</span> Shape</div>
       <div class="step-body">
-        <label class="slider-row">
-          <span>Rotate:</span>
-          <input type="range" id="rotRange" min="-25" max="25" value="0" step="0.5">
+        <p id="reviewHint"></p>
+        <label class="slider-row" title="Lower: smoother, gaps and cracks healed. Higher: every nuance of the shape kept.">
+          <span>Detail:</span>
+          <input type="range" id="reviewDetail" min="1" max="9" value="5" step="1" disabled>
         </label>
         <div class="btn-row">
-          <button class="pill sm" id="rotCCW" title="Rotate 90° counter-clockwise">⟲ 90</button>
-          <button class="pill sm" id="rotCW" title="Rotate 90° clockwise">⟳ 90</button>
-          <button class="pill sm" id="rotAuto">Auto-straighten</button>
+          <button class="pill sm" id="reviewAlt" disabled>Try another shape</button>
+          <button class="pill sm" id="reviewIsolate" disabled title="Trim the shape to the typed character">Isolate</button>
+          <button class="pill sm" id="reviewUndoCut" style="display:none">Undo cut</button>
         </div>
-        <p>For angled shots, drag the corners onto the wall plane and apply.</p>
+      </div>
+    </div>
+
+    <div class="step locked" id="step-tag">
+      <div class="step-head"><span class="step-num">3</span> Tag &amp; add</div>
+      <div class="step-body">
+        <p>Type the character on the right — two letters make a ligature. Enter adds it and brings up the next photo.</p>
         <div class="btn-row">
-          <button class="pill sm" id="flattenApply">Apply corners</button>
-          <button class="pill sm" id="flattenSkip">Skip</button>
-          <button class="pill sm" id="flattenReset">Undo</button>
+          <button class="pill sm" id="reviewSkip" disabled>Skip this photo</button>
         </div>
-      </div>
-    </div>
-
-    <div class="step" id="step-lasso">
-      <div class="step-head"><span class="step-num">3</span> Lasso</div>
-      <div class="step-body">
-        <p>Click a letterform with the Click tool to trace it (shift-click adds another piece of it) — or loop it: drag to draw, or place polygon points.</p>
-        <div class="btn-row">
-          <button class="pill sm" id="lassoReset">Reset loop</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="step" id="step-ink">
-      <div class="step-head"><span class="step-num">4</span> Ink</div>
-      <div class="step-body">
-        <div class="seg">
-          <button id="inkModeAuto" class="seg-btn on">Auto</button>
-          <button id="inkModeColor" class="seg-btn">Pick paint</button>
-        </div>
-
-        <div id="lumaControls">
-          <label class="slider-row">
-            <span>Threshold:</span>
-            <input type="range" id="inkThresh" min="-70" max="70" value="0" step="1">
-          </label>
-          <label class="check-row">
-            <input type="checkbox" id="inkInvert">
-            <span>Paint is lighter than wall</span>
-          </label>
-        </div>
-
-        <div id="colorControls" style="display:none">
-          <button class="pill sm" id="eyedropBtn">Sample the paint</button>
-          <div class="seed-chips" id="seedChips"></div>
-          <label class="slider-row">
-            <span>Color range:</span>
-            <input type="range" id="inkTol" min="2" max="90" value="30" step="1">
-          </label>
-        </div>
-
-        <label class="slider-row">
-          <span>Smoothing:</span>
-          <input type="range" id="inkSmoothing" min="0" max="10" value="4" step="1">
-        </label>
-
-        <details class="adv">
-          <summary>Fine tuning</summary>
-          <label class="slider-row">
-            <span>Speck filter:</span>
-            <input type="range" id="inkSpeck" min="0" max="20" value="5" step="1">
-          </label>
-          <label class="slider-row">
-            <span>Fill gaps:</span>
-            <input type="range" id="inkFill" min="0" max="75" value="6" step="1">
-          </label>
-          <label class="slider-row">
-            <span>Curve fit:</span>
-            <input type="range" id="inkDetail" min="0.6" max="3" value="1.2" step="0.2">
-          </label>
-          <div class="btn-row">
-            <button class="pill sm" id="blockToggle">Block out overlap</button>
-            <button class="pill sm" id="blockClear">Clear</button>
-          </div>
-          <label class="slider-row">
-            <span>Brush size:</span>
-            <input type="range" id="blockSize" min="6" max="48" value="16" step="1">
-          </label>
-          <label class="slider-row">
-            <span>Bridge:</span>
-            <input type="range" id="inkBridge" min="0" max="36" value="14" step="1">
-          </label>
-          <p>Block out: paint over an intruding letter; the stroke underneath is inferred back through.</p>
-        </details>
-      </div>
-    </div>
-
-    <div class="step" id="step-tag">
-      <div class="step-head"><span class="step-num">5</span> Tag &amp; add</div>
-      <div class="step-body">
-        <p>Type the character on the right. Enter submits.</p>
       </div>
     </div>
   </aside>
@@ -153,22 +76,22 @@
   <div class="stage-wrap">
     <canvas id="stage"></canvas>
     <div class="stage-tools seg">
-      <button id="toolClick" class="seg-btn" title="Click a letterform to trace it">Click</button>
-      <button id="toolLasso" class="seg-btn on" title="Freehand lasso">Lasso</button>
-      <button id="toolPoly" class="seg-btn" title="Polygon lasso — click points, click the first point or press Enter to close">Polygon</button>
       <button id="toolHand" class="seg-btn" title="Pan (or hold space)">Hand</button>
-      <button id="toolFit" class="seg-btn" title="Fit image">Fit</button>
+      <button id="toolFit" class="seg-btn" title="Fit the photo">Fit</button>
     </div>
-    <div class="stage-hint" id="stageHint">Drop a photo of graffiti — or load a demo wall.</div>
+    <div class="stage-status" id="reviewProgress"></div>
+    <div class="stage-hint" id="stageHint">Drop photos of graffiti here — or load a demo wall.</div>
   </div>
 
   <aside class="preview-col">
-    <div class="panel-label">Letterform, fitted</div>
-    <canvas id="previewCanvas" width="300" height="330"></canvas>
+    <div class="panel-label">Traced letterform</div>
+    <canvas id="reviewTrace" width="300" height="220"></canvas>
+    <div class="panel-label">Fitted</div>
+    <canvas id="previewCanvas" width="300" height="300"></canvas>
     <div class="fit-info" id="fitInfo"></div>
     <div class="tag-row">
-      <input id="charInput" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" maxlength="4" aria-label="Which character is this letterform? Two or more letters make a ligature.">
-      <button id="submitBtn" class="pill primary" disabled>Add to typeface</button>
+      <input id="reviewChar" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" maxlength="4" aria-label="Which character is this letterform? Two or more letters make a ligature.">
+      <button id="reviewAccept" class="pill primary" disabled>Add to typeface</button>
     </div>
   </aside>
 
@@ -186,6 +109,7 @@
     </div>
   </div>
   <div id="glyphGrid"></div>
+  <div id="photoGallery" style="display:none"></div>
 
   <div class="drawer" id="glyphDrawer">
     <div class="drawer-panel">
@@ -361,48 +285,6 @@
       <button class="pill primary" id="inboxExtract">Extract letterforms now</button>
       <button class="pill" id="inboxLater">Later</button>
       <button class="pill sm" id="inboxRescan">Re-scan all photos</button>
-    </div>
-  </div>
-</div>
-
-<!-- ============================== REVIEW MODAL ============================== -->
-<div class="modal" id="reviewModal">
-  <div class="modal-panel">
-    <div class="modal-head">
-      <span id="reviewProgress"></span>
-      <button class="pill sm" id="reviewClose">Save for later</button>
-    </div>
-    <div class="modal-spinner" id="reviewSpinner" style="display:none">Analyzing…</div>
-    <div class="modal-body" id="reviewBody">
-      <div class="review-panes">
-        <div>
-          <div class="panel-label">Photo</div>
-          <canvas id="reviewSource" width="340" height="340"></canvas>
-        </div>
-        <div>
-          <div class="panel-label">Traced letterform</div>
-          <canvas id="reviewTrace" width="340" height="340"></canvas>
-        </div>
-      </div>
-      <div class="dim" id="reviewHint"></div>
-      <div class="review-actions">
-        <label class="ctl" title="Lower: smoother, gaps and cracks healed. Higher: every nuance of the shape kept.">
-          <span>Detail:</span>
-          <input type="range" id="reviewDetail" min="1" max="9" value="5" step="1">
-        </label>
-      </div>
-      <div class="review-actions">
-        <label class="ctl">
-          <span>Character:</span>
-          <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" maxlength="4" aria-label="Which character is this letterform? Two or more letters make a ligature.">
-        </label>
-        <button class="pill primary" id="reviewAccept">Add to typeface</button>
-        <button class="pill" id="reviewIsolate" title="Trim the shape to the typed character">Isolate</button>
-        <button class="pill" id="reviewAlt">Try another shape</button>
-        <button class="pill" id="reviewUndoCut" style="display:none">Undo cut</button>
-        <button class="pill" id="reviewEdit">Edit manually</button>
-        <button class="pill" id="reviewSkip">Skip photo</button>
-      </div>
     </div>
   </div>
 </div>

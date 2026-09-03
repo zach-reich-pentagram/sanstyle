@@ -19,11 +19,13 @@ module.exports = async function handler(req, res) {
 
     // Drive's thumbnail service is far faster than alt=media for phone
     // photos: pre-scaled by Google and HEIC→JPEG converted. Use it unless
-    // the caller asks for the original with ?full=1.
+    // the caller asks for the original with ?full=1. ?size=N picks the
+    // longest edge (gallery thumbnails ask for 400, extraction for 1800).
     const wantFull = url.searchParams.get('full') === '1';
+    const size = Math.max(64, Math.min(2048, parseInt(url.searchParams.get('size'), 10) || 1800));
     if (!wantFull && meta.thumbnailLink) {
       try {
-        const sized = meta.thumbnailLink.replace(/=s\d+(-c)?$/, '=s1800');
+        const sized = meta.thumbnailLink.replace(/=s\d+(-c)?$/, '=s' + size);
         const thumb = await fetch(sized);
         if (thumb.ok) {
           const bytes = Buffer.from(await thumb.arrayBuffer());

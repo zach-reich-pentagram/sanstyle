@@ -1,11 +1,10 @@
 /* Sanstyle — ui/batch.js
- * The review queue, one photo at a time: the photo on the left with the
- * detected shape boxed, the smoothed trace on the right. Type the character,
- * Add to typeface — the queue advances. A photo leaves the queue ONLY when
- * its letterform was added or you hit Skip; Edit manually checks it out to
- * the studio (added there → it clears; abandoned → it stays queued); Save
- * for later parks everything, including across reloads for Drive photos.
- * The first photo shows as soon as it's analyzed; the rest stream behind.
+ * The review queue, one photo at a time, shown on the capture stage: the
+ * photo with its detected shape boxed and outlined, the trace and the
+ * fitted letterform beside it. Type the character, Add to typeface — the
+ * queue advances. A photo leaves the queue ONLY when its letterform was
+ * added or you hit Skip. The first photo shows as soon as it's analyzed;
+ * the rest stream in behind it.
  */
 (function (g) {
   'use strict';
@@ -13,35 +12,32 @@
   const $ = ST.$;
 
   const batch = (ST.batch = {
-    queue: [],       // {name, sourceId, canvas, angle, candidates, ci}
+    queue: [],       // {name, sourceId, canvas, angle, candidates, ci, cuts, parts, detail}
     idx: 0,          // photos before idx are resolved
-    checkedOut: null, // photo sent to the studio, awaiting its submit
     intakeActive: false,
   });
 
-  const modal = () => $('#reviewModal');
-  function show() { modal().classList.add('open'); }
-  function hide() { modal().classList.remove('open'); updateQueuePill(); }
-  function isOpen() { return modal().classList.contains('open'); }
-
-  function remaining() {
-    return Math.max(0, batch.queue.length - batch.idx) + (batch.checkedOut ? 0 : 0);
-  }
+  function remaining() { return Math.max(0, batch.queue.length - batch.idx); }
+  batch.remaining = remaining;
 
   function updateQueuePill() {
     const pill = $('#queuePill');
     if (!pill) return;
     const n = remaining();
-    pill.style.display = n && !isOpen() ? '' : 'none';
+    pill.style.display = n ? '' : 'none';
     pill.textContent = `Review queue (${n})`;
   }
 
   function setProgress() {
+    const el = $('#reviewProgress');
+    if (!el) return;
     const item = batch.queue[batch.idx];
+    if (!item) { el.textContent = batch.intakeActive ? 'Analyzing…' : ''; return; }
     const more = batch.intakeActive ? '+' : '';
-    let text = `Photo ${Math.min(batch.idx + 1, batch.queue.length)} of ${batch.queue.length}${more}`;
-    if (item && item.angle) text += ` · auto-straightened ${item.angle > 0 ? '−' : '+'}${Math.abs(item.angle)}°`;
-    $('#reviewProgress').textContent = text;
+    let text = `Photo ${batch.idx + 1} of ${batch.queue.length}${more}`;
+    if (item.angle) text += ` · straightened ${item.angle > 0 ? '−' : '+'}${Math.abs(item.angle)}°`;
+    if (item.name && !/^demo-/.test(item.name)) text += ` · ${item.name.length > 28 ? item.name.slice(0, 26) + '…' : item.name}`;
+    el.textContent = text;
   }
 
   // ---------- intake ----------
@@ -55,32 +51,27 @@
       candidates: result.candidates,
       ci: 0,
     });
-    if (isOpen() && batch.idx === batch.queue.length - 1) renderCurrent();
-    else if (isOpen()) setProgress();
+    if (batch.idx === batch.queue.length - 1) renderCurrent();
+    else setProgress();
     updateQueuePill();
     return result.candidates.length;
   }
   batch.addCanvas = pushPhoto;
 
+  let intakeStart = 0;
   function startIntake() {
     batch.intakeActive = true;
-    show();
-    if (batch.idx >= batch.queue.length) {
-      $('#reviewBody').style.display = 'none';
-      $('#reviewSpinner').style.display = '';
-      $('#reviewSpinner').textContent = 'Analyzing…';
-    }
+    intakeStart = batch.queue.length;
+    if (ST.switchTab) ST.switchTab('capture');
+    if (batch.idx >= batch.queue.length) renderCurrent();
+    else setProgress();
   }
 
   function endIntake() {
     batch.intakeActive = false;
-    if (!isOpen()) return;
-    if (batch.idx >= batch.queue.length) {
-      hide();
-      ST.toast('No photos to review.', 'warn');
-    } else {
-      setProgress();
-    }
+    if (batch.queue.length === intakeStart) ST.toast('No photos to review.', 'warn');
+    if (batch.idx >= batch.queue.length) renderCurrent();
+    else setProgress();
   }
 
   batch.addFiles = async function (files) {
@@ -160,99 +151,39 @@
     $('#reviewIsolate').textContent = key.length === 1 ? `Isolate “${key}”` : 'Isolate';
   }
 
+  // Put the current photo and shape on the stage and sync every control.
   function renderCurrent() {
-    const item = batch.queue[batch.idx];
-    if (!item) {
-      if (batch.intakeActive) {
-        $('#reviewBody').style.display = 'none';
-        $('#reviewSpinner').style.display = '';
-        return;
-      }
-      hide();
-      ST.toast('Review queue finished.');
-      return;
-    }
-    show();
-    $('#reviewSpinner').style.display = 'none';
-    $('#reviewBody').style.display = '';
-    setProgress();
-
-    const cand = item.candidates[item.ci] || null;
-
-    // left: the whole photo, current shape boxed
-    const srcC = $('#reviewSource');
-    const sc = srcC.getContext('2d');
-    sc.clearRect(0, 0, srcC.width, srcC.height);
-    const s = Math.min(srcC.width / item.canvas.width, srcC.height / item.canvas.height);
-    const dw = item.canvas.width * s, dh = item.canvas.height * s;
-    const ox = (srcC.width - dw) / 2, oy = (srcC.height - dh) / 2;
-    sc.imageSmoothingEnabled = true;
-    sc.drawImage(item.canvas, ox, oy, dw, dh);
-    if (cand) {
-      sc.strokeStyle = '#3b82f6';
-      sc.lineWidth = 2;
-      sc.strokeRect(ox + cand.crop.x * s, oy + cand.crop.y * s, cand.crop.w * s, cand.crop.h * s);
-    }
-
-    // right: the smoothed trace
-    const traceC = $('#reviewTrace');
-    const tc = traceC.getContext('2d');
-    tc.clearRect(0, 0, traceC.width, traceC.height);
-    if (cand) {
-      const bb = ST.trace.boundsOf(cand.paths);
-      if (bb) {
-        const ts = Math.min((traceC.width - 24) / bb.w, (traceC.height - 24) / bb.h);
-        const tox = (traceC.width - bb.w * ts) / 2 - bb.x0 * ts;
-        const toy = (traceC.height - bb.h * ts) / 2 - bb.y0 * ts;
-        const path = new Path2D();
-        for (const p of cand.paths) {
-          const cs = p.cubics;
-          path.moveTo(tox + cs[0][0].x * ts, toy + cs[0][0].y * ts);
-          for (const cu of cs) {
-            path.bezierCurveTo(tox + cu[1].x * ts, toy + cu[1].y * ts,
-              tox + cu[2].x * ts, toy + cu[2].y * ts, tox + cu[3].x * ts, toy + cu[3].y * ts);
-          }
-          path.closePath();
-        }
-        tc.fillStyle = '#000';
-        tc.fill(path, 'nonzero');
-      }
-    }
-
+    const item = batch.queue[batch.idx] || null;
+    const cand = item ? item.candidates[item.ci] || null : null;
     const input = $('#reviewChar');
     input.value = '';
+    ST.capture.showItem(item, cand, { intake: batch.intakeActive });
+    setProgress();
+    updateQueuePill();
     syncIsolateLabel();
-    $('#reviewDetail').value = item.detail || 5;
-    $('#reviewUndoCut').style.display = item.cuts && item.cuts.length ? '' : 'none';
+    $('#reviewDetail').value = item ? item.detail || 5 : 5;
+    $('#reviewDetail').disabled = !item;
+    $('#reviewUndoCut').style.display = item && item.cuts && item.cuts.length ? '' : 'none';
+    $('#reviewAlt').disabled = !item || item.candidates.length < 2;
+    $('#reviewIsolate').disabled = !cand;
+    $('#reviewSkip').disabled = !item;
+    if (!item) {
+      $('#reviewHint').textContent = batch.intakeActive
+        ? 'Analyzing the photos…'
+        : 'Upload photos or load a demo wall. Each one lands here straightened, with its letterform found.';
+      return;
+    }
     if (!cand) {
-      $('#reviewHint').textContent =
-        'Nothing traced yet — click the letter in the photo to trace it, or Skip.';
-      $('#reviewAccept').disabled = true;
-      $('#reviewAlt').disabled = true;
-      $('#reviewIsolate').disabled = true;
+      $('#reviewHint').textContent = 'Nothing traced yet — click the letter in the photo to trace it, or skip the photo.';
     } else {
-      $('#reviewAccept').disabled = false;
-      $('#reviewIsolate').disabled = false;
-      $('#reviewAlt').disabled = item.candidates.length < 2;
       const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (with added pieces)' }[cand.kind] || '';
       $('#reviewHint').textContent =
-        `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote} · type the character (two letters for a ligature) and add it. ` +
+        `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote}. ` +
         'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate. ' +
         'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it.';
     }
-    // draw any cuts on the photo pane
-    if (item.cuts && item.cuts.length) {
-      const c = srcC.getContext('2d');
-      c.strokeStyle = 'rgba(225,29,72,0.85)';
-      c.lineWidth = 3;
-      for (const cut of item.cuts) {
-        c.beginPath();
-        c.moveTo(ox + cut.x0 * s, oy + cut.y0 * s);
-        c.lineTo(ox + cut.x1 * s, oy + cut.y1 * s);
-        c.stroke();
-      }
-    }
-    setTimeout(() => input.focus(), 60);
+    const tab = $('#tab-capture');
+    if (tab && tab.classList.contains('active')) setTimeout(() => input.focus(), 60);
   }
   batch.renderCurrent = renderCurrent;
 
@@ -506,64 +437,6 @@
     return true;
   };
 
-  // Pane gesture: click = trace that letter, drag = cut across a junction.
-  let paneDrag = null;
-  function paneToCanvas(e) {
-    const item = batch.queue[batch.idx];
-    const cnv = $('#reviewSource');
-    const rect = cnv.getBoundingClientRect();
-    const px = (e.clientX - rect.left) * (cnv.width / rect.width);
-    const py = (e.clientY - rect.top) * (cnv.height / rect.height);
-    const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
-    const ox = (cnv.width - item.canvas.width * s) / 2, oy = (cnv.height - item.canvas.height * s) / 2;
-    return { x: (px - ox) / s, y: (py - oy) / s, s, ox, oy, px, py };
-  }
-
-  function onPanePointerDown(e) {
-    const item = batch.queue[batch.idx];
-    if (!item || e.button !== 0) return;
-    const p = paneToCanvas(e);
-    paneDrag = { start: p, last: p, moved: false, shift: e.shiftKey };
-    $('#reviewSource').setPointerCapture(e.pointerId);
-  }
-
-  function onPanePointerMove(e) {
-    if (!paneDrag) return;
-    const p = paneToCanvas(e);
-    if (Math.hypot(p.px - paneDrag.start.px, p.py - paneDrag.start.py) > 6) paneDrag.moved = true;
-    paneDrag.last = p;
-    if (paneDrag.moved) {
-      renderCurrent();
-      const c = $('#reviewSource').getContext('2d');
-      c.strokeStyle = '#e11d48';
-      c.lineWidth = 3;
-      c.setLineDash([6, 4]);
-      c.beginPath();
-      c.moveTo(paneDrag.start.px, paneDrag.start.py);
-      c.lineTo(p.px, p.py);
-      c.stroke();
-      c.setLineDash([]);
-    }
-  }
-
-  function onPanePointerUp(e) {
-    if (!paneDrag) return;
-    const d = paneDrag;
-    paneDrag = null;
-    try { $('#reviewSource').releasePointerCapture(e.pointerId); } catch (err) { /* released */ }
-    const item = batch.queue[batch.idx];
-    if (!item) return;
-    const inside = (p) => p.x >= 0 && p.y >= 0 && p.x < item.canvas.width && p.y < item.canvas.height;
-    if (d.moved) {
-      if (inside(d.start) || inside(d.last)) batch.addCut(d.start.x, d.start.y, d.last.x, d.last.y);
-      else renderCurrent();
-    } else if (inside(d.start)) {
-      // shift-click adds a piece to the shape; a plain click traces afresh
-      if (d.shift || e.shiftKey) batch.addPart(d.start.x, d.start.y);
-      else batch.clickTrace(d.start.x, d.start.y);
-    }
-  }
-
   // The library key for what was typed: one character, or a ligature of
   // two to four letters/digits ("ar", "bl", "gr").
   batch.charKey = function (value) { return ST.metrics.charKey(value); };
@@ -575,9 +448,11 @@
   };
 
   // ---------- actions ----------
-  function advance() {
+  function advance(note) {
     batch.idx++;
     renderCurrent();
+    const done = batch.idx >= batch.queue.length && !batch.intakeActive;
+    if (note) ST.toast(note + (done ? ' — the queue is finished.' : ' — next photo.'));
   }
 
   batch.accept = function () {
@@ -593,8 +468,7 @@
     ST.store.addVariant(ch, record);
     if (ST.sources) ST.sources.put(record.id, batch.sourceThumb(item, cand));
     if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
-    ST.toast(ch.length > 1 ? `“${ch}” added as a ligature — next photo.` : `“${ch}” added — next photo.`);
-    advance();
+    advance(ch.length > 1 ? `“${ch}” added as a ligature` : `“${ch}” added`);
     return true;
   };
 
@@ -607,88 +481,30 @@
 
   batch.skip = function () {
     const item = batch.queue[batch.idx];
-    if (item && item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
-    advance();
-  };
-
-  batch.editManually = function () {
-    const item = batch.queue[batch.idx];
     if (!item) return;
-    ST.capture.useBitmap(item.canvas, item.canvas.width, item.canvas.height);
-    ST.capture.skipFlatten();
-    const cand = item.candidates[item.ci] || item.candidates[0];
-    if (cand) {
-      const cr = cand.crop;
-      ST.capture.lasso = [
-        { x: cr.x, y: cr.y }, { x: cr.x + cr.w, y: cr.y },
-        { x: cr.x + cr.w, y: cr.y + cr.h }, { x: cr.x, y: cr.y + cr.h },
-      ];
-      ST.capture.runExtraction(true);
-    }
-    // Checked out, NOT resolved: only a studio submit (or a later Skip)
-    // releases this photo from the queue.
-    batch.checkedOut = item;
-    hide();
-    if (g.__st && g.__st.switchTab) g.__st.switchTab('capture');
-    ST.toast('Loaded into the studio. Adding it there clears the photo from the queue.');
+    if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
+    advance('Photo skipped');
   };
 
-  // Called by the capture studio after any successful "Add to typeface":
-  // clears the checked-out photo and brings up the next one automatically.
-  batch.onStudioSubmit = function () {
-    if (!batch.checkedOut) return;
-    const item = batch.checkedOut;
-    batch.checkedOut = null;
-    const qi = batch.queue.indexOf(item);
-    if (qi >= 0 && qi >= batch.idx) {
-      if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
-      batch.queue.splice(qi, 1);
-    }
-    updateQueuePill();
-    if (remaining()) setTimeout(renderCurrent, 250);
-  };
-
-  batch.close = function () {
-    batch.checkedOut = null;
-    hide();
-    if (remaining()) {
-      ST.toast(`${remaining()} photo${remaining() === 1 ? '' : 's'} saved for later — reopen from “Review queue”.`);
-    }
-  };
-
+  // Bring the queue's current photo back onto the stage (the topbar pill).
   batch.reopen = function () {
-    batch.checkedOut = null;
-    if (remaining()) renderCurrent();
+    if (ST.switchTab) ST.switchTab('capture');
+    renderCurrent();
   };
 
   batch.init = function () {
-    $('#autoBtn').addEventListener('click', () => $('#autoInput').click());
-    $('#autoInput').addEventListener('change', (e) => {
-      if (e.target.files.length) batch.addFiles(e.target.files);
-      e.target.value = '';
-    });
     $('#reviewAccept').addEventListener('click', batch.accept);
     $('#reviewAlt').addEventListener('click', batch.tryNext);
     $('#reviewSkip').addEventListener('click', batch.skip);
-    $('#reviewEdit').addEventListener('click', batch.editManually);
-    $('#reviewClose').addEventListener('click', batch.close);
     $('#reviewIsolate').addEventListener('click', batch.isolate);
     $('#reviewUndoCut').addEventListener('click', batch.undoCut);
     $('#reviewDetail').addEventListener('input', ST.debounce((e) => batch.setDetail(+e.target.value), 220));
-    const pane = $('#reviewSource');
-    pane.addEventListener('pointerdown', onPanePointerDown);
-    pane.addEventListener('pointermove', onPanePointerMove);
-    pane.addEventListener('pointerup', onPanePointerUp);
-    pane.addEventListener('pointercancel', () => { paneDrag = null; });
     $('#reviewChar').addEventListener('input', syncIsolateLabel);
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }
     });
-    g.addEventListener('keydown', (e) => {
-      if (!isOpen()) return;
-      if (e.key === 'Escape') { e.preventDefault(); batch.close(); }
-    });
     ST.store.on('change', updateQueuePill);
+    renderCurrent();
   };
 })(typeof window !== 'undefined' ? window : globalThis);

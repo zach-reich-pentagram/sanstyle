@@ -75,8 +75,10 @@
       sync.unlocked = true;
       try { localStorage.setItem(PASS_KEY, pass); } catch (e) { /* private mode */ }
       hideGate();
-      const row = $('#driveStoreRow');
-      if (row) row.style.display = '';
+      for (const id of ['#driveStoreRow', '#driveRow']) {
+        const row = $(id);
+        if (row) row.style.display = '';
+      }
       sync.serverSvgIds = new Set(data.svgIds || []);
       if (data.library) {
         ST.store.mergeLibrary(data.library, { preferIncoming: true });
@@ -85,6 +87,7 @@
       setStatus('synced');
       ST.store.on('change', schedulePush);
       sync.checkInbox(false);
+      if (ST.glyphsUI && ST.glyphsUI.refreshPhotos) ST.glyphsUI.refreshPhotos(true);
       // anything local the server doesn't have yet
       schedulePush();
       return true;
@@ -210,6 +213,47 @@
     ST.store.markPhotoProcessed(id);
   };
 
+  // ---------- every photo in Drive: the Glyphs gallery + re-scan ----------
+  sync.listPhotos = async function () {
+    if (!sync.unlocked) return [];
+    const res = await sync.api('GET', 'api/inbox');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return (await res.json()).photos || [];
+  };
+
+  const thumbCache = new Map(); // photo id → Promise<object URL>
+  sync.photoThumb = function (id) {
+    if (thumbCache.has(id)) return thumbCache.get(id);
+    const p = (async () => {
+      const res = await sync.api('GET', 'api/photo?id=' + encodeURIComponent(id) + '&size=400');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return URL.createObjectURL(await res.blob());
+    })();
+    thumbCache.set(id, p);
+    p.catch(() => thumbCache.delete(id));
+    return p;
+  };
+
+  // Queue one Drive photo for extraction (again).
+  sync.extractPhoto = function (photo) {
+    if (!sync.unlocked || !photo) return;
+    ST.batch.addRemotePhotos([photo]);
+  };
+
+  // Queue every photo in the Drive inbox, used or not.
+  sync.rescanAll = async function () {
+    if (!sync.unlocked) return 0;
+    let photos;
+    try { photos = await sync.listPhotos(); } catch (e) {
+      ST.toast('Could not list the Drive photos.', 'warn');
+      return 0;
+    }
+    if (!photos.length) { ST.toast('No photos in the Drive inbox yet.'); return 0; }
+    ST.toast(`Re-scanning ${photos.length} photo${photos.length === 1 ? '' : 's'} from Drive…`);
+    ST.batch.addRemotePhotos(photos);
+    return photos.length;
+  };
+
   // Fetch one Drive photo → canvas (HEIC-aware).
   sync.fetchPhotoCanvas = async function (photo) {
     const res = await sync.api('GET', 'api/photo?id=' + encodeURIComponent(photo.id));
@@ -276,12 +320,14 @@
         const res = await sync.api('GET', 'api/diag');
         const d = await res.json();
         const line = (label, s) => `${label}: ${s.ok ? 'ok' : 'FAILED — ' + s.error}`;
-        ST.toast([
+        const parts = [
           line('Google token', d.token),
           line('Inbox folder', d.inbox),
           line('Letterforms folder', d.library),
           line('Write test', d.write),
-        ].join(' · '), 'warn');
+        ];
+        if (d.write && d.write.hint) parts.push('FIX: ' + d.write.hint);
+        ST.toast(parts.join(' · '), 'warn');
       } catch (e) {
         ST.toast('Sync: ' + (sync.lastError || 'unknown error'), 'warn');
       }
@@ -296,6 +342,7 @@
       $('#inboxModal').classList.remove('open');
       sync.checkInbox(true, true);
     });
+    $('#rescanBtn').addEventListener('click', () => sync.rescanAll());
 
     let health = null;
     try {

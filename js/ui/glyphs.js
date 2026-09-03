@@ -170,6 +170,63 @@
     ));
   }
 
+  // ---------- photos in Drive ----------
+  // Every photo in the inbox folder, thumbnails through the api. Photos that
+  // already gave a letterform are grayed; click any of them to extract
+  // again — the photo lands on the capture stage like a fresh upload.
+  let photos = null, photosAt = 0, photosLoading = false;
+
+  ui.refreshPhotos = async function (force) {
+    if (!ST.sync || !ST.sync.unlocked) { renderPhotos(); return; }
+    if (!force && photos && Date.now() - photosAt < 60000) { renderPhotos(); return; }
+    if (photosLoading) return;
+    photosLoading = true;
+    renderPhotos();
+    try {
+      photos = await ST.sync.listPhotos();
+      photosAt = Date.now();
+    } catch (e) {
+      photos = photos || [];
+    }
+    photosLoading = false;
+    renderPhotos();
+  };
+
+  function renderPhotos() {
+    const root = $('#photoGallery');
+    if (!root) return;
+    const on = !!(ST.sync && ST.sync.unlocked);
+    root.style.display = on ? '' : 'none';
+    root.innerHTML = '';
+    if (!on) return;
+    const done = new Set(ST.store.state.processedPhotos || []);
+    const list = photos || [];
+    root.appendChild(el('div', { class: 'glyphs-head' },
+      el('div', { class: 'grid-label' }, `Photos in Drive${list.length ? ` (${list.length})` : ''}`),
+      el('button', { class: 'pill sm', onclick: () => ui.refreshPhotos(true) }, photosLoading ? 'Loading…' : 'Refresh'),
+    ));
+    root.appendChild(el('p', { class: 'dim' },
+      'Click a photo to extract letterforms from it again. Grayed photos have already given letterforms.'));
+    const grid = el('div', { class: 'photo-grid' });
+    for (const p of list) {
+      const used = done.has(p.id);
+      const card = el('button', {
+        class: 'photo-card' + (used ? ' done' : ''),
+        'data-photo': p.id,
+        title: (p.name || 'photo') + (used ? ' — already extracted; click to extract again' : ' — new'),
+        onclick: () => ST.sync.extractPhoto(p),
+      });
+      const img = el('img', { alt: p.name || '' });
+      card.appendChild(img);
+      card.appendChild(el('span', { class: 'photo-name' }, p.name || ''));
+      grid.appendChild(card);
+      ST.sync.photoThumb(p.id).then((url) => { img.src = url; }).catch(() => card.classList.add('broken'));
+    }
+    if (!list.length && !photosLoading) grid.appendChild(el('div', { class: 'dim' }, 'No photos in the Drive inbox yet.'));
+    root.appendChild(grid);
+  }
+  ui.renderPhotos = renderPhotos;
+
   ui.init = function () {
     $('#drawerClose').addEventListener('click', closeDrawer);
     $('#glyphDrawer').addEventListener('click', (e) => {
@@ -208,7 +265,9 @@
     ST.store.on('change', () => {
       renderGrid();
       if (ui.openChar) renderDrawer();
+      renderPhotos();
     });
     renderGrid();
+    renderPhotos();
   };
 })(typeof window !== 'undefined' ? window : globalThis);

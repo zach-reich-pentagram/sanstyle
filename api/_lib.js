@@ -11,15 +11,33 @@ function env() {
   return {
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
     key: (process.env.GOOGLE_SERVICE_ACCOUNT_KEY || '').replace(/\\n/g, '\n'),
+    oauth: {
+      clientId: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+      clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
+      refreshToken: process.env.GOOGLE_OAUTH_REFRESH_TOKEN || '',
+    },
     passcode: process.env.SANSTYLE_PASSCODE || '3754',
     inboxId: process.env.DRIVE_INBOX_FOLDER_ID || '1BNUkRRGWQsfPc5yoaia4rsuX8dUtli9s',
     libraryId: process.env.DRIVE_LIBRARY_FOLDER_ID || '1ckGGFq99lVayKplwzDKm3SQsY28o2_uU',
   };
 }
 
-function configured() {
+// How the site talks to Drive:
+//  'user'    — as your own Google account, through an OAuth refresh token.
+//              Files it creates are yours. Works with a personal Gmail.
+//  'service' — as a service account. Google no longer lets a service account
+//              own files in a personal My Drive ("Service Accounts do not
+//              have storage quota"), so with this mode the folders must live
+//              in a Shared Drive (Google Workspace).
+function authMode() {
   const e = env();
-  return !!(e.email && e.key);
+  if (e.oauth.clientId && e.oauth.clientSecret && e.oauth.refreshToken) return 'user';
+  if (e.email && e.key) return 'service';
+  return null;
+}
+
+function configured() {
+  return !!authMode();
 }
 
 // ---------- responses ----------
@@ -93,14 +111,21 @@ async function getToken() {
   const now = Math.floor(Date.now() / 1000);
   if (tokenCache.token && tokenCache.exp - 120 > now) return tokenCache.token;
   const e = env();
-  const assertion = buildAssertion(e, now);
+  const params = authMode() === 'user'
+    ? {
+      grant_type: 'refresh_token',
+      client_id: e.oauth.clientId,
+      client_secret: e.oauth.clientSecret,
+      refresh_token: e.oauth.refreshToken,
+    }
+    : {
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: buildAssertion(e, now),
+    };
   const resp = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion,
-    }),
+    body: new URLSearchParams(params),
   });
   if (!resp.ok) throw new Error('google token exchange failed: ' + (await resp.text()).slice(0, 300));
   const data = await resp.json();
@@ -208,7 +233,7 @@ function svgIdFromName(name) {
 }
 
 module.exports = {
-  env, configured, send, readBody, requirePass,
+  env, configured, authMode, send, readBody, requirePass,
   getToken, resetTokenCache, buildAssertion,
   driveList, driveMeta, driveDownload, driveCreate, driveUpdate, driveUpsert, driveTrash,
   svgIdFromName,

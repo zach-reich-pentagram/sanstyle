@@ -1,9 +1,9 @@
 # Sanstyle
 
-**Street-sourced typeface engine.** Photograph graffiti around town, lasso a
-letterform (or let the machine find it), and it becomes a glyph in a living,
-typeable, downloadable font — perspective-corrected, vectorized, optically
-fitted, and auto-spaced, entirely in the browser.
+**Street-sourced typeface engine.** Photograph graffiti around town, drop
+the photos in, confirm each letterform the machine finds, and it becomes a
+glyph in a living, typeable, downloadable font — straightened, vectorized,
+optically fitted, and auto-spaced, entirely in the browser.
 
 Photo of a wall → usable `.ttf`.
 
@@ -24,29 +24,17 @@ letter so the whole flow can be tried without a photo. iPhone **HEIC/HEIF**
 photos upload directly (Safari decodes natively; elsewhere a vendored libheif
 decodes locally).
 
-## Two ways in
+## How a letter gets in
 
-**Manual (full control).** Upload → optionally drag four corners onto the
-wall plane (homography flatten) → loop the letterform with the freehand
-**Lasso** or click-point **Polygon** tool → dial in the ink → tag → add.
-
-Ink controls: automatic Otsu thresholding or **Pick paint** color matching
-(multiple clicks widen the range), de-noise, speck filter, curve fit, and:
-
-- **Fill gaps** — heals spray-coverage holes inside the ink. Low values close
-  pinholes while counters survive; cranked, the letter goes fully solid.
-- **Block out overlap** — when another letter crosses the one you want,
-  brush over the intruder. Its paint is removed and your stroke is bridged
-  back through the blocked zone with a morphological inference of where the
-  hidden edge continues. Brush size and bridge reach are adjustable.
-
-**Auto capture (single or batch).** Select one or many photos: each has its
-paint separated from the wall or paper by color contrast against the
-background — the wall is the frame's dominant color, paint is whatever
-contrasts most with it, and the threshold sits where the boundary is
-sharpest, never past the midpoint between the two. That keeps marker strokes
-stroke-thin on fibrous paper instead of swallowing the pink bleed halo
-around them. The classifier works along the wall→paint color axis, so
+Drop photos on the Capture tab (one or a hundred; iPhone HEIC works), share
+them into the Drive inbox from your phone, or pick any photo from the Drive
+gallery in the Glyphs tab. Each photo is analyzed and lands on the stage in
+turn: the paint is separated from the wall or paper by color contrast
+against the background — the wall is the frame's dominant color, paint is
+whatever contrasts most with it, and the threshold sits where the boundary
+is sharpest, never past the midpoint between the two. That keeps marker
+strokes stroke-thin on fibrous paper instead of swallowing the pink bleed
+halo around them. The classifier works along the wall→paint color axis, so
 metallic and glossy paint whose highlights and shading run *past* the paint
 color (silver on dark red, chrome on brick) still reads as one shape, and
 compact patches inside the paint that are neither paint nor wall — pocks,
@@ -56,14 +44,13 @@ then straightened by the paint's own edges (its stems set upright, not the
 wall's bricks or the paper's edge), and its resolution is normalized: a
 letter shot from across the street is brought up to the same pixel height as
 one shot up close before smoothing, so both get the same treatment.
-Everything lands in a review queue — the photo with the shape boxed, the
-traced letterform beside it — with a **Detail** knob (low heals gaps and
-smooths hard, high keeps every nuance) where you type the character and
-**Add**, **Skip**, or **Edit manually** (drops that photo into the manual
-studio, pre-lassoed). A photo leaves the queue only when its letterform was
-added or skipped.
 
-![Review queue](docs/shots/review.png)
+On the stage the detected shape is boxed and its trace drawn over the paint;
+the clean silhouette and the letterform fitted into the em sit beside it. A
+**Detail** knob re-reads the photo (low heals gaps and smooths hard, high
+keeps every nuance). Type the character, **Add** — the next photo comes up.
+A photo leaves the queue only when its letterform was added or skipped, and
+the queue waits across tabs and reloads of Drive photos.
 
 **Click the letter you see.** If the detected shape isn't the one you want,
 click the letter in the photo: the click snaps to the densest paint nearby
@@ -149,14 +136,20 @@ becomes a passcode-gated, cross-device studio backed by two Drive folders:
 
 - an **inbox folder** — share photos into it from your phone's Drive app (or
   upload through the site) and the site offers to extract letterforms from
-  whatever is new since your last visit;
+  whatever is new since your last visit. The Glyphs tab shows every photo in
+  the folder, used ones grayed; click any to extract from it again, or
+  **Re-scan Drive photos** to queue them all;
 - a **letterforms folder** — `library.json` (the full library: variants,
   fits, nudges, settings) plus an auto-maintained **SVG mirror** of every
   letterform, ready to open in Illustrator.
 
 The browser only ever talks to the site's own `/api` routes (Vercel
-serverless, in `api/`), which hold the Drive credentials server-side and
-check the passcode on every request. Without the env vars, the site runs
+serverless, in `api/`), which hold the Google credentials server-side and
+check the passcode on every request. The site can act as your own Google
+account (an OAuth refresh token, works with a personal Gmail) or as a
+service account on a Shared Drive — Google no longer lets a service account
+own files in a personal My Drive, and the red sync pill says so, with the
+fix, when that is what's wrong. Without the env vars, the site runs
 local-only exactly as before.
 
 ## Glyphs, sharing, design
@@ -173,8 +166,12 @@ weight, canvas padding — persisted per browser.
 
 ```
 api/
-  _lib.js        service-account JWT + Drive REST helpers (no SDK)
-  health/library/inbox/photo/upload — the sync endpoints
+  _lib.js        Google auth (your account via OAuth, or a service-account
+                 JWT) + Drive REST helpers (no SDK)
+  health/library/inbox/photo/upload/diag — the sync endpoints
+tools/
+  get_refresh_token.mjs   one-time Google sign-in for the site
+  validate_font.py        fontTools round-trip used by the tests
 js/
   geometry.js    vectors, RDP, point-in-poly, homography, Bézier math
   fitcurves.js   Schneider least-squares cubic fitting
@@ -191,7 +188,8 @@ js/
   store.js       library model, persistence, import/export
   sync.js        passcode gate, Drive pull/merge/push, inbox prompts
   demo.js        procedural demo walls (seeded)
-  ui/            capture stage, glyph grid, tester, review queue
+  ui/            capture stage (the review surface), review queue, glyph
+                 grid + Drive gallery, tester
 ```
 
 Zero runtime dependencies (the HEIC decoder is vendored and loads only when
@@ -205,13 +203,13 @@ npm test        # 49 unit tests: geometry, tracing, fitting, morphology,
                 # classifier scoring, ligature keys + GSUB, weight targeting,
                 # TTF byte format, and the api routes (JWT signing verified
                 # against a real keypair, Drive calls stubbed)
-npm run e2e     # headless Chromium: freehand + polygon lasso, flatten,
-                # pick-paint, fill-gaps, HEIC intake, auto capture + review,
-                # click-to-trace, cuts, Isolate, Detail, variant cycling,
-                # ligature shaping, weight slider, source popup, kerning,
-                # exports, TTF download (fontTools-validated) — plus the
-                # full sync flow (gate, inbox extraction, SVG mirroring,
-                # wiped-device restore, site→Drive upload) against an
+npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
+                # the review queue, click-to-trace, cuts, shift-click pieces,
+                # Isolate, Detail, variant cycling, ligature shaping, weight
+                # slider, source popup, kerning, exports, TTF download
+                # (fontTools-validated) — plus the full sync flow (gate,
+                # inbox extraction, SVG mirroring, wiped-device restore,
+                # site→Drive upload, the Drive gallery + re-scan) against an
                 # in-memory mock of the api contract
 ```
 

@@ -1,8 +1,10 @@
 /* Sanstyle end-to-end: drives the real app in headless Chromium.
- * Covers the manual flow (mouse lasso, polygon lasso, flatten, pick-paint),
- * the automated flow (detect → review → accept), HEIC intake,
- * variant cycling, kerning, exports, and validates every compiled font with
- * an independent parser plus fontTools. Regenerates the README screenshots.
+ * Covers the capture flow on the stage (demo walls, HEIC intake, the review
+ * queue, click-to-trace, cuts, shift-click pieces, Isolate, Detail),
+ * ligatures, the weight slider, variant cycling, kerning, exports, and
+ * validates every compiled font with an independent parser plus fontTools;
+ * then the whole cloud flow against a mock of the api. Regenerates the
+ * README screenshots.
  */
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -151,166 +153,92 @@ await page.waitForFunction(() => globalThis.__st && globalThis.ST);
 check((await page.title()) === 'Sanstyle', 'page title is "Sanstyle"');
 console.log('\n— app booted');
 
-// ---- Flow A: real-mouse freehand lasso -------------------------------------
-console.log('\n— flow A: freehand lasso on a demo “S”');
-await page.evaluate(() => { __st.loadDemo('S'); ST.capture.skipFlatten(); });
-const corners = await page.evaluate(() => {
-  const b = ST.capture.lastDemo.letterBox;
-  const r = document.getElementById('stage').getBoundingClientRect();
-  return [
-    { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
-    { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h },
-  ].map((p) => {
-    const s = ST.capture.toScreen(p);
-    return { x: s.x + r.left, y: s.y + r.top };
-  });
-});
-await page.mouse.move(corners[0].x, corners[0].y);
-await page.mouse.down();
-for (const c of [...corners.slice(1), corners[0]]) await page.mouse.move(c.x, c.y, { steps: 14 });
-await page.mouse.up();
+// ---- Flow A: a demo wall lands on the stage, traced; type S, add ------------
+console.log('\n— flow A: demo “S” on the stage → Add to typeface');
+await page.evaluate(() => __st.loadDemo('S'));
 await page.waitForTimeout(250);
 let st = await page.evaluate(() => ({
-  step: __st.state().step,
-  paths: ST.capture.extract ? ST.capture.extract.paths.length : 0,
+  s: __st.state(),
+  hint: document.getElementById('reviewHint').textContent,
+  progress: document.getElementById('reviewProgress').textContent,
+  char: document.getElementById('reviewChar').value,
+  addOn: !document.getElementById('reviewAccept').disabled,
+  shapeStep: document.getElementById('step-shape').classList.contains('active'),
 }));
-check(st.step === 'ink' && st.paths >= 1, `freehand lasso traced (${st.paths} contours)`);
-await page.fill('#charInput', 'S');
-await page.waitForTimeout(150);
+check(st.s.current === 'demo-S' && st.s.shapes >= 1, `demo wall queued and traced on the stage (${st.s.shapes} shape(s))`);
+check(/Shape 1 of/.test(st.hint) && /^Photo 1 of 1/.test(st.progress), `stage shows the shape and the progress (“${st.progress}”)`);
+check(st.char === 'S' && st.addOn && st.shapeStep, 'demo pre-types its letter; Add is live');
 await page.screenshot({ path: path.join(SHOTS, 'capture.png') });
-await page.click('#submitBtn');
-check((await page.evaluate(() => __st.state().chars)).includes('S'), 'S submitted');
+await page.click('#reviewAccept');
+await page.waitForTimeout(150);
+st = await page.evaluate(() => __st.state());
+check(st.chars.includes('S') && st.queue === 0, 'S submitted, queue empty');
 
-// ---- Flow A2: polygon lasso, second S variant --------------------------------
-console.log('\n— flow A2: polygon lasso captures a second “S” variant');
-await page.evaluate(() => { __st.loadDemo('S'); ST.capture.skipFlatten(); });
-await page.click('#toolPoly');
-const pcorners = await page.evaluate(() => {
+// ---- Flow A2: a real click on the stage re-traces; second S variant -----------
+console.log('\n— flow A2: a click on the stage traces the letter under it');
+await page.evaluate(() => __st.loadDemo('S'));
+await page.waitForTimeout(200);
+const clickAt = await page.evaluate(() => {
   const b = ST.capture.lastDemo.letterBox;
   const r = document.getElementById('stage').getBoundingClientRect();
-  return [
-    { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
-    { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h },
-  ].map((p) => {
-    const s = ST.capture.toScreen(p);
-    return { x: s.x + r.left, y: s.y + r.top };
-  });
+  const sp = ST.capture.toScreen({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+  return { x: r.left + sp.x, y: r.top + sp.y, before: ST.capture.item.candidates.length };
 });
-for (const c of pcorners) {
-  await page.mouse.click(c.x, c.y);
-  await page.waitForTimeout(40);
-}
-await page.mouse.click(pcorners[0].x, pcorners[0].y); // close on first vertex
-await page.waitForTimeout(250);
-st = await page.evaluate(() => ({
-  step: __st.state().step,
-  paths: ST.capture.extract ? ST.capture.extract.paths.length : 0,
+await page.mouse.click(clickAt.x, clickAt.y);
+await page.waitForTimeout(400);
+const afterClick = await page.evaluate(() => ({
+  n: ST.capture.item.candidates.length, kind: ST.capture.item.candidates[0].kind, paths: ST.capture.cand.paths.length,
 }));
-check(st.step === 'ink' && st.paths >= 1, `polygon lasso closed and traced (${st.paths} contours)`);
+check(afterClick.n > clickAt.before && afterClick.paths >= 1,
+  `a real click on the stage traced the S (${afterClick.n} shapes, kind ${afterClick.kind})`);
 check(await page.evaluate(() => __st.tagAndSubmit('S')), 'second S variant submitted');
 const sVariants = await page.evaluate(() => ST.store.slot('S').variants.length);
 check(sVariants === 2, `S now has ${sVariants} variants`);
-await page.click('#toolLasso');
 
 // ---- Flow B: the rest of the demo letters via hooks ---------------------------
 console.log('\n— flow B: capture A E N O T 5 #');
 for (const ch of ['A', 'E', 'N', 'O', 'T', '5', '#']) {
   const r = await page.evaluate((c) => {
     __st.loadDemo(c);
-    ST.capture.skipFlatten();
-    const ex = __st.lassoDemoLetter();
-    const ok = __st.tagAndSubmit(c);
-    return { ...ex, ok };
+    const shapes = __st.state().shapes;
+    return { shapes, ok: __st.tagAndSubmit(c) };
   }, ch);
-  check(r.ok && r.paths >= 1, `“${ch}”: ${r.paths} contours → submitted`);
+  check(r.ok && r.shapes >= 1, `“${ch}”: ${r.shapes} shape(s) → submitted`);
 }
-
-// ---- fill-gaps slider: counter of O fills only when cranked -------------------
-console.log('\n— fill gaps');
-const fillTest = await page.evaluate(() => {
-  __st.loadDemo('O');
-  ST.capture.skipFlatten();
-  ST.capture.ink.fill = 0;
-  __st.lassoDemoLetter();
-  const holesAt0 = ST.capture.extract.paths.filter((p) => p.area < 0).length;
-  ST.capture.ink.fill = 75;
-  ST.capture.runExtraction(false);
-  const holesAtMax = ST.capture.extract.paths.filter((p) => p.area < 0).length;
-  ST.capture.ink.fill = 5;
-  ST.capture.clearLasso();
-  return { holesAt0, holesAtMax };
-});
-check(fillTest.holesAt0 >= 1, `O keeps its counter at fill 0 (${fillTest.holesAt0} hole)`);
-check(fillTest.holesAtMax === 0, 'cranked fill-gaps makes the O solid');
-
-// ---- Flow C: flatten + pick-paint ---------------------------------------------
-console.log('\n— flow C: flatten (homography) + pick-paint mode');
-const flat = await page.evaluate(() => {
-  __st.loadDemo('E');
-  const before = { w: ST.capture.img.width, h: ST.capture.img.height };
-  const q = ST.capture.quad;
-  q[0].x += 40; q[0].y += 22; q[1].x -= 25; q[3].y -= 18;
-  ST.capture.applyFlatten();
-  return { before, after: { w: ST.capture.img.width, h: ST.capture.img.height }, step: ST.capture.step };
-});
-check(flat.step === 'lasso' && (flat.after.w !== flat.before.w || flat.after.h !== flat.before.h),
-  `flatten warped ${flat.before.w}×${flat.before.h} → ${flat.after.w}×${flat.after.h}`);
-const colorPick = await page.evaluate(() => {
-  const hex = ST.capture.lastDemo.color;
-  const seed = { r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16), b: parseInt(hex.slice(5, 7), 16) };
-  ST.capture.ink.mode = 'color';
-  ST.capture.ink.seeds = [seed];
-  ST.capture.ink.tol = 38;
-  const b = ST.capture.lastDemo.letterBox;
-  const W = ST.capture.img.width, H = ST.capture.img.height;
-  const x0 = Math.max(4, b.x - 30), y0 = Math.max(4, b.y - 30);
-  const x1 = Math.min(W - 4, b.x + b.w + 30), y1 = Math.min(H - 4, b.y + b.h + 30);
-  ST.capture.lasso = [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
-  ST.capture.runExtraction(false);
-  const ex = ST.capture.extract;
-  ST.capture.ink.mode = 'luma';
-  ST.capture.ink.seeds = [];
-  ST.capture.clearLasso();
-  return { paths: ex ? ex.paths.length : 0, ink: ex ? ex.inkCount : 0 };
-});
-check(colorPick.paths >= 1 && colorPick.ink > 2000,
-  `pick-paint traced the warped E (${colorPick.paths} contours, ${colorPick.ink}px)`);
 
 // ---- HEIC intake ----------------------------------------------------------------
 console.log('\n— HEIC (vendored libheif decode)');
 await page.setInputFiles('#fileInput', path.join(ROOT, 'test', 'fixtures', 'letter-L.heic'));
-await page.waitForFunction(() => ST.capture.img && ST.capture.img.width === 480, { timeout: 30000 });
-const heicRes = await page.evaluate(() => {
-  ST.capture.skipFlatten();
-  ST.capture.lasso = [{ x: 120, y: 30 }, { x: 360, y: 30 }, { x: 360, y: 330 }, { x: 120, y: 330 }];
-  ST.capture.runExtraction(true);
-  const ex = ST.capture.extract;
-  return { paths: ex ? ex.paths.length : 0, ink: ex ? ex.inkCount : 0, ok: __st.tagAndSubmit('L') };
-});
-check(heicRes.paths >= 1 && heicRes.ok, `HEIC decoded, L traced (${heicRes.ink}px ink) and submitted`);
+await page.waitForFunction(() => ST.capture.item && /letter-L/.test(ST.capture.item.name), { timeout: 30000 });
+const heicRes = await page.evaluate(() => ({
+  shapes: __st.state().shapes, w: ST.capture.item.canvas.width, ok: __st.tagAndSubmit('L'),
+}));
+check(heicRes.shapes >= 1 && heicRes.ok, `HEIC decoded (${heicRes.w} px wide on the stage), L traced and submitted`);
 
-// ---- auto flow: photo-at-a-time review, no guessing ------------------------------
+// ---- auto flow: photo-at-a-time review on the stage --------------------------------
 console.log('\n— auto capture + review queue');
 const autoRes = await page.evaluate(() => __st.autoFromDemo('T'));
 check(autoRes.candidates >= 1, `auto pipeline found ${autoRes.candidates} candidate(s) on a demo wall`);
 await page.evaluate(() => ST.batch.reopen());
 await page.waitForTimeout(250);
 const revState = await page.evaluate(() => ({
-  open: document.getElementById('reviewModal').classList.contains('open'),
+  current: __st.state().current,
   hint: document.getElementById('reviewHint').textContent,
   progress: document.getElementById('reviewProgress').textContent,
+  tab: document.getElementById('tab-capture').classList.contains('active'),
 }));
-check(revState.open, 'review modal opened straight onto the traced shape');
+check(revState.current === 'demo-T' && revState.tab, 'the queued photo shows on the capture stage');
 check(/Shape 1 of/.test(revState.hint), `hint shows shape count (“${revState.hint.slice(0, 48)}…”)`);
-await page.screenshot({ path: path.join(SHOTS, 'review.png') });
 const beforeT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
 await page.fill('#reviewChar', 'T');
 await page.click('#reviewAccept');
 await page.waitForTimeout(250);
 const afterT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
 check(afterT === beforeT + 1, 'Add to typeface stored the letterform');
-const closedAfter = await page.evaluate(() => !document.getElementById('reviewModal').classList.contains('open'));
-check(closedAfter, 'accepting the only photo finishes the queue');
+const emptyAfter = await page.evaluate(() => ({
+  queue: __st.state().queue, current: __st.state().current, hint: document.getElementById('stageHint').textContent,
+}));
+check(emptyAfter.queue === 0 && emptyAfter.current === null, `accepting the only photo empties the stage (“${emptyAfter.hint}”)`);
 
 // click-to-trace: click the letter in the photo pane → seeded extraction
 console.log('\n— click-to-trace + studio auto-advance');
@@ -325,18 +253,13 @@ const clickInfo = await page.evaluate(() => {
   const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
   const before = item.candidates.length;
   const n = ST.batch.clickTrace(cx, cy);
-  const cnv = document.getElementById('reviewSource');
-  const rect = cnv.getBoundingClientRect();
-  const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
-  const ox = (cnv.width - item.canvas.width * s) / 2, oy = (cnv.height - item.canvas.height * s) / 2;
+  const rect = document.getElementById('stage').getBoundingClientRect();
+  const sp = ST.capture.toScreen({ x: cx, y: cy });
   return {
     n, before, after: item.candidates.length,
     kind: item.candidates[0].kind,
     hint: document.getElementById('reviewHint').textContent,
-    screen: {
-      x: rect.left + (ox + cx * s) * (rect.width / cnv.width),
-      y: rect.top + (oy + cy * s) * (rect.height / cnv.height),
-    },
+    screen: { x: rect.left + sp.x, y: rect.top + sp.y },
   };
 });
 check(clickInfo.n >= 1 && clickInfo.after > clickInfo.before,
@@ -345,7 +268,7 @@ check(/Shape 1 of/.test(clickInfo.hint), 'clicked shape becomes the current one'
 await page.mouse.click(clickInfo.screen.x, clickInfo.screen.y);
 await page.waitForTimeout(400);
 const afterRealClick = await page.evaluate(() => ST.batch.queue[ST.batch.idx].candidates.length);
-check(afterRealClick > clickInfo.after, 'a real click on the photo pane traces too');
+check(afterRealClick > clickInfo.after, 'a real click on the stage traces too');
 // cut gesture through the N's middle: region shrinks, Undo restores
 const cutRes = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];
@@ -381,17 +304,9 @@ const partRes = await page.evaluate(() => {
   let tx = -1;
   for (let x = whole.w - 1; x >= 0; x--) if (whole.mask[row * whole.w + x]) { tx = x; break; }
   const target = { x: whole.crop.x + tx - 6, y: cy };
-  const cnv = document.getElementById('reviewSource');
-  const rect = cnv.getBoundingClientRect();
-  const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
-  const ox = (cnv.width - item.canvas.width * s) / 2, oy = (cnv.height - item.canvas.height * s) / 2;
-  return {
-    before, cut, same, afterSame, target,
-    screen: {
-      x: rect.left + (ox + target.x * s) * (rect.width / cnv.width),
-      y: rect.top + (oy + target.y * s) * (rect.height / cnv.height),
-    },
-  };
+  const rect = document.getElementById('stage').getBoundingClientRect();
+  const sp = ST.capture.toScreen(target);
+  return { before, cut, same, afterSame, target, screen: { x: rect.left + sp.x, y: rect.top + sp.y } };
 });
 check(partRes.same === 0 && partRes.afterSame === partRes.cut, 'shift-click on ink already in the shape adds nothing');
 await page.keyboard.down('Shift');
@@ -572,46 +487,29 @@ check(hashRes.tip.tall >= 9, `thin bars end in round caps, not needle points (${
 await page.screenshot({ path: path.join(SHOTS, 'isolate-hash.png') });
 await page.evaluate(() => ST.batch.skip());
 
-// studio round-trip: Edit manually → add in the studio → next photo pops up
+// two photos queued: adding one brings up the next; a photo leaves the queue
+// only through Add or Skip, and waits on the stage across tab switches
 await page.evaluate(() => {
-  ST.batch.addCanvas(ST.demo.makeWall('E', 1001).canvas, 'studio-e');
-  ST.batch.addCanvas(ST.demo.makeWall('T', 1002).canvas, 'studio-t');
-  ST.batch.reopen();
+  ST.batch.addCanvas(ST.demo.makeWall('E', 1001).canvas, 'two-e');
+  ST.batch.addCanvas(ST.demo.makeWall('T', 1002).canvas, 'two-t');
 });
 await page.waitForTimeout(150);
-await page.click('#reviewEdit');
-await page.waitForTimeout(200);
-const inStudio = await page.evaluate(() => ({
-  step: ST.capture.step, queued: __st.state().queue,
-  open: document.getElementById('reviewModal').classList.contains('open'),
-}));
-check(inStudio.step === 'ink' && !inStudio.open && inStudio.queued === 2,
-  'Edit manually loads the studio and keeps the photo queued');
 await page.evaluate(() => __st.tagAndSubmit('E'));
-await page.waitForTimeout(500);
-const afterStudio = await page.evaluate(() => ({
-  queued: __st.state().queue,
-  open: document.getElementById('reviewModal').classList.contains('open'),
-  progress: document.getElementById('reviewProgress').textContent,
+await page.waitForTimeout(200);
+const afterFirst = await page.evaluate(() => ({
+  queued: __st.state().queue, current: __st.state().current, progress: document.getElementById('reviewProgress').textContent,
 }));
-check(afterStudio.queued === 1 && afterStudio.open,
-  `studio submit clears that photo and brings up the next (${afterStudio.progress})`);
-await page.click('#reviewSkip');
-await page.waitForTimeout(200);
-
-// skip-only removal: a photo stays queued through save-for-later
-await page.evaluate(() => __st.autoFromDemo('O'));
-await page.evaluate(() => ST.batch.reopen());
-await page.waitForTimeout(200);
-await page.keyboard.press('Escape'); // save for later
-await page.waitForTimeout(150);
-let queued = await page.evaluate(() => __st.state().queue);
-check(queued === 1, 'Esc / save-for-later keeps the photo in the queue');
-await page.evaluate(() => ST.batch.reopen());
-await page.waitForTimeout(150);
+check(afterFirst.queued === 1 && afterFirst.current === 'two-t', `adding one photo brings up the next (${afterFirst.progress})`);
+await page.evaluate(() => { __st.switchTab('tester'); __st.switchTab('capture'); });
+await page.waitForTimeout(100);
+const stillThere = await page.evaluate(() => ({
+  queued: __st.state().queue, current: __st.state().current, pill: document.getElementById('queuePill').textContent,
+}));
+check(stillThere.queued === 1 && stillThere.current === 'two-t' && /1/.test(stillThere.pill),
+  `leaving and returning keeps the photo on the stage (pill “${stillThere.pill}”)`);
 await page.click('#reviewSkip');
 await page.waitForTimeout(150);
-queued = await page.evaluate(() => __st.state().queue);
+const queued = await page.evaluate(() => __st.state().queue);
 check(queued === 0, 'Skip removes the photo from the queue');
 
 // Detail knob re-extracts; a cut with no click keeps the bigger side
@@ -907,10 +805,8 @@ const inboxText = await page2.evaluate(() => document.getElementById('inboxCount
 check(inboxText.includes('2'), `inbox prompt: “${inboxText}”`);
 await page2.screenshot({ path: path.join(SHOTS, 'sync.png') });
 await page2.click('#inboxExtract');
-// first photo appears as soon as it's fetched+analyzed (incremental intake)
-await page2.waitForFunction(() =>
-  document.getElementById('reviewModal').classList.contains('open') &&
-  document.getElementById('reviewBody').style.display !== 'none', { timeout: 20000 });
+// first photo lands on the stage as soon as it's fetched+analyzed (incremental intake)
+await page2.waitForFunction(() => __st.state().current !== null, { timeout: 20000 });
 for (let p = 0; p < 2; p++) {
   const ch = await page2.evaluate(() =>
     /wall-n/.test(ST.batch.queue[ST.batch.idx].name) ? 'N' : 'T');
@@ -945,19 +841,44 @@ const reprompt = await page2.evaluate(() => document.getElementById('inboxModal'
 check(!reprompt, 'processed photos are not offered again');
 
 console.log('\n— cloud sync: site upload → Drive inbox');
-await page2.setInputFiles('#autoInput', path.join(ROOT, 'test', 'fixtures', 'letter-L.heic'));
+await page2.setInputFiles('#fileInput', path.join(ROOT, 'test', 'fixtures', 'letter-L.heic'));
 await pollCloud('uploaded photo stored in the Drive inbox', () => cloud.uploads.length === 1, 30000);
 check(cloud.uploads[0] && cloud.uploads[0].name.endsWith('.jpg') && cloud.uploads[0].size > 1500,
   `upload is a re-encoded jpeg (${cloud.uploads[0] && cloud.uploads[0].size} bytes)`);
-await page2.waitForFunction(() =>
-  document.getElementById('reviewModal').classList.contains('open') &&
-  document.getElementById('reviewBody').style.display !== 'none', { timeout: 20000 });
+await page2.waitForFunction(() => __st.state().current !== null, { timeout: 20000 });
 await page2.fill('#reviewChar', 'L');
 await page2.click('#reviewAccept');
 await pollCloud('uploaded letterform synced (L in Drive library)', () =>
   cloud.library && cloud.library.glyphs && cloud.library.glyphs.L);
 await pollCloud('uploaded photo marked processed', () =>
   cloud.library && (cloud.library.processedPhotos || []).some((id) => id.startsWith('up_')));
+
+console.log('\n— cloud sync: Drive photo gallery + re-scan');
+// a fourth photo nobody has extracted from yet
+const freshUrl = await page.evaluate(() => ST.demo.makeWall('E', 777).canvas.toDataURL('image/png'));
+cloud.inbox.push({ id: 'ph_e_00000009', name: 'wall-e.png', mimeType: 'image/png', createdTime: '2026-08-28T09:00:00Z' });
+cloud.photoBytes.set('ph_e_00000009', Buffer.from(freshUrl.split(',')[1], 'base64'));
+await page2.evaluate(() => __st.switchTab('glyphs'));
+await page2.waitForFunction(() => document.querySelectorAll('.photo-card').length >= 4, { timeout: 15000 });
+const gallery = await page2.evaluate(() =>
+  Array.from(document.querySelectorAll('.photo-card')).map((c) => ({ id: c.dataset.photo, done: c.classList.contains('done') })));
+check(gallery.length === 4 && gallery.filter((c) => c.done).length === 3 && gallery.some((c) => c.id === 'ph_e_00000009' && !c.done),
+  `Glyphs tab lists every Drive photo, used ones grayed, the new one not (${gallery.map((c) => (c.done ? 'used' : 'new')).join(' ')})`);
+await page2.waitForFunction(() =>
+  Array.from(document.querySelectorAll('.photo-card img')).every((i) => i.src.startsWith('blob:') && i.naturalWidth > 0), { timeout: 15000 });
+check(true, 'photo thumbnails loaded through the api');
+await page2.click('.photo-card[data-photo="ph_n_00000001"]');
+await page2.waitForFunction(() => ST.capture.item && ST.capture.item.sourceId === 'ph_n_00000001', { timeout: 20000 });
+const reQ = await page2.evaluate(() => ({
+  tab: document.getElementById('tab-capture').classList.contains('active'), shapes: __st.state().shapes,
+}));
+check(reQ.tab && reQ.shapes >= 1, 'clicking a used photo puts it back on the capture stage, traced');
+await page2.click('#reviewSkip');
+await page2.waitForTimeout(150);
+await page2.click('#rescanBtn');
+await page2.waitForFunction(() => ST.batch.remaining() >= 4, { timeout: 30000 });
+check(true, 'Re-scan Drive photos queues every photo again');
+await page2.evaluate(() => { while (ST.batch.remaining()) ST.batch.skip(); });
 
 const pillText = await page2.evaluate(() => document.getElementById('syncPill').textContent);
 check(pillText === 'Synced', `sync pill reads “${pillText}”`);

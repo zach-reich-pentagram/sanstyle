@@ -219,36 +219,7 @@ main { flex: 1; display: flex; min-height: 0; }
   color: var(--ink);
 }
 .slider-row.wide { grid-template-columns: 220px 260px; max-width: 500px; }
-.block-box {
-  border-top: var(--bw) solid var(--ink);
-  margin-top: 6px;
-  padding-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-details.adv {
-  border-top: var(--bw) solid var(--ink);
-  padding-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-details.adv summary {
-  cursor: pointer;
-  color: var(--dim);
-  list-style: none;
-}
-details.adv summary::before { content: "▸ "; }
-details.adv[open] summary::before { content: "▾ "; }
-details.adv > * { margin-top: 8px; }
-details.adv summary { margin-top: 0; }
-.seed-chips { display: none; gap: 6px; flex-wrap: wrap; }
-.seed-chip {
-  width: 22px; height: 22px;
-  border-radius: 50%;
-  border: var(--bw) solid var(--ink);
-}
+.slider-row input:disabled { opacity: 0.35; }
 
 /* ---------- stage ---------- */
 .stage-wrap {
@@ -285,6 +256,21 @@ details.adv summary { margin-top: 0; }
   pointer-events: none;
 }
 .stage-hint:empty { display: none; }
+.stage-status {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  max-width: 60%;
+  background: var(--paper);
+  border: var(--bw) solid var(--ink);
+  padding: 5px 14px;
+  border-radius: var(--pill-r);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.stage-status:empty { display: none; }
 
 /* ---------- preview column ---------- */
 .preview-col {
@@ -299,7 +285,7 @@ details.adv summary { margin-top: 0; }
   overflow-y: auto;
 }
 .panel-label { color: var(--ink); }
-#previewCanvas {
+#previewCanvas, #reviewTrace {
   width: 100%;
   border: var(--bw) solid var(--ink);
   border-radius: 14px;
@@ -360,6 +346,39 @@ details.adv summary { margin-top: 0; }
   border-radius: var(--pill-r);
   padding: 0 5px;
   text-align: center;
+}
+
+/* photos in Drive */
+#photoGallery { margin-top: calc(var(--gap) * 1.5); display: flex; flex-direction: column; gap: var(--gap); }
+#photoGallery .grid-label { margin: 0; }
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--gap);
+}
+.photo-card {
+  position: relative;
+  aspect-ratio: 1;
+  border: var(--bw) solid var(--ink);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #f2f2f2;
+  padding: 0;
+  display: block;
+  text-align: left;
+}
+.photo-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-card.done { opacity: 0.35; }
+.photo-card:hover { opacity: 1; box-shadow: 0 0 0 var(--bw) var(--ink); }
+.photo-name {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  padding: 3px 9px;
+  background: rgba(255, 255, 255, 0.86);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* drawer */
@@ -485,10 +504,11 @@ details.adv summary { margin-top: 0; }
   pointer-events: none;
   background: var(--paper);
   border: var(--bw) solid var(--ink);
-  padding: 4px;
+  border-radius: 14px;
+  padding: 5px;
 }
 .src-pop.on { display: block; }
-.src-pop img { display: block; max-width: 260px; max-height: 260px; }
+.src-pop img { display: block; max-width: 260px; max-height: 260px; border-radius: 10px; }
 .src-pop-label { text-align: center; font-size: 12px; padding-top: 3px; }
 #weightRange:disabled { opacity: 0.35; }
 .tester.kerning { cursor: pointer; }
@@ -531,7 +551,7 @@ details.adv summary { margin-top: 0; }
   gap: var(--gap);
 }
 
-/* ---------- review modal ---------- */
+/* ---------- inbox prompt ---------- */
 .modal {
   position: fixed;
   inset: 0;
@@ -554,30 +574,7 @@ details.adv summary { margin-top: 0; }
   flex-direction: column;
   gap: var(--gap);
 }
-.modal-head { display: flex; justify-content: space-between; align-items: center; gap: var(--gap); }
-.modal-spinner { padding: 40px 0; text-align: center; color: var(--dim); }
-.modal-body { display: flex; flex-direction: column; gap: var(--gap); }
-.review-panes {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--gap);
-}
-.review-panes canvas {
-  width: 100%;
-  border: var(--bw) solid var(--ink);
-  border-radius: 14px;
-  background: var(--paper);
-}
-.review-photo {
-  width: 100%;
-  border: var(--bw) solid var(--ink);
-  border-radius: 14px;
-  background: var(--paper);
-  margin-bottom: var(--gap);
-}
-#reviewAsk .ctl { gap: 10px; }
 .review-actions { display: flex; gap: var(--gap); align-items: center; flex-wrap: wrap; }
-#reviewChar { width: 64px; }
 
 /* ---------- passcode gate ---------- */
 .gate {
@@ -632,5 +629,4 @@ details.adv summary { margin-top: 0; }
   .step { min-width: 240px; }
   .stage-wrap { min-height: 46vh; }
   .preview-col { width: 100%; min-width: 0; border-left: none; border-top: var(--bw) solid var(--ink); }
-  .review-panes { grid-template-columns: 1fr; }
 }
