@@ -70,8 +70,16 @@ past an imperfect box stays.
 
 Stroke ends get a marker's round cap: nothing a pen draws is sharper than
 its tip, so needle points thinner than the thin side of the tip (measured
-from the distance transform of the shape) are pruned back to a cap — and
-where a cut sliced a stroke flat, the sliced face is capped the same way.
+from the distance transform of the shape) are pruned back to a cap. Where a
+stroke fades out — spray thinning, a marker lifting — the shape tapers to a
+point the pen never made: the skeleton is walked in from each free end to
+where the stroke has most of its width back, the taper beyond is dropped,
+and the stroke ends there with a disc of that width. Anything *wider* than
+the stroke near its end (an arrowhead) is drawn that way and kept. Where a
+cut sliced a stroke flat, the sliced face is capped the same way. The
+tracer then measures its corners and smoothing against the stroke width,
+so a round cap only half a stroke across is fitted as a curve, never
+sharpened into a corner.
 
 ![Isolate a fused 2](docs/shots/isolate-2.png)
 

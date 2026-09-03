@@ -271,6 +271,11 @@
       opts || {}
     );
     const loops = trace.maskToLoops(mask, w, h);
+    // the stroke width bounds every size-scaled tolerance below: a round
+    // cap is only a half-stroke across, and a window or span wider than
+    // that flattens it or reads it as a corner
+    const sw = o.strokeWidth != null ? o.strokeWidth
+      : (ST.raster && ST.raster.strokeWidth ? ST.raster.strokeWidth(mask, w, h) : 0);
     const out = [];
     for (const loop of loops) {
       const area = V.signedArea(loop); // >0 outer, <0 hole (mask convention)
@@ -289,10 +294,13 @@
         // uniformly, low-pass with a box window ~2% of the contour (two
         // passes), keep simplification fine, scale the fit tolerance
         // (~1% of size), and measure corners/tangents across a span so a
-        // single vertex never dictates a split.
+        // single vertex never dictates a split — each capped by the stroke
+        // width so thin strokes keep their round ends.
         const step = Math.max(1.5, size * 0.004);
         let pp = resampleClosed(loop, step);
-        const rad = Math.max(1, Math.round((size * 0.02) / step));
+        let boxArc = size * 0.02;
+        if (sw > 0) boxArc = Math.min(boxArc, sw * 0.3);
+        const rad = Math.max(1, Math.round(boxArc / step));
         pp = boxSmoothClosed(pp, rad, 2);
         // The fitter gets the DENSE points. Simplifying first strips a
         // straight stretch down to its two ends, and a fit checked only at
@@ -301,8 +309,13 @@
         // check sees every bulge.
         pts = pp;
         fitErr = o.fitErr * Math.max(1, size * 0.0065);
+        if (sw > 0) fitErr = Math.min(fitErr, Math.max(o.fitErr, sw * 0.1));
         cornerSpan = Math.max(cornerSpan, size * 0.02);
         tanSpan = Math.max(tanSpan, size * 0.045);
+        if (sw > 0) {
+          cornerSpan = Math.max(o.rdpEps * 2.5, Math.min(cornerSpan, sw * 0.35));
+          tanSpan = Math.max(o.rdpEps * 2.5, Math.min(tanSpan, sw * 0.6));
+        }
       } else {
         pts = smoothClosed(loop, o.smoothIter); // dense, for the same reason
       }

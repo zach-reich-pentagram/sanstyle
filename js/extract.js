@@ -294,7 +294,10 @@
       const ro = Math.max(0, Math.min(rc, rt > 0 ? Math.floor(rt * 0.7) : rc));
       if (rc > 0) m = R.close(m, w, h, rc);
       if (ro > 0) m = R.open(m, w, h, ro);
-      if (!(opts && opts.noRound)) m = ex.roundEnds(m, w, h, null);
+      if (!(opts && opts.noRound)) {
+        m = ex.roundEnds(m, w, h, null);
+        m = ex.capEnds(m, w, h);
+      }
     }
     // fill speckle gaps — holes smaller than the pen could leave on purpose
     // (well under a stroke width across, more with the knob up); a counter,
@@ -313,6 +316,74 @@
     const rt = R.thinRadius(mask, w, h, dt, region);
     const r = Math.round(rt * 0.7);
     return r >= 2 ? R.pruneThin(mask, w, h, r, region) : mask;
+  };
+
+  // Marker caps. A stroke that fades out — spray thinning, a marker lifting
+  // — tapers to a point in the mask, and no pen leaves a point. Walk the
+  // skeleton in from each free end to where the stroke has its width back
+  // (85% of that stroke's body half-width, within three half-widths), drop
+  // the taper beyond, and end the stroke there with a disc of the local
+  // half-width: the round cap a marker tip leaves. Ends already that round
+  // are left alone; so is anything WIDER than the stroke near its end (an
+  // arrowhead is drawn that way, not faded).
+  ex.capEnds = function (mask, w, h) {
+    const sw = R.strokeWidth(mask, w, h);
+    if (sw < 4) return mask;
+    const dt = R.distanceTransform(mask, w, h);
+    const graph = strokeGraph(mask, w, h, sw);
+    const skel = graph.skel;
+    const cls = new Uint8Array(w * h); // skeleton px: 1 = body, 2 = taper
+    for (let i = 0; i < skel.length; i++) if (skel[i]) cls[i] = 1;
+    const caps = [];
+    for (const s of graph.segments) {
+      for (let k = 0; k < 2; k++) {
+        const e = s.ends[k];
+        if (e < 0 || !graph.endpoint[e]) continue;
+        const path = [e].concat(k === 0 ? s.pixels : s.pixels.slice().reverse());
+        const vals = path.map((i) => dt[i]).sort((a, b) => a - b);
+        const rBody = vals[Math.floor(vals.length * 0.75)];
+        if (!(rBody >= 1.5)) continue;
+        const otherFree = s.ends[1 - k] >= 0 && graph.endpoint[s.ends[1 - k]];
+        const reach = Math.min(otherFree ? Math.floor(path.length / 2) : path.length - 1, Math.ceil(4 * rBody));
+        let ci = -1, dmax = 0;
+        for (let i = 0; i <= reach; i++) {
+          dmax = Math.max(dmax, dt[path[i]]);
+          if (ci < 0 && dt[path[i]] >= 0.7 * rBody) ci = i;
+        }
+        if (dmax > 1.15 * rBody) continue;
+        if (ci < 0) ci = reach;
+        const c = path[ci], rc = dt[c];
+        if (rc < 1.5 || ci <= 0.5 * rc) continue;
+        for (let i = 0; i < ci; i++) cls[path[i]] = 2;
+        caps.push({ c, r: rc });
+      }
+    }
+    if (!caps.length) return mask;
+    // every ink pixel belongs to its nearest skeleton pixel: the taper's goes
+    const label = new Uint8Array(w * h);
+    const queue = new Int32Array(w * h);
+    let qh = 0, qt = 0;
+    for (let i = 0; i < skel.length; i++) if (skel[i] && mask[i]) { label[i] = cls[i]; queue[qt++] = i; }
+    while (qh < qt) {
+      const i = queue[qh++], L = label[i], x = i % w;
+      if (x > 0 && mask[i - 1] && !label[i - 1]) { label[i - 1] = L; queue[qt++] = i - 1; }
+      if (x < w - 1 && mask[i + 1] && !label[i + 1]) { label[i + 1] = L; queue[qt++] = i + 1; }
+      if (i >= w && mask[i - w] && !label[i - w]) { label[i - w] = L; queue[qt++] = i - w; }
+      if (i + w < mask.length && mask[i + w] && !label[i + w]) { label[i + w] = L; queue[qt++] = i + w; }
+    }
+    const out = new Uint8Array(mask);
+    for (let i = 0; i < out.length; i++) if (label[i] === 2) out[i] = 0;
+    for (const cap of caps) {
+      const cx = cap.c % w, cy = (cap.c / w) | 0, r = cap.r, r2 = (r + 0.5) * (r + 0.5);
+      const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(w - 1, Math.ceil(cx + r));
+      const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r2) out[y * w + x] = 1;
+        }
+      }
+    }
+    return out;
   };
 
   // Where a cut sliced through the strokes, round the sliced ends with a
