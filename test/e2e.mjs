@@ -364,23 +364,54 @@ check(cutRes.after < cutRes.before * 0.8 && cutRes.undoVisible,
   `a cut across the letter removes the far side (${cutRes.before} → ${cutRes.after} px)`);
 check(cutRes.restored > cutRes.after, `Undo cut regrows the region (${cutRes.restored} px)`);
 
-// Add part: with the mode armed, the next click merges into the current shape
+// Shift-click adds a piece: after a cut severs the right stem, a shift-click
+// on the severed stem brings just that piece back; a shift-click on ink
+// already in the shape adds nothing
 const partRes = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];
-  const cur = item.candidates[0];
-  const before = item.candidates.length;
-  document.getElementById('reviewAddPart').click();
-  const armed = ST.batch.addPartMode && document.getElementById('reviewAddPart').classList.contains('on');
-  const n = ST.batch.clickTrace(item.lastClick.x, item.lastClick.y);
-  const merged = item.candidates[0];
+  const whole = item.candidates[0];
+  const before = ST.raster.count(whole.mask);
+  const cx = item.lastClick.x, cy = item.lastClick.y;
+  ST.batch.addCut(cx + 45, cy - 260, cx + 45, cy + 260);
+  const cut = ST.raster.count(item.candidates[0].mask);
+  const same = ST.batch.addPart(cx, cy);
+  const afterSame = ST.raster.count(item.candidates[0].mask);
+  // the rightmost ink of the whole N level with the click: its right stem
+  const row = Math.round(cy - whole.crop.y);
+  let tx = -1;
+  for (let x = whole.w - 1; x >= 0; x--) if (whole.mask[row * whole.w + x]) { tx = x; break; }
+  const target = { x: whole.crop.x + tx - 6, y: cy };
+  const cnv = document.getElementById('reviewSource');
+  const rect = cnv.getBoundingClientRect();
+  const s = Math.min(cnv.width / item.canvas.width, cnv.height / item.canvas.height);
+  const ox = (cnv.width - item.canvas.width * s) / 2, oy = (cnv.height - item.canvas.height * s) / 2;
   return {
-    armed, n, before, after: item.candidates.length, kind: merged.kind, disarmed: !ST.batch.addPartMode,
-    ink: ST.raster.count(merged.mask), curInk: ST.raster.count(cur.mask), paths: merged.paths.length,
+    before, cut, same, afterSame, target,
+    screen: {
+      x: rect.left + (ox + target.x * s) * (rect.width / cnv.width),
+      y: rect.top + (oy + target.y * s) * (rect.height / cnv.height),
+    },
   };
 });
-check(partRes.armed && partRes.n === 1 && partRes.after === partRes.before && partRes.kind === 'parts' && partRes.disarmed,
-  'Add part merges the next click into the current shape as one glyph');
-check(partRes.ink >= partRes.curInk * 0.98 && partRes.paths >= 1, `merged shape keeps all the ink (${partRes.ink} px, ${partRes.paths} contour(s))`);
+check(partRes.same === 0 && partRes.afterSame === partRes.cut, 'shift-click on ink already in the shape adds nothing');
+await page.keyboard.down('Shift');
+await page.mouse.click(partRes.screen.x, partRes.screen.y);
+await page.keyboard.up('Shift');
+await page.waitForTimeout(400);
+const merged = await page.evaluate(() => {
+  const item = ST.batch.queue[ST.batch.idx];
+  const c = item.candidates[0];
+  return { kind: c.kind, ink: ST.raster.count(c.mask), parts: (item.parts || []).length, paths: c.paths.length };
+});
+check(merged.kind === 'parts' && merged.parts === 1 && merged.ink > partRes.cut * 1.25 && merged.ink >= partRes.before * 0.85,
+  `shift-click brings the severed stem back into the shape (${partRes.cut} → ${merged.ink} px of ${partRes.before})`);
+const undone = await page.evaluate(() => {
+  ST.batch.undoCut();
+  const item = ST.batch.queue[ST.batch.idx];
+  return { ink: ST.raster.count(item.candidates[0].mask), cuts: item.cuts.length, parts: item.parts.length };
+});
+check(undone.cuts === 0 && undone.parts === 1 && undone.ink >= partRes.before * 0.95,
+  `Undo cut after a shift-click restores the whole letter (${undone.ink} px)`);
 
 // isolate: template-guided trim of the typed character
 const isoRes = await page.evaluate(() => {

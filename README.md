@@ -93,8 +93,12 @@ where a cut sliced a stroke flat, the sliced face is capped the same way.
 swaps it in whenever that sequence is typed (a GSUB `liga`/`rlig` lookup,
 so it also fires in Illustrator, Figma, and browsers with tracking applied).
 A character in pieces — the stem and point of a "!", an "i" and its dot —
-is assembled with **Add part**: click the other piece and both are traced as
-one glyph.
+is assembled by **shift-clicking** the other piece: only the new ink under
+that click joins the shape, so a neighbor it touches stays out. The same
+shift-click puts back a bit that the extraction, a cut or Isolate left out,
+and the pieces are remembered when the shape is rebuilt by the Detail knob,
+a cut, an undo or an Isolate. In the studio, shift-click with the Click tool
+scans another piece into the same loop.
 
 ## The optical fitting
 

@@ -772,7 +772,7 @@
     if (ev.button !== 0 || cap.step === 'flatten') return;
 
     if (cap.tool === 'click') {
-      cap.clickTrace(ip);
+      if (ev.shiftKey) cap.addPart(ip); else cap.clickTrace(ip);
       return;
     }
     if (cap.blockArmed) {
@@ -908,7 +908,7 @@
       const el = $(id);
       if (el) el.classList.toggle('on', tool === t);
     }
-    if (tool === 'click' && cap.img) setHint('Click the middle of a letterform to trace it.');
+    if (tool === 'click' && cap.img) setHint('Click the middle of a letterform to trace it. Shift-click adds another piece of it.');
   }
   cap.setTool = setTool;
 
@@ -931,6 +931,32 @@
     cap.ink.seeds = [res.seed];
     cap.ink.tol = ST.clamp(Math.round((res.tolerance - 8) / 3.4), 2, 90);
     const tolEl = $('#inkTol'); if (tolEl) tolEl.value = cap.ink.tol;
+    syncInkMode('color');
+    updateSeedChips();
+    runExtraction(false);
+    return true;
+  };
+
+  // Shift-click with the Click tool: scan another piece of the same
+  // character. The loop grows to hold both pieces and the new piece's paint
+  // color counts alongside the first.
+  cap.addPart = function (ip) {
+    if (!cap.img) return false;
+    if (cap.lasso.length < 3) return cap.clickTrace(ip);
+    const res = ST.extract.seeded(cap.img, ip.x, ip.y, { smoothing: cap.ink.smoothing });
+    if (!res) {
+      ST.toast('Nothing paint-like under that click — try the middle of the piece.', 'warn');
+      return false;
+    }
+    const b = V.bounds(cap.lasso);
+    const r = res.region;
+    const x0 = Math.min(b.x0, r.x), y0 = Math.min(b.y0, r.y);
+    const x1 = Math.max(b.x1, r.x + r.w), y1 = Math.max(b.y1, r.y + r.h);
+    cap.lasso = [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+    cap.polyPts = null;
+    const s = res.seed;
+    const known = cap.ink.seeds.some((q) => ST.raster.colorDist(q.r, q.g, q.b, s.r, s.g, s.b) < 12);
+    if (!known) cap.ink.seeds.push(s);
     syncInkMode('color');
     updateSeedChips();
     runExtraction(false);

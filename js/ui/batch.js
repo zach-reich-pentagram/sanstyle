@@ -234,11 +234,11 @@
       $('#reviewAccept').disabled = false;
       $('#reviewIsolate').disabled = false;
       $('#reviewAlt').disabled = item.candidates.length < 2;
-      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (two parts)' }[cand.kind] || '';
+      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (with added pieces)' }[cand.kind] || '';
       $('#reviewHint').textContent =
         `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote} · type the character (two letters for a ligature) and add it. ` +
         'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate. ' +
-        'Missing a piece (a dot, a point)? Add part, then click it.';
+        'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it.';
     }
     // draw any cuts on the photo pane
     if (item.cuts && item.cuts.length) {
@@ -263,7 +263,7 @@
   function smoothingFor(item) { return 9 - (item.detail || 5); }
   batch.smoothingFor = smoothingFor;
 
-  batch.clickTrace = function (x, y) {
+  batch.clickTrace = function (x, y, opts) {
     const item = batch.queue[batch.idx];
     if (!item) return 0;
     item.lastClick = { x, y };
@@ -273,40 +273,106 @@
       return 0;
     }
     if (res.click) item.lastClick = res.click;
-    if (batch.addPartMode) {
-      batch.addPartMode = false;
-      $('#reviewAddPart').classList.remove('on');
-      const cur = item.candidates[item.ci];
-      const part = res.candidates[res.candidates.length - 1];
-      if (cur && part) {
-        item.candidates[item.ci] = mergeCandidates(cur, part);
-        renderCurrent();
-        ST.toast('Part added to the character.');
-        return 1;
-      }
-    }
+    // a plain click starts over on the letter under it; the internal
+    // re-traces (Detail, cuts, undo) keep the shift-clicked pieces
+    if (!(opts && opts.keepParts)) item.parts = [];
     item.candidates = res.candidates.concat(item.candidates);
     item.ci = 0;
     renderCurrent();
     return res.candidates.length;
   };
 
-  // Two pieces of one character (an i and its dot, a ! and its point): one
-  // shape spanning both crops, retraced as a whole.
-  function mergeCandidates(a, b) {
-    const x0 = Math.min(a.crop.x, b.crop.x), y0 = Math.min(a.crop.y, b.crop.y);
-    const x1 = Math.max(a.crop.x + a.crop.w, b.crop.x + b.crop.w), y1 = Math.max(a.crop.y + a.crop.h, b.crop.y + b.crop.h);
+  // Shift-click: merge the paint under the click into the current shape —
+  // a detached piece (the dot of an i, the point of a !) or a bit that the
+  // extraction, a cut or Isolate left out. Only the new ink connected to
+  // the click joins; a neighbor that piece touches stays out.
+  function mergePart(cur, part, raw, snapped, sw) {
+    const x0 = Math.min(cur.crop.x, part.crop.x), y0 = Math.min(cur.crop.y, part.crop.y);
+    const x1 = Math.max(cur.crop.x + cur.crop.w, part.crop.x + part.crop.w);
+    const y1 = Math.max(cur.crop.y + cur.crop.h, part.crop.y + part.crop.h);
     const w = x1 - x0, h = y1 - y0;
-    const mask = new Uint8Array(w * h);
-    for (const c of [a, b]) {
+    const base = new Uint8Array(w * h), fresh = new Uint8Array(w * h);
+    const paint = (c, into) => {
       for (let y = 0; y < c.h; y++) {
         for (let x = 0; x < c.w; x++) {
-          if (c.mask[y * c.w + x]) mask[(y + c.crop.y - y0) * w + (x + c.crop.x - x0)] = 1;
+          if (c.mask[y * c.w + x]) into[(y + c.crop.y - y0) * w + (x + c.crop.x - x0)] = 1;
         }
       }
-    }
+    };
+    paint(cur, base);
+    paint(part, fresh);
+    for (let i = 0; i < fresh.length; i++) if (base[i]) fresh[i] = 0;
+    // the new ink nearest the click — the raw click first, then where it
+    // snapped to (the snap may have jumped onto ink already in the shape)
+    const reach = Math.max(4, Math.round(sw * 0.75));
+    const nearestFresh = (px, py) => {
+      const cx = Math.round(px) - x0, cy = Math.round(py) - y0;
+      let best = null, bestD = Infinity;
+      for (let y = Math.max(0, cy - reach); y <= Math.min(h - 1, cy + reach); y++) {
+        for (let x = Math.max(0, cx - reach); x <= Math.min(w - 1, cx + reach); x++) {
+          if (!fresh[y * w + x]) continue;
+          const d = (x - cx) ** 2 + (y - cy) ** 2;
+          if (d < bestD) { bestD = d; best = { x, y }; }
+        }
+      }
+      return best;
+    };
+    const at = nearestFresh(raw.x, raw.y) || nearestFresh(snapped.x, snapped.y);
+    if (!at) return null;
+    const piece = ST.raster.floodFrom(w, h, at.x, at.y, (i) => fresh[i] === 1);
+    if (!piece.count) return null;
+    let mask = new Uint8Array(w * h);
+    for (let i = 0; i < mask.length; i++) mask[i] = base[i] || piece.mask[i] ? 1 : 0;
+    // heal the seam where the piece meets the shape
+    const r = Math.max(1, Math.min(6, Math.round(sw * 0.3)));
+    mask = ST.raster.close(mask, w, h, r);
     const paths = ST.trace.vectorize(mask, w, h, {});
+    if (!paths.length) return null;
     return { crop: { x: x0, y: y0, w, h }, mask, w, h, paths, kind: 'parts' };
+  }
+
+  batch.addPart = function (x, y, opts) {
+    const o = opts || {};
+    const item = batch.queue[batch.idx];
+    if (!item) return 0;
+    const cur = item.candidates[item.ci];
+    if (!cur) return batch.clickTrace(x, y);
+    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null, smoothing: smoothingFor(item) });
+    if (!res) {
+      if (!o.quiet) ST.toast('Nothing paint-like under that click — try the middle of the piece.', 'warn');
+      return 0;
+    }
+    const whole = res.candidates[res.candidates.length - 1];
+    const sw = ST.raster.strokeWidth(cur.mask, cur.w, cur.h);
+    const merged = mergePart(cur, whole, { x, y }, res.click || { x, y }, sw);
+    if (!merged) {
+      if (!o.quiet) ST.toast('That piece is already part of the shape.');
+      return 0;
+    }
+    item.candidates[item.ci] = merged;
+    if (!o.replay) {
+      item.parts = (item.parts || []).concat([{ x, y }]);
+      const keep = $('#reviewChar').value;
+      renderCurrent();
+      $('#reviewChar').value = keep;
+      syncIsolateLabel();
+      ST.toast('Piece added to the shape.');
+    }
+    return 1;
+  };
+
+  // Shift-clicked pieces are remembered, so a Detail change, a cut, an undo
+  // or an Isolate can rebuild the shape and put them back.
+  function reapplyParts(item) {
+    let n = 0;
+    for (const p of item.parts || []) n += batch.addPart(p.x, p.y, { replay: true, quiet: true });
+    if (n) {
+      const keep = $('#reviewChar').value;
+      renderCurrent();
+      $('#reviewChar').value = keep;
+      syncIsolateLabel();
+    }
+    return n;
   }
 
   // Re-extract the current photo at a new Detail setting: the automatic
@@ -321,8 +387,9 @@
     const res = ST.auto.processImage(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
     item.candidates = res.candidates;
     item.ci = 0;
-    if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y);
+    if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
     else renderCurrent();
+    reapplyParts(item);
     $('#reviewChar').value = keep;
     syncIsolateLabel();
     if (wasIsolated && keep.trim()) batch.isolate();
@@ -371,8 +438,9 @@
     const cut = { x0, y0, x1, y1, width: cutWidthFor(item) };
     item.cuts.push(cut);
     const seed = keepSideSeed(item, cut);
-    let n = batch.clickTrace(seed.x, seed.y);
-    if (!n && item.lastClick) n = batch.clickTrace(item.lastClick.x, item.lastClick.y);
+    let n = batch.clickTrace(seed.x, seed.y, { keepParts: true });
+    if (!n && item.lastClick) n = batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
+    reapplyParts(item);
     $('#reviewUndoCut').style.display = '';
     return n > 0;
   };
@@ -381,8 +449,10 @@
     const item = batch.queue[batch.idx];
     if (!item || !item.cuts || !item.cuts.length) return;
     item.cuts.pop();
-    if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y);
-    else renderCurrent();
+    if (item.lastClick) {
+      batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
+      reapplyParts(item);
+    } else renderCurrent();
     if (!item.cuts.length) $('#reviewUndoCut').style.display = 'none';
   };
 
@@ -422,6 +492,7 @@
     const crop = { x: cand.crop.x + x0, y: cand.crop.y + y0, w: cw, h: chh };
     item.candidates.unshift({ crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated' });
     item.ci = 0;
+    reapplyParts(item);
     const keep = $('#reviewChar').value;
     renderCurrent();
     $('#reviewChar').value = keep;
@@ -452,7 +523,7 @@
     const item = batch.queue[batch.idx];
     if (!item || e.button !== 0) return;
     const p = paneToCanvas(e);
-    paneDrag = { start: p, last: p, moved: false };
+    paneDrag = { start: p, last: p, moved: false, shift: e.shiftKey };
     $('#reviewSource').setPointerCapture(e.pointerId);
   }
 
@@ -487,7 +558,9 @@
       if (inside(d.start) || inside(d.last)) batch.addCut(d.start.x, d.start.y, d.last.x, d.last.y);
       else renderCurrent();
     } else if (inside(d.start)) {
-      batch.clickTrace(d.start.x, d.start.y);
+      // shift-click adds a piece to the shape; a plain click traces afresh
+      if (d.shift || e.shiftKey) batch.addPart(d.start.x, d.start.y);
+      else batch.clickTrace(d.start.x, d.start.y);
     }
   }
 
@@ -601,11 +674,6 @@
     $('#reviewClose').addEventListener('click', batch.close);
     $('#reviewIsolate').addEventListener('click', batch.isolate);
     $('#reviewUndoCut').addEventListener('click', batch.undoCut);
-    $('#reviewAddPart').addEventListener('click', () => {
-      batch.addPartMode = !batch.addPartMode;
-      $('#reviewAddPart').classList.toggle('on', batch.addPartMode);
-      if (batch.addPartMode) ST.toast('Now click the other piece of this character in the photo.');
-    });
     $('#reviewDetail').addEventListener('input', ST.debounce((e) => batch.setDetail(+e.target.value), 220));
     const pane = $('#reviewSource');
     pane.addEventListener('pointerdown', onPanePointerDown);
