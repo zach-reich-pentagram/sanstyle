@@ -386,7 +386,9 @@
    */
   cls.isolate = function (mask, w, h, ch, cx, cy, minScore) {
     const found = cls.locate(mask, w, h, ch, { cx, cy });
-    if (!found || found.score < (minScore == null ? 0.45 : minScore)) return null;
+    // a handstyle rarely matches a font closely; the box only guides which
+    // strokes count as neighbors, so a loose match is still useful
+    if (!found || found.score < (minScore == null ? 0.3 : minScore)) return null;
     const b = found.box;
     const mx = Math.round(b.w * 0.07), my = Math.round(b.h * 0.07);
     const x0 = Math.max(0, b.x - mx), x1 = Math.min(w, b.x + b.w + mx);

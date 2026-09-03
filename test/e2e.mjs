@@ -364,6 +364,24 @@ check(cutRes.after < cutRes.before * 0.8 && cutRes.undoVisible,
   `a cut across the letter removes the far side (${cutRes.before} → ${cutRes.after} px)`);
 check(cutRes.restored > cutRes.after, `Undo cut regrows the region (${cutRes.restored} px)`);
 
+// Add part: with the mode armed, the next click merges into the current shape
+const partRes = await page.evaluate(() => {
+  const item = ST.batch.queue[ST.batch.idx];
+  const cur = item.candidates[0];
+  const before = item.candidates.length;
+  document.getElementById('reviewAddPart').click();
+  const armed = ST.batch.addPartMode && document.getElementById('reviewAddPart').classList.contains('on');
+  const n = ST.batch.clickTrace(item.lastClick.x, item.lastClick.y);
+  const merged = item.candidates[0];
+  return {
+    armed, n, before, after: item.candidates.length, kind: merged.kind, disarmed: !ST.batch.addPartMode,
+    ink: ST.raster.count(merged.mask), curInk: ST.raster.count(cur.mask), paths: merged.paths.length,
+  };
+});
+check(partRes.armed && partRes.n === 1 && partRes.after === partRes.before && partRes.kind === 'parts' && partRes.disarmed,
+  'Add part merges the next click into the current shape as one glyph');
+check(partRes.ink >= partRes.curInk * 0.98 && partRes.paths >= 1, `merged shape keeps all the ink (${partRes.ink} px, ${partRes.paths} contour(s))`);
+
 // isolate: template-guided trim of the typed character
 const isoRes = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];
@@ -565,6 +583,30 @@ await page.waitForTimeout(150);
 queued = await page.evaluate(() => __st.state().queue);
 check(queued === 0, 'Skip removes the photo from the queue');
 
+// Detail knob re-extracts; a cut with no click keeps the bigger side
+const cutSide = await page.evaluate(() => {
+  const wall = ST.demo.makeWall('L', 321);
+  ST.batch.addCanvas(wall.canvas, 'cut-l');
+  ST.batch.reopen();
+  const item = ST.batch.queue[ST.batch.idx];
+  ST.batch.setDetail(8);
+  const detail = { detail: item.detail, slider: document.getElementById('reviewDetail').value, n: item.candidates.length };
+  const cand = item.candidates[0];
+  const bb = ST.raster.maskBounds(cand.mask, cand.w, cand.h);
+  // a level cut through the L's stem a fifth of the way down: the top
+  // fifth is the small piece, the rest of the stem plus the foot the letter
+  const y = cand.crop.y + bb.y0 + bb.h * 0.2;
+  const before = ST.raster.count(cand.mask);
+  ST.batch.addCut(cand.crop.x + bb.x0 - 10, y, cand.crop.x + bb.x1 + 10, y);
+  const after = item.candidates[0];
+  const abb = ST.raster.maskBounds(after.mask, after.w, after.h);
+  ST.batch.skip();
+  return { detail, before, after: ST.raster.count(after.mask), keptTop: after.crop.y + abb.y0, cutY: y };
+});
+check(cutSide.detail.detail === 8 && cutSide.detail.slider === '8' && cutSide.detail.n >= 1, 'Detail knob re-extracts the photo at the new setting');
+check(cutSide.after < cutSide.before && cutSide.after > cutSide.before * 0.5 && cutSide.keptTop > cutSide.cutY - 5,
+  `a cut with no click keeps the larger side (${cutSide.before} → ${cutSide.after} px; kept piece starts below the cut)`);
+
 // ---- live font + variant cycling ---------------------------------------------
 console.log('\n— live font, cycling, kerning');
 await page.waitForFunction(() => __st.state().glyphsMapped >= 14 && __st.fontB64(), { timeout: 15000 });
@@ -637,6 +679,85 @@ await page.evaluate(() => {
 });
 await page.waitForTimeout(350);
 await page.screenshot({ path: path.join(SHOTS, 'tester.png') });
+
+// ---- ligatures, weight slider, source popup ----------------------------------
+console.log('\n— ligatures, weight slider, source popup');
+const ligRes = await page.evaluate(async () => {
+  const P = (x, y) => ({ x, y });
+  const line = (a, b) => [a, P(a.x + (b.x - a.x) / 3, a.y + (b.y - a.y) / 3), P(a.x + 2 * (b.x - a.x) / 3, a.y + 2 * (b.y - a.y) / 3), b];
+  const rect = (x0, y0, x1, y1) => ({ cubics: [line(P(x0, y0), P(x1, y0)), line(P(x1, y0), P(x1, y1)), line(P(x1, y1), P(x0, y1)), line(P(x0, y1), P(x0, y0))] });
+  const M = ST.metrics;
+  // an "a" in two weights, plus an "ar" ligature drawn as one wide block
+  const thin = M.buildRecord('a', [rect(0, 0, 16, 100)]);
+  const fat = M.buildRecord('a', [rect(0, 0, 70, 100)]);
+  const lig = M.buildRecord('ar', [rect(0, 0, 400, 100)]);
+  ST.store.addVariant('a', thin);
+  ST.store.addVariant('a', fat);
+  ST.store.addVariant('ar', lig);
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  await ST.sources.put(lig.id, png);
+  await ST.fontlive.rebuild();
+  await document.fonts.ready;
+  const t = document.getElementById('tester');
+  t.textContent = 'ar a r';
+  ST.fontlive.rewrap();
+  const spans = Array.from(document.querySelectorAll('#tester span.tl'));
+  const c = document.createElement('canvas').getContext('2d');
+  c.font = '100px SanstyleLive';
+  const w = (s) => c.measureText(s).width;
+  return {
+    ids: { thin: thin.id, fat: fat.id, lig: lig.id }, png,
+    spans: spans.map((s) => ({ text: s.textContent, lig: s.dataset.lig || null, i: s.dataset.i })),
+    wAR: w('ar'), wA: w('a'), wR: w('r'), ligAdvance: M.finalizeVariant(lig).advance,
+    coverage: document.getElementById('coverage').textContent,
+    meta: document.getElementById('compileMeta').textContent,
+    fromLoaded: (await ST.sources.get(lig.id)) === png,
+  };
+});
+check(ligRes.spans.length === 5 && ligRes.spans[0].lig === 'ar' && ligRes.spans[0].text === 'ar' && ligRes.spans[2].text === 'a' && ligRes.spans[2].i === '3',
+  `tester keeps a captured ligature's letters in one span (${ligRes.spans.map((s) => s.text).join('|')})`);
+check(Math.abs(ligRes.wAR - ligRes.ligAdvance / 10) < 3 && Math.abs(ligRes.wAR - (ligRes.wA + ligRes.wR)) > 20,
+  `typing "ar" shapes the ligature glyph through GSUB (${ligRes.wAR.toFixed(1)} px = its advance ${(ligRes.ligAdvance / 10).toFixed(1)}, not a+r ${(ligRes.wA + ligRes.wR).toFixed(1)})`);
+check(ligRes.coverage === 'Missing: r', `coverage counts the r inside "ar" as covered (“${ligRes.coverage}”)`);
+check(ligRes.meta.includes('1 ligature'), `tester meta lists the ligature (“${ligRes.meta}”)`);
+check(ligRes.fromLoaded, 'source crop stored and read back');
+
+await page.check('#weightToggle');
+await page.waitForTimeout(500);
+const weightOn = await page.evaluate(() => ({
+  sets: ST.fontlive.glyphMaps.length,
+  cycleParked: document.getElementById('cycleToggle').disabled,
+  rangeOn: !document.getElementById('weightRange').disabled,
+}));
+check(weightOn.sets === 1 && weightOn.cycleParked && weightOn.rangeOn, 'weight mode compiles one set and parks variant cycling');
+await page.fill('#weightRange', '0');
+await page.waitForTimeout(500);
+const lightPick = await page.evaluate(() => ST.fontlive.glyphMaps[0].get(97).id);
+await page.fill('#weightRange', '100');
+await page.waitForTimeout(500);
+const heavyPick = await page.evaluate(() => ({ id: ST.fontlive.glyphMaps[0].get(97).id, meta: document.getElementById('compileMeta').textContent }));
+check(lightPick === ligRes.ids.thin && heavyPick.id === ligRes.ids.fat, 'weight slider swaps the a from its thin variant to its fat one');
+check(heavyPick.meta.includes('weight 100%'), `tester meta reports the weight (“${heavyPick.meta}”)`);
+await page.uncheck('#weightToggle');
+await page.waitForTimeout(500);
+const weightOff = await page.evaluate(() => ({ sets: ST.fontlive.glyphMaps.length, id: ST.fontlive.glyphMaps[0].get(97).id }));
+check(weightOff.sets > 1 && weightOff.id === ligRes.ids.fat, 'weight off: active picks and cycling alternates return');
+
+await page.locator('#tester span.tl').first().hover();
+await page.waitForSelector('.src-pop.on', { timeout: 3000 });
+const popInfo = await page.evaluate(() => {
+  const p = document.querySelector('.src-pop.on');
+  return p ? { src: p.querySelector('img').src, label: p.querySelector('.src-pop-label').textContent } : null;
+});
+check(popInfo && popInfo.src === ligRes.png && popInfo.label === 'ar', 'hovering a letterform pops up the photo it was cut from');
+await page.mouse.move(5, 5);
+await page.waitForTimeout(150);
+check(await page.evaluate(() => !document.querySelector('.src-pop.on')), 'the popup hides when the pointer leaves');
+await page.evaluate(() => {
+  const t = document.getElementById('tester');
+  t.textContent = 'SANS\nSTYLE 5#';
+  ST.fontlive.rewrap();
+});
 
 // ---- exports --------------------------------------------------------------------
 console.log('\n— exports');

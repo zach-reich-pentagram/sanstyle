@@ -156,8 +156,8 @@
 
   // ---------- rendering ----------
   function syncIsolateLabel() {
-    const ch = ($('#reviewChar').value || '').slice(-1);
-    $('#reviewIsolate').textContent = ch && ch !== ' ' ? `Isolate “${ch}”` : 'Isolate';
+    const key = batch.charKey($('#reviewChar').value);
+    $('#reviewIsolate').textContent = key.length === 1 ? `Isolate “${key}”` : 'Isolate';
   }
 
   function renderCurrent() {
@@ -222,6 +222,7 @@
     const input = $('#reviewChar');
     input.value = '';
     syncIsolateLabel();
+    $('#reviewDetail').value = item.detail || 5;
     $('#reviewUndoCut').style.display = item.cuts && item.cuts.length ? '' : 'none';
     if (!cand) {
       $('#reviewHint').textContent =
@@ -233,10 +234,11 @@
       $('#reviewAccept').disabled = false;
       $('#reviewIsolate').disabled = false;
       $('#reviewAlt').disabled = item.candidates.length < 2;
-      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)' }[cand.kind] || '';
+      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (two parts)' }[cand.kind] || '';
       $('#reviewHint').textContent =
-        `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote} · type the character and add it. ` +
-        'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate.';
+        `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote} · type the character (two letters for a ligature) and add it. ` +
+        'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate. ' +
+        'Missing a piece (a dot, a point)? Add part, then click it.';
     }
     // draw any cuts on the photo pane
     if (item.cuts && item.cuts.length) {
@@ -256,20 +258,74 @@
 
   // ---------- click-to-trace, cut, isolate ----------
   // Click-to-trace: canvas-pixel coordinates on the current photo.
+  // The review's Detail knob (1–9) is the extraction's smoothing, inverted:
+  // low detail heals gaps and smooths hard, high detail keeps every nuance.
+  function smoothingFor(item) { return 9 - (item.detail || 5); }
+  batch.smoothingFor = smoothingFor;
+
   batch.clickTrace = function (x, y) {
     const item = batch.queue[batch.idx];
     if (!item) return 0;
     item.lastClick = { x, y };
-    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null });
+    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null, smoothing: smoothingFor(item) });
     if (!res) {
       ST.toast('Nothing paint-like under that click — try the middle of a stroke.', 'warn');
       return 0;
     }
     if (res.click) item.lastClick = res.click;
+    if (batch.addPartMode) {
+      batch.addPartMode = false;
+      $('#reviewAddPart').classList.remove('on');
+      const cur = item.candidates[item.ci];
+      const part = res.candidates[res.candidates.length - 1];
+      if (cur && part) {
+        item.candidates[item.ci] = mergeCandidates(cur, part);
+        renderCurrent();
+        ST.toast('Part added to the character.');
+        return 1;
+      }
+    }
     item.candidates = res.candidates.concat(item.candidates);
     item.ci = 0;
     renderCurrent();
     return res.candidates.length;
+  };
+
+  // Two pieces of one character (an i and its dot, a ! and its point): one
+  // shape spanning both crops, retraced as a whole.
+  function mergeCandidates(a, b) {
+    const x0 = Math.min(a.crop.x, b.crop.x), y0 = Math.min(a.crop.y, b.crop.y);
+    const x1 = Math.max(a.crop.x + a.crop.w, b.crop.x + b.crop.w), y1 = Math.max(a.crop.y + a.crop.h, b.crop.y + b.crop.h);
+    const w = x1 - x0, h = y1 - y0;
+    const mask = new Uint8Array(w * h);
+    for (const c of [a, b]) {
+      for (let y = 0; y < c.h; y++) {
+        for (let x = 0; x < c.w; x++) {
+          if (c.mask[y * c.w + x]) mask[(y + c.crop.y - y0) * w + (x + c.crop.x - x0)] = 1;
+        }
+      }
+    }
+    const paths = ST.trace.vectorize(mask, w, h, {});
+    return { crop: { x: x0, y: y0, w, h }, mask, w, h, paths, kind: 'parts' };
+  }
+
+  // Re-extract the current photo at a new Detail setting: the automatic
+  // shapes again, then the last click on top of them, then the isolation
+  // that was applied — so the knob feels like it turns the shape itself.
+  batch.setDetail = function (v) {
+    const item = batch.queue[batch.idx];
+    if (!item) return;
+    item.detail = v;
+    const keep = $('#reviewChar').value;
+    const wasIsolated = !!(item.candidates[item.ci] && item.candidates[item.ci].kind === 'isolated');
+    const res = ST.auto.processImage(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+    item.candidates = res.candidates;
+    item.ci = 0;
+    if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y);
+    else renderCurrent();
+    $('#reviewChar').value = keep;
+    syncIsolateLabel();
+    if (wasIsolated && keep.trim()) batch.isolate();
   };
 
   function cutWidthFor(item) {
@@ -285,14 +341,37 @@
 
   // A cut is a short stroke drawn across a junction; ink under it is removed
   // before the region is grown again from the last click.
+  // Which side of a cut is the letter? The side the last click is on; with
+  // no click yet, the side holding more of the current shape's ink — the
+  // regrow seeds from that side's ink farthest from the cut, never from
+  // the cut's own midpoint (which lands on whichever side comes first).
+  function keepSideSeed(item, cut) {
+    if (item.lastClick) return item.lastClick;
+    const cand = item.candidates[item.ci];
+    if (!cand) return { x: (cut.x0 + cut.x1) / 2, y: (cut.y0 + cut.y1) / 2 };
+    const dx = cut.x1 - cut.x0, dy = cut.y1 - cut.y0;
+    let nA = 0, nB = 0, farA = null, farB = null, dA = -1, dB = -1;
+    for (let y = 0; y < cand.h; y += 2) {
+      for (let x = 0; x < cand.w; x += 2) {
+        if (!cand.mask[y * cand.w + x]) continue;
+        const gx = x + cand.crop.x, gy = y + cand.crop.y;
+        const side = dx * (gy - cut.y0) - dy * (gx - cut.x0); // sign = side of the cut line
+        const d = Math.abs(side) / Math.hypot(dx, dy);
+        if (side >= 0) { nA++; if (d > dA) { dA = d; farA = { x: gx, y: gy }; } }
+        else { nB++; if (d > dB) { dB = d; farB = { x: gx, y: gy }; } }
+      }
+    }
+    return (nA >= nB ? farA : farB) || { x: (cut.x0 + cut.x1) / 2, y: (cut.y0 + cut.y1) / 2 };
+  }
+
   batch.addCut = function (x0, y0, x1, y1) {
     const item = batch.queue[batch.idx];
     if (!item) return false;
     item.cuts = item.cuts || [];
-    item.cuts.push({ x0, y0, x1, y1, width: cutWidthFor(item) });
-    const click = item.lastClick || { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
-    // re-grow from the click; if the click sat on the cut, nudge off it
-    let n = batch.clickTrace(click.x, click.y);
+    const cut = { x0, y0, x1, y1, width: cutWidthFor(item) };
+    item.cuts.push(cut);
+    const seed = keepSideSeed(item, cut);
+    let n = batch.clickTrace(seed.x, seed.y);
     if (!n && item.lastClick) n = batch.clickTrace(item.lastClick.x, item.lastClick.y);
     $('#reviewUndoCut').style.display = '';
     return n > 0;
@@ -312,15 +391,18 @@
   batch.isolate = function () {
     const item = batch.queue[batch.idx];
     const cand = item && item.candidates[item.ci];
-    const ch = ($('#reviewChar').value || '').slice(-1);
-    if (!cand || !ch || ch === ' ') { ST.toast('Type the character first, then Isolate.', 'warn'); return false; }
+    const ch = batch.charKey($('#reviewChar').value);
+    if (!cand || !ch) { ST.toast('Type the character first, then Isolate.', 'warn'); return false; }
+    if (ch.length > 1) { ST.toast('Isolate works one character at a time — type just the letter to trim to.', 'warn'); return false; }
     if (!ST.classify) return false;
     const lc = item.lastClick
       ? { x: item.lastClick.x - cand.crop.x, y: item.lastClick.y - cand.crop.y }
       : { x: cand.w / 2, y: cand.h / 2 };
-    const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y);
+    // a loose match still says which strokes are the neighbor's; only a
+    // hopeless one is refused (the previous shape stays under Try another)
+    const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y, 0.18);
     if (!res) {
-      ST.toast(`Couldn't find a confident “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
+      ST.toast(`Couldn't find a “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
       return false;
     }
     // strokes that leave the box are a neighbor's: drop them at their joins
@@ -344,7 +426,12 @@
     renderCurrent();
     $('#reviewChar').value = keep;
     syncIsolateLabel();
-    ST.toast(`Isolated a “${ch}” (match ${Math.round(res.score * 100)}%).`);
+    const pct = Math.round(res.score * 100);
+    if (res.score < 0.3) {
+      ST.toast(`Trimmed to the best “${ch}” match found (only ${pct}%) — check the trace; Try another shape brings the full shape back.`, 'warn');
+    } else {
+      ST.toast(`Isolated a “${ch}” (match ${pct}%).`);
+    }
     return true;
   };
 
@@ -404,6 +491,16 @@
     }
   }
 
+  // The library key for what was typed: one character, or a ligature of
+  // two to four letters/digits ("ar", "bl", "gr").
+  batch.charKey = function (value) { return ST.metrics.charKey(value); };
+
+  // A small JPEG of the photo around the shape, kept (locally) with the
+  // letterform so the tester can show where a letter came from.
+  batch.sourceThumb = function (item, cand) {
+    return ST.capture.sourceThumb(item.canvas, cand.crop);
+  };
+
   // ---------- actions ----------
   function advance() {
     batch.idx++;
@@ -415,14 +512,15 @@
     if (!item) return false;
     const cand = item.candidates[item.ci];
     if (!cand) return false;
-    const ch = ($('#reviewChar').value || '').slice(-1);
-    if (!ch || ch === ' ') { ST.toast('Type the character first.', 'warn'); return false; }
+    const ch = batch.charKey($('#reviewChar').value);
+    if (!ch) { ST.toast('Type the character first.', 'warn'); return false; }
     const record = ST.metrics.buildRecord(ch, cand.paths);
     if (!record) { ST.toast('Could not fit that shape.', 'warn'); return false; }
     record.thumb = ST.capture.makeThumb(record);
     ST.store.addVariant(ch, record);
+    if (ST.sources) ST.sources.put(record.id, batch.sourceThumb(item, cand));
     if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
-    ST.toast(`“${ch}” added — next photo.`);
+    ST.toast(ch.length > 1 ? `“${ch}” added as a ligature — next photo.` : `“${ch}” added — next photo.`);
     advance();
     return true;
   };
@@ -503,6 +601,12 @@
     $('#reviewClose').addEventListener('click', batch.close);
     $('#reviewIsolate').addEventListener('click', batch.isolate);
     $('#reviewUndoCut').addEventListener('click', batch.undoCut);
+    $('#reviewAddPart').addEventListener('click', () => {
+      batch.addPartMode = !batch.addPartMode;
+      $('#reviewAddPart').classList.toggle('on', batch.addPartMode);
+      if (batch.addPartMode) ST.toast('Now click the other piece of this character in the photo.');
+    });
+    $('#reviewDetail').addEventListener('input', ST.debounce((e) => batch.setDetail(+e.target.value), 220));
     const pane = $('#reviewSource');
     pane.addEventListener('pointerdown', onPanePointerDown);
     pane.addEventListener('pointermove', onPanePointerMove);

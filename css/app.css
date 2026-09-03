@@ -477,6 +477,20 @@ details.adv summary { margin-top: 0; }
 .tester .cyc1 { font-family: "SanstyleCyc1", "SanstyleLive", sans-serif; }
 .tester .cyc2 { font-family: "SanstyleCyc2", "SanstyleLive", sans-serif; }
 .tester .cyc3 { font-family: "SanstyleCyc3", "SanstyleLive", sans-serif; }
+.tester .tl:hover { outline: var(--bw) dotted #bbb; }
+.src-pop {
+  position: fixed;
+  z-index: 60;
+  display: none;
+  pointer-events: none;
+  background: var(--paper);
+  border: var(--bw) solid var(--ink);
+  padding: 4px;
+}
+.src-pop.on { display: block; }
+.src-pop img { display: block; max-width: 260px; max-height: 260px; }
+.src-pop-label { text-align: center; font-size: 12px; padding-top: 3px; }
+#weightRange:disabled { opacity: 0.35; }
 .tester.kerning { cursor: pointer; }
 .tester.kerning .tl:hover { outline: var(--bw) solid #bbb; }
 .tester .kern-sel { outline: var(--bw) solid var(--ink); }

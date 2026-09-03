@@ -34,15 +34,28 @@
     return out;
   }
 
-  // Estimate the dominant tilt of stroke edges from gradient orientations.
-  // Returns degrees in (-25, 25); positive = image content tilts clockwise.
-  auto.estimateSkewAngle = function (grayRaw, w, h) {
+  // Estimate the dominant tilt of stroke edges from gradient orientations,
+  // optionally only inside `zone` (the paint's own edges — the wall's
+  // bricks, a panel's frame or a paper's edge must not straighten the
+  // letter). Returns degrees in (-25, 25), 0 when no tilt clearly
+  // dominates; positive = image content tilts clockwise.
+  //
+  // Stems and bars are read separately: the near-vertical edges say how
+  // far the letter leans, the near-horizontal ones how far its bars tilt.
+  // In a rolled photo both agree; when a piece leans on purpose the stems
+  // win, because an upright letter is what the typeface wants. Each
+  // population's tilt is the energy-weighted mean of the cluster around
+  // its mode, trusted only when that cluster holds a clear share of the
+  // population (a curvy handstyle spreads its edges over every angle and
+  // is left alone).
+  auto.estimateSkewAngle = function (grayRaw, w, h, zone) {
     const gray = boxBlur(grayRaw, w, h, 3);
-    const bins = new Float64Array(51); // -25..25 degrees, 1° bins
-    let considered = 0;
+    const binsV = new Float64Array(51), binsH = new Float64Array(51); // -25..25°, 1° bins
+    let nV = 0, nH = 0, totV = 0, totH = 0;
     for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
         const i = y * w + x;
+        if (zone && !zone[i]) continue;
         const gx =
           gray[i - w + 1] + 2 * gray[i + 1] + gray[i + w + 1] -
           gray[i - w - 1] - 2 * gray[i - 1] - gray[i + w - 1];
@@ -55,20 +68,41 @@
         // Fold onto deviation from the nearest axis (0 or 90).
         ang = ((ang % 90) + 90) % 90;      // 0..90
         if (ang > 45) ang -= 90;           // -45..45
+        const vertical = Math.abs(gx) >= Math.abs(gy); // horizontal normal = a stem's edge
+        if (vertical) totV += mag; else totH += mag;
         if (Math.abs(ang) > 25) continue;
-        bins[Math.round(ang) + 25] += mag;
-        considered++;
+        if (vertical) { binsV[Math.round(ang) + 25] += mag; nV++; } else { binsH[Math.round(ang) + 25] += mag; nH++; }
       }
     }
-    if (considered < 60) return 0;
-    // smooth the histogram a touch, then take the modal deviation
-    let best = 0, bestV = -1;
-    for (let b = 1; b < 50; b++) {
-      const v = bins[b - 1] * 0.5 + bins[b] + bins[b + 1] * 0.5;
-      if (v > bestV) { bestV = v; best = b - 25; }
-    }
-    return best;
+    const cluster = (bins, total, n) => {
+      if (n < 60 || total <= 0) return null;
+      let best = 0, bestV = -1;
+      for (let b = 2; b < 49; b++) {
+        const v = bins[b - 2] * 0.25 + bins[b - 1] * 0.5 + bins[b] + bins[b + 1] * 0.5 + bins[b + 2] * 0.25;
+        if (v > bestV) { bestV = v; best = b; }
+      }
+      let e = 0, m = 0;
+      for (let b = Math.max(0, best - 3); b <= Math.min(50, best + 3); b++) { e += bins[b]; m += bins[b] * (b - 25); }
+      return e / total >= 0.35 ? { angle: m / e, energy: e } : null;
+    };
+    const cv = cluster(binsV, totV, nV), chz = cluster(binsH, totH, nH);
+    let angle = 0;
+    if (cv && chz) {
+      angle = Math.abs(cv.angle - chz.angle) <= 3
+        ? (cv.angle * cv.energy + chz.angle * chz.energy) / (cv.energy + chz.energy)
+        : cv.angle;
+    } else if (cv) angle = cv.angle;
+    else if (chz) angle = chz.angle;
+    return Math.round(angle * 10) / 10;
   };
+
+  // The paint's edge zone: a band around the paint's boundary.
+  function edgeZone(paint, w, h) {
+    const out = ST.raster.dilate(paint, w, h, 3);
+    const inner = ST.raster.erode(paint, w, h, 3);
+    for (let i = 0; i < out.length; i++) if (inner[i]) out[i] = 0;
+    return out;
+  }
 
   // Rotate onto a canvas big enough to hold the whole photo. The corners
   // the photo no longer covers are filled with its background color, not
@@ -194,11 +228,16 @@
       sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
     }
     if (sep < 60) return null;
-    field = R.blur(field, W, H, 2);
+    // along the wall→paint axis: metallic/glossy paint shading past the
+    // paint color still counts (see raster.axisDistMap)
+    field = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, 2);
     const cands = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230]
       .filter((t) => t <= Math.max(40, sep * 0.55));
     const best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
-    return best ? best.mask : null;
+    if (!best) return null;
+    // pocks, cracks and dirt inside the paint read as paint
+    const wall = ST.extract.wallMask(data, W, H, bg, ST.extract.wallTolerance(data, W, H, bg));
+    return ST.extract.absorbDefects(best.mask, wall, W, H);
   }
 
   /**
@@ -219,18 +258,23 @@
       work = c;
     }
 
-    let angle = 0;
+    let angle = o.angle || 0;
     let ctx = work.getContext('2d');
     let img = ctx.getImageData(0, 0, work.width, work.height);
     let gray = ST.raster.luma(img.data, work.width, work.height);
 
+    // paint first, then straighten by the PAINT's own edges: the letter's
+    // stems define upright, not the wall's bricks or the paper's edge
+    let paint = paintMask(img.data, work.width, work.height);
     if (o.deskew) {
-      angle = auto.estimateSkewAngle(gray, work.width, work.height);
-      if (Math.abs(angle) >= 1.5 && Math.abs(angle) <= 22) {
+      const zone = paint ? edgeZone(paint, work.width, work.height) : null;
+      angle = auto.estimateSkewAngle(gray, work.width, work.height, zone);
+      if (Math.abs(angle) >= 1.5 && Math.abs(angle) <= 20) {
         work = rotateCanvas(work, angle);
         ctx = work.getContext('2d');
         img = ctx.getImageData(0, 0, work.width, work.height);
         gray = ST.raster.luma(img.data, work.width, work.height);
+        paint = paintMask(img.data, work.width, work.height);
       } else {
         angle = 0;
       }
@@ -256,9 +300,11 @@
     // paint vs. background by color contrast first; luminance polarity
     // guesses only as the fallback when nothing contrasts with the border
     let first = null;
-    const paint = paintMask(img.data, W, H);
     if (paint) {
-      const m = ST.raster.open(paint, W, H, 1);
+      // gap jumping (see extract.seeded): streaky strokes read as one
+      const sm = o.smoothing != null ? o.smoothing : 4;
+      const g = Math.round(Math.min(ST.raster.strokeWidth(paint, W, H) * 0.45, Math.max(W, H) * 0.02) * (sm / 4));
+      const m = ST.raster.open(g >= 2 ? ST.raster.close(paint, W, H, g) : paint, W, H, 1);
       const det = detectCandidates(m, W, H, area);
       if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length };
     }
@@ -294,6 +340,26 @@
           mask: clean, w: cw, h: ch,
           paths,
         });
+      }
+    }
+    // Standardize detail: a letter photographed from far away is small in
+    // pixels, and every smoothing radius, cap and tolerance scales with
+    // pixels — so bring the main letter up to ~520 px tall and run again.
+    // The photo taken up close and the one taken from across the street
+    // then get the same treatment.
+    if (!o.noUpscale && candidates.length) {
+      let tallest = 0;
+      for (const c of candidates) tallest = Math.max(tallest, Math.max(c.crop.h, c.crop.w * 0.8));
+      const k = Math.min(2.5, 520 / Math.max(1, tallest));
+      if (k > 1.15) {
+        const up = g.document.createElement('canvas');
+        up.width = Math.round(W * k); up.height = Math.round(H * k);
+        const uc = up.getContext('2d');
+        uc.imageSmoothingEnabled = true;
+        uc.imageSmoothingQuality = 'high';
+        uc.drawImage(work, 0, 0, up.width, up.height);
+        const again = auto.processImage(up, Object.assign({}, o, { deskew: false, noUpscale: true, angle, maxEdge: 1e9 }));
+        if (again.candidates.length) return again;
       }
     }
     return { canvas: work, angle, candidates };

@@ -154,6 +154,63 @@ function parse(bytes) {
       font.errors.push('no format-4 cmap subtable found');
     }
   }
+  // GSUB: scripts, feature tags, and every type-4 (ligature) rule
+  if (font.tables.GSUB) {
+    const o = font.tables.GSUB.offset;
+    if (u16(b, o) !== 1) font.errors.push('bad GSUB major version');
+    const sl = o + u16(b, o + 4), fl = o + u16(b, o + 6), ll = o + u16(b, o + 8);
+    font.gsubScripts = [];
+    const sc = u16(b, sl);
+    for (let i = 0; i < sc; i++) {
+      font.gsubScripts.push(tag(b, sl + 2 + i * 6));
+      const script = sl + u16(b, sl + 6 + i * 6);
+      const langSys = script + u16(b, script);
+      const nFeat = u16(b, langSys + 4);
+      if (u16(b, langSys + 2) !== 0xffff) font.errors.push('required feature index set');
+      if (nFeat < 1) font.errors.push('default LangSys lists no features');
+    }
+    font.gsubFeatures = [];
+    const fc = u16(b, fl);
+    for (let i = 0; i < fc; i++) font.gsubFeatures.push(tag(b, fl + 2 + i * 6));
+    font.ligatures = [];
+    const lc = u16(b, ll);
+    for (let i = 0; i < lc; i++) {
+      const lk = ll + u16(b, ll + 2 + i * 2);
+      const type = u16(b, lk), nSub = u16(b, lk + 4);
+      if (type !== 4) continue;
+      for (let s = 0; s < nSub; s++) {
+        const st = lk + u16(b, lk + 6 + s * 2);
+        if (u16(b, st) !== 1) { font.errors.push('unknown ligature subst format'); continue; }
+        const cov = st + u16(b, st + 2);
+        const nSets = u16(b, st + 4);
+        const covGlyphs = [];
+        if (u16(b, cov) === 1) {
+          const n = u16(b, cov + 2);
+          for (let k = 0; k < n; k++) covGlyphs.push(u16(b, cov + 4 + k * 2));
+        } else {
+          font.errors.push('test parser only reads coverage format 1');
+        }
+        for (let k = 1; k < covGlyphs.length; k++) {
+          if (covGlyphs[k] <= covGlyphs[k - 1]) { font.errors.push('coverage glyphs not ascending'); break; }
+        }
+        if (covGlyphs.length !== nSets) font.errors.push('coverage/ligature-set count mismatch');
+        for (let k = 0; k < nSets; k++) {
+          const set = st + u16(b, st + 6 + k * 2);
+          const n = u16(b, set);
+          for (let m = 0; m < n; m++) {
+            const lig = set + u16(b, set + 2 + m * 2);
+            const gid = u16(b, lig), compCount = u16(b, lig + 2);
+            const comps = [covGlyphs[k]];
+            for (let c = 1; c < compCount; c++) comps.push(u16(b, lig + 4 + (c - 1) * 2));
+            if (font.numGlyphs != null && (gid >= font.numGlyphs || comps.some((g) => g >= font.numGlyphs))) {
+              font.errors.push('ligature rule references a glyph past numGlyphs');
+            }
+            font.ligatures.push({ gid, comps });
+          }
+        }
+      }
+    }
+  }
   return font;
 }
 

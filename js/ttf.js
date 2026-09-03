@@ -235,6 +235,62 @@
     return w;
   }
 
+  // GSUB with one ligature lookup, exposed as both `liga` and `rlig` so the
+  // swap happens in every layout engine: apps that let users switch
+  // standard ligatures off keep the required ones, and browsers drop
+  // `liga` whenever letter-spacing is non-zero — but never `rlig`.
+  // ligs: [{ gid, comps: [gid, ...] }]
+  function gsubTable(ligs) {
+    const sets = new Map();
+    for (const L of ligs) {
+      if (!sets.has(L.comps[0])) sets.set(L.comps[0], []);
+      sets.get(L.comps[0]).push(L);
+    }
+    const firsts = Array.from(sets.keys()).sort((a, b) => a - b);
+    for (const f of firsts) sets.get(f).sort((a, b) => b.comps.length - a.comps.length);
+
+    // LigatureSubst format 1: header, then the sets, then the coverage
+    const sub = new W();
+    let off = 6 + 2 * firsts.length;
+    const setOffs = [], setBytes = [];
+    for (const f of firsts) {
+      const list = sets.get(f);
+      const sw = new W();
+      sw.u16(list.length);
+      let lo = 2 + 2 * list.length;
+      for (const L of list) { sw.u16(lo); lo += 4 + 2 * (L.comps.length - 1); }
+      for (const L of list) {
+        sw.u16(L.gid); sw.u16(L.comps.length);
+        for (let i = 1; i < L.comps.length; i++) sw.u16(L.comps[i]);
+      }
+      setOffs.push(off); setBytes.push(sw); off += sw.length;
+    }
+    sub.u16(1); sub.u16(off); sub.u16(firsts.length);
+    for (const so of setOffs) sub.u16(so);
+    for (const sw of setBytes) sub.bytes(sw.toU8());
+    sub.u16(1); sub.u16(firsts.length);           // coverage format 1, sorted gids
+    for (const f of firsts) sub.u16(f);
+
+    const w = new W();
+    w.u16(1); w.u16(0);                           // version 1.0
+    const scriptListOff = 10, scriptListLen = 28;
+    const featureListOff = scriptListOff + scriptListLen, featureListLen = 26;
+    w.u16(scriptListOff); w.u16(featureListOff); w.u16(featureListOff + featureListLen);
+    // ScriptList: DFLT and latn share one Script table at +14
+    w.u16(2); w.tag('DFLT'); w.u16(14); w.tag('latn'); w.u16(14);
+    w.u16(4); w.u16(0);                           // Script: default LangSys at +4, no others
+    w.u16(0); w.u16(0xffff); w.u16(2); w.u16(0); w.u16(1); // LangSys: features 0 and 1
+    // FeatureList: liga → Feature at +14, rlig → Feature at +20
+    w.u16(2); w.tag('liga'); w.u16(14); w.tag('rlig'); w.u16(20);
+    w.u16(0); w.u16(1); w.u16(0);
+    w.u16(0); w.u16(1); w.u16(0);
+    // LookupList: one type-4 lookup, its subtable at +8
+    w.u16(1); w.u16(4);
+    w.u16(4); w.u16(0); w.u16(1); w.u16(8);
+    w.bytes(sub.toU8());
+    return w;
+  }
+
   function cmapTable(cpToGid) {
     const cps = Array.from(cpToGid.keys()).sort((a, b) => a - b);
     // Segments: runs where codepoints and gids both advance by 1.
@@ -306,6 +362,32 @@
       }
       cpToGid.set(cp, gid);
     }
+    // ---- ligatures: unmapped glyphs after the character set, substituted
+    // for their letter sequence by GSUB. A member letter that isn't drawn
+    // yet still needs a glyph for the sequence to match, so it gets a
+    // .notdef box of its own.
+    const ligs = [];
+    for (const L of opts.glyphMap.ligatures || []) {
+      const comps = [];
+      for (const c of L.chars) {
+        const cp = c.codePointAt(0);
+        let gid = cpToGid.get(cp);
+        if (gid === undefined) {
+          gid = glyphs.length;
+          glyphs.push(notdefGlyph());
+          cpToGid.set(cp, gid);
+        }
+        comps.push(gid);
+      }
+      let gid = outlineGid.get(L.glyph);
+      if (gid === undefined) {
+        gid = glyphs.length;
+        glyphs.push(L.glyph);
+        outlineGid.set(L.glyph, gid);
+      }
+      ligs.push({ gid, comps });
+    }
+    const allCps = Array.from(cpToGid.keys()).sort((a, b) => a - b);
     const numGlyphs = glyphs.length;
 
     // ---- glyf + loca + per-glyph metrics
@@ -407,8 +489,8 @@
     os2.u32(1); os2.u32(0); os2.u32(0); os2.u32(0);         // unicode ranges: Basic Latin
     os2.tag('SNST');
     os2.u16(0x00c0); // fsSelection: REGULAR | USE_TYPO_METRICS
-    os2.u16(cps.length ? Math.max(0x20, cps[0]) : 0x20);
-    os2.u16(cps.length ? Math.min(0xffff, cps[cps.length - 1]) : 0x20);
+    os2.u16(allCps.length ? Math.max(0x20, allCps[0]) : 0x20);
+    os2.u16(allCps.length ? Math.min(0xffff, allCps[allCps.length - 1]) : 0x20);
     os2.i16(760);            // sTypoAscender
     os2.i16(-240);           // sTypoDescender
     os2.i16(90);             // sTypoLineGap
@@ -419,7 +501,9 @@
     os2.i16(CAP);
     os2.u16(0);      // usDefaultChar
     os2.u16(32);     // usBreakChar
-    os2.u16(1);      // usMaxContext
+    let maxContext = 1;
+    for (const L of ligs) maxContext = Math.max(maxContext, L.comps.length);
+    os2.u16(maxContext); // usMaxContext
     tables['OS/2'] = os2;
 
     const hmtx = new W();
@@ -428,6 +512,7 @@
     tables.hmtx = hmtx;
 
     tables.cmap = cmapTable(cpToGid);
+    if (ligs.length) tables.GSUB = gsubTable(ligs);
 
     const locaW = new W();
     for (const off of loca) locaW.u32(off);

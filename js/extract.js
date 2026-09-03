@@ -171,6 +171,73 @@
   }
   ex.snapToInk = snapToInk;
 
+  // How far the wall's own color wanders (grain, texture, light): the 90th
+  // percentile of the frame's border ring's distance to the background
+  // estimate, with headroom. Pixels within it read as "wall".
+  ex.wallTolerance = function (data, w, h, bg) {
+    const m = Math.max(3, Math.round(Math.min(w, h) * 0.08));
+    const step = Math.max(1, Math.round(Math.sqrt((w * h) / 60000)));
+    const vals = [];
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        if (!(x < m || y < m || x >= w - m || y >= h - m)) continue;
+        const p = (y * w + x) * 4;
+        vals.push(R.colorDist(data[p], data[p + 1], data[p + 2], bg.r, bg.g, bg.b));
+      }
+    }
+    if (!vals.length) return 40;
+    vals.sort((a, b) => a - b);
+    return Math.max(25, vals[Math.floor(vals.length * 0.9)] * 1.3);
+  };
+
+  // Wall mask: pixels within the wall's tolerance of the background color.
+  ex.wallMask = function (data, w, h, bg, tol) {
+    const d = R.colorDistMap(data, w, h, [bg]);
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) out[i] = d[i] <= tol ? 1 : 0;
+    return out;
+  };
+
+  // Surface defects: patches that are neither paint- nor wall-colored — a
+  // pock's shadow in porous concrete, a crack, a chip, dirt. A compact
+  // patch whose boundary is mostly paint is paint: the spray went over it.
+  // A patch bordered by the wall stays the wall's. A real gap or counter
+  // is wall-colored, so it is never a candidate here — and the paint's
+  // soft edge is a long thin band touching both, so it is not either.
+  ex.absorbDefects = function (paint, wall, w, h) {
+    const other = new Uint8Array(w * h);
+    let any = false;
+    for (let i = 0; i < other.length; i++) if (!paint[i] && !wall[i]) { other[i] = 1; any = true; }
+    if (!any) return paint;
+    const { labels, sizes } = R.components(other, w, h);
+    const n = sizes.length;
+    const cp = new Int32Array(n), cw = new Int32Array(n), per = new Int32Array(n);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x, L = labels[i];
+        if (!L) continue;
+        let edge = false;
+        if (x > 0) { if (paint[i - 1]) { cp[L]++; edge = true; } else if (wall[i - 1]) { cw[L]++; edge = true; } } else edge = true;
+        if (x < w - 1) { if (paint[i + 1]) { cp[L]++; edge = true; } else if (wall[i + 1]) { cw[L]++; edge = true; } } else edge = true;
+        if (y > 0) { if (paint[i - w]) { cp[L]++; edge = true; } else if (wall[i - w]) { cw[L]++; edge = true; } } else edge = true;
+        if (y < h - 1) { if (paint[i + w]) { cp[L]++; edge = true; } else if (wall[i + w]) { cw[L]++; edge = true; } } else edge = true;
+        if (edge) per[L]++;
+      }
+    }
+    const paintCount = R.count(paint);
+    const fill = new Uint8Array(n);
+    for (let L = 1; L < n; L++) {
+      const contacts = cp[L] + cw[L];
+      if (!contacts || sizes[L] > paintCount * 0.15) continue;
+      const share = cp[L] / contacts;
+      const compact = per[L] ? (4 * Math.PI * sizes[L]) / (per[L] * per[L]) : 0; // 1 = a disk
+      if (share >= 0.85 || (share >= 0.6 && compact >= 0.3)) fill[L] = 1;
+    }
+    const out = new Uint8Array(paint);
+    for (let i = 0; i < out.length; i++) if (labels[i] && fill[labels[i]]) out[i] = 1;
+    return out;
+  };
+
   // Rasterize cut strokes (canvas coords) into an exclusion mask.
   ex.cutMask = function (w, h, cuts) {
     if (!cuts || !cuts.length) return null;
@@ -216,23 +283,24 @@
     let m = R.despeckle(mask, w, h, 0.04, 24);
     const sw = R.strokeWidth(m, w, h);
     if (sm > 0) {
-      // the radius follows the knob and the photo's size, but never grows
-      // past what the THINNEST strokes can take (a chisel marker's thin
-      // side is far thinner than the average stroke): fibers and burrs are
-      // thin, so a modest disk still removes them
+      const scale = Math.max(w, h) / 700;
+      // closing heals gaps, cracks and notches: the radius follows the knob
+      // and the photo's size, up to nearly half a stroke
+      const rc = Math.max(0, Math.min(Math.round(sm * 1.6 * scale), Math.floor(sw * 0.45)));
+      // opening shaves fibers and burrs, but never thins the THINNEST
+      // strokes (a chisel marker's thin side is far thinner than the
+      // average stroke): fibers are thin, so a modest disk still removes them
       const rt = R.thinRadius(m, w, h);
-      const rBase = sm * 1.6 * (Math.max(w, h) / 700);
-      const r = Math.max(0, Math.min(Math.round(rBase), Math.floor(sw * 0.33), rt > 0 ? Math.floor(rt * 0.7) : 99));
-      if (r > 0) {
-        m = R.close(m, w, h, r);
-        m = R.open(m, w, h, r);
-      }
+      const ro = Math.max(0, Math.min(rc, rt > 0 ? Math.floor(rt * 0.7) : rc));
+      if (rc > 0) m = R.close(m, w, h, rc);
+      if (ro > 0) m = R.open(m, w, h, ro);
       if (!(opts && opts.noRound)) m = ex.roundEnds(m, w, h, null);
     }
     // fill speckle gaps — holes smaller than the pen could leave on purpose
-    // (well under a stroke width across); a counter, even a small one in a
-    // fat letter, is never that small
-    m = R.fillHoles(m, w, h, 0.06, sw > 0 ? (0.6 * sw) * (0.6 * sw) : undefined);
+    // (well under a stroke width across, more with the knob up); a counter,
+    // even a small one in a fat letter, is never that small
+    const cap = sw > 0 ? Math.pow(0.6 * sw * (0.5 + sm / 8), 2) : undefined;
+    m = R.fillHoles(m, w, h, 0.06, cap);
     m = R.despeckle(m, w, h, 0.04, 24);
     return m;
   };
@@ -587,18 +655,41 @@
         if (core.mask[i]) { r += data[p]; g += data[p + 1]; b += data[p + 2]; }
       }
       seed = { r: r / core.count, g: g / core.count, b: b / core.count };
-      field = R.colorDistMap(data, w, h, [seed]);
-      if (o.blur > 0) field = R.blur(field, w, h, o.blur);
     }
+    // the field: distance along the wall→paint axis, so metallic and glossy
+    // paint that shades and glints past the paint color still counts
+    field = bg ? R.axisDistMap(data, w, h, seed, bg) : R.colorDistMap(data, w, h, [seed]);
+    if (o.blur > 0) field = R.blur(field, w, h, o.blur);
     // never grow past the midpoint between paint and background: beyond it
     // a pixel is more paper than paint whatever the boundary looks like
     const sep = bg ? R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b) : Infinity;
     const grown = autoRegion(field, excl, w, h, x, y, { maxTol: Math.max(40, sep * 0.55) });
     if (!grown || grown.count < 40) return null;
 
-    const crop = bboxOf(grown.mask, w, h, 12);
+    // Gap jumping: dry-brush streaks and porous surfaces break a stroke
+    // into fragments a plain flood stops at. Grow again on the paint closed
+    // by up to half a stroke (scaled by the smoothing knob), so a streaky
+    // stroke reads as one — unless that suddenly pulls in far more.
+    let region = grown.mask, count = grown.count;
+    const sw0 = R.strokeWidth(grown.mask, w, h);
+    const g = Math.round(Math.min(sw0 * 0.45, Math.max(w, h) * 0.02) * (o.smoothing / 4));
+    if (g >= 2) {
+      const paintT = new Uint8Array(w * h);
+      for (let i = 0; i < paintT.length; i++) paintT[i] = field[i] <= grown.t && !(excl && excl[i]) ? 1 : 0;
+      const closed = R.close(paintT, w, h, g);
+      if (excl) for (let i = 0; i < closed.length; i++) if (excl[i]) closed[i] = 0;
+      const re = R.floodFrom(w, h, x, y, (i) => closed[i] === 1);
+      if (re.count >= count && re.count <= count * 2.5 && !leaks(re.mask, re.count, w, h, 0.35)) { region = re.mask; count = re.count; }
+    }
+
+    const crop = bboxOf(region, w, h, 12);
     if (!crop) return null;
-    const sub = cropMask(grown.mask, w, crop);
+    let sub = cropMask(region, w, crop);
+    // pocks, cracks and dirt inside the paint read as paint
+    if (bg) {
+      const wall = ex.wallMask(data, w, h, bg, ex.wallTolerance(data, w, h, bg));
+      sub = ex.absorbDefects(sub, cropMask(wall, w, crop), crop.w, crop.h);
+    }
     const lx = x - crop.x, ly = y - crop.y;
     let whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing, { noRound: o.noRound });
     // a cut slices the stroke flat; give the sliced ends a marker's round cap

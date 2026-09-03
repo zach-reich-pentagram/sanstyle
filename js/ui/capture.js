@@ -529,15 +529,16 @@
   // ---------- submit ----------
   cap.submit = function () {
     const chInput = $('#charInput');
-    const ch = chInput && chInput.value ? chInput.value.slice(-1) : '';
-    if (!ch || ch === ' ') { ST.toast('Type which character this is first.', 'warn'); return false; }
+    const ch = ST.metrics.charKey(chInput ? chInput.value : '');
+    if (!ch) { ST.toast('Type which character this is first.', 'warn'); return false; }
     if (!cap.extract || !cap.extract.paths.length) { ST.toast('Nothing traced yet.', 'warn'); return false; }
     const record = ST.metrics.buildRecord(ch, cap.extract.paths);
     if (!record) { ST.toast('Could not fit that shape.', 'warn'); return false; }
     record.thumb = makeThumb(record);
     ST.store.addVariant(ch, record);
+    if (ST.sources && cap.img && cap.extract.crop) ST.sources.put(record.id, cap.sourceThumb(cap.img, cap.extract.crop));
     const n = ST.store.count();
-    ST.toast(`“${ch}” added — ${n} character${n === 1 ? '' : 's'} in ${ST.store.state.fontName}.`);
+    ST.toast(`“${ch}” added${ch.length > 1 ? ' as a ligature' : ''} — ${n} character${n === 1 ? '' : 's'} in ${ST.store.state.fontName}.`);
     if (ST.batch && ST.batch.onStudioSubmit) ST.batch.onStudioSubmit();
     cap.lasso = [];
     cap.extract = null;
@@ -575,6 +576,23 @@
     return c.toDataURL('image/png');
   }
   cap.makeThumb = makeThumb;
+
+  // The bit of photo a letterform was cut from (crop plus a margin), as a
+  // small JPEG data URL for the tester's hover popup.
+  cap.sourceThumb = function (canvas, crop) {
+    try {
+      const pad = Math.round(Math.max(crop.w, crop.h) * 0.15);
+      const x0 = Math.max(0, crop.x - pad), y0 = Math.max(0, crop.y - pad);
+      const x1 = Math.min(canvas.width, crop.x + crop.w + pad), y1 = Math.min(canvas.height, crop.y + crop.h + pad);
+      const sw = x1 - x0, sh = y1 - y0;
+      if (sw < 1 || sh < 1) return null;
+      const s = Math.min(1, 320 / Math.max(sw, sh));
+      const c = g.document.createElement('canvas');
+      c.width = Math.max(1, Math.round(sw * s)); c.height = Math.max(1, Math.round(sh * s));
+      c.getContext('2d').drawImage(canvas, x0, y0, sw, sh, 0, 0, c.width, c.height);
+      return c.toDataURL('image/jpeg', 0.75);
+    } catch (e) { return null; }
+  };
 
   // ---------- stage drawing ----------
   function requestDraw() {

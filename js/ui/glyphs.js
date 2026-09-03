@@ -54,6 +54,9 @@
       ['Caps', ST.CHARSET.caps], ['Lowercase', ST.CHARSET.lower],
       ['Numerals', ST.CHARSET.digits], ['Marks', ST.CHARSET.marks],
     ];
+    // captured ligatures ("ar", "bl") — the font swaps them in for the sequence
+    const ligKeys = ST.store.filledChars().filter((k) => k.length > 1);
+    if (ligKeys.length) sections.push(['Ligatures', ligKeys]);
     const root = $('#glyphGrid');
     root.innerHTML = '';
     for (const [label, chars] of sections) {

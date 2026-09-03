@@ -99,8 +99,8 @@
 
   // ---------- push ----------
   function variantHash(v) {
-    // thumbs stay local; hash the synced shape of the record
-    const { thumb, ...rest } = v;
+    // thumbs and photo crops stay local; hash the synced shape of the record
+    const { thumb, source, ...rest } = v;
     return JSON.stringify(rest);
   }
 
@@ -111,7 +111,7 @@
       glyphs[ch] = {
         active: lib.glyphs[ch].active,
         variants: lib.glyphs[ch].variants.map((v) => {
-          const { thumb, ...rest } = v;
+          const { thumb, source, ...rest } = v;
           return rest;
         }),
       };

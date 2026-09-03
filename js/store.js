@@ -77,11 +77,11 @@
       try {
         localStorage.setItem(KEY, JSON.stringify(this.state));
       } catch (e) {
-        // quota: retry without thumbnails (regenerable previews) before warning
+        // quota: retry without previews (regenerable thumbs, photo crops)
         try {
           const slim = JSON.parse(JSON.stringify(this.state));
           for (const ch in slim.glyphs) {
-            for (const v of slim.glyphs[ch].variants) delete v.thumb;
+            for (const v of slim.glyphs[ch].variants) { delete v.thumb; delete v.source; }
           }
           localStorage.setItem(KEY, JSON.stringify(slim));
           if (!this._warnedSlim && ST.toast) {
@@ -126,6 +126,7 @@
     deleteVariant(ch, idx) {
       const s = this.slot(ch);
       if (!s) return;
+      if (s.variants[idx] && ST.sources) ST.sources.remove(s.variants[idx].id);
       s.variants.splice(idx, 1);
       if (!s.variants.length) delete this.state.glyphs[ch];
       else s.active = ST.clamp(s.active, 0, s.variants.length - 1);
@@ -231,6 +232,9 @@
     }
 
     clearAll() {
+      if (ST.sources) {
+        for (const ch of this.filledChars()) for (const v of this.state.glyphs[ch].variants) ST.sources.remove(v.id);
+      }
       this.state.glyphs = {};
       this.touch();
     }
@@ -238,4 +242,55 @@
 
   ST.CHARSET = CHARSET;
   ST.store = new Store();
+
+  // ---------- source crops ----------
+  // The bit of photo each letterform was cut from, keyed by variant id.
+  // Kept out of the library JSON (and out of the cloud push) in IndexedDB:
+  // a few hundred JPEG crops would blow the localStorage quota and slow
+  // every sync. Memory-only where IndexedDB is unavailable.
+  const SRC_DB = 'sanstyle.sources', SRC_STORE = 'crops';
+  const srcMem = new Map();
+  let srcDb = null;
+  function openSources() {
+    if (srcDb) return srcDb;
+    srcDb = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(SRC_DB, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(SRC_STORE);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+        req.onblocked = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+    return srcDb;
+  }
+  ST.sources = {
+    put(id, dataUrl) {
+      if (!id || !dataUrl) return Promise.resolve();
+      srcMem.set(id, dataUrl);
+      return openSources().then((db) => {
+        if (!db) return;
+        try { db.transaction(SRC_STORE, 'readwrite').objectStore(SRC_STORE).put(dataUrl, id); } catch (e) { /* read-only */ }
+      });
+    },
+    get(id) {
+      if (!id) return Promise.resolve(null);
+      if (srcMem.has(id)) return Promise.resolve(srcMem.get(id));
+      return openSources().then((db) => new Promise((resolve) => {
+        if (!db) return resolve(null);
+        try {
+          const req = db.transaction(SRC_STORE).objectStore(SRC_STORE).get(id);
+          req.onsuccess = () => { if (req.result) srcMem.set(id, req.result); resolve(req.result || null); };
+          req.onerror = () => resolve(null);
+        } catch (e) { resolve(null); }
+      }));
+    },
+    remove(id) {
+      srcMem.delete(id);
+      return openSources().then((db) => {
+        if (!db) return;
+        try { db.transaction(SRC_STORE, 'readwrite').objectStore(SRC_STORE).delete(id); } catch (e) { /* gone */ }
+      });
+    },
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -167,7 +167,7 @@
     <canvas id="previewCanvas" width="300" height="330"></canvas>
     <div class="fit-info" id="fitInfo"></div>
     <div class="tag-row">
-      <input id="charInput" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
+      <input id="charInput" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" maxlength="4" aria-label="Which character is this letterform? Two or more letters make a ligature.">
       <button id="submitBtn" class="pill primary" disabled>Add to typeface</button>
     </div>
   </aside>
@@ -217,6 +217,10 @@
       <span>Leading:</span>
       <input type="range" id="leadRange" min="0.85" max="1.8" value="1.05" step="0.05">
     </label>
+    <div class="ctl" title="Slide from the lightest captured letterforms to the heaviest. Each letter shows its variant nearest that weight; letters with one variant keep it.">
+      <label class="check-row"><input type="checkbox" id="weightToggle"><span>Weight:</span></label>
+      <input type="range" id="weightRange" min="0" max="100" value="50" step="1" disabled>
+    </div>
     <label class="ctl">
       <span>Background color:</span>
       <input type="color" id="bgColor" value="#ffffff">
@@ -382,13 +386,20 @@
       </div>
       <div class="dim" id="reviewHint"></div>
       <div class="review-actions">
+        <label class="ctl" title="Lower: smoother, gaps and cracks healed. Higher: every nuance of the shape kept.">
+          <span>Detail:</span>
+          <input type="range" id="reviewDetail" min="1" max="9" value="5" step="1">
+        </label>
+      </div>
+      <div class="review-actions">
         <label class="ctl">
           <span>Character:</span>
-          <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" aria-label="Which character is this letterform?">
+          <input id="reviewChar" class="char-input" autocomplete="off" spellcheck="false" maxlength="4" aria-label="Which character is this letterform? Two or more letters make a ligature.">
         </label>
         <button class="pill primary" id="reviewAccept">Add to typeface</button>
         <button class="pill" id="reviewIsolate" title="Trim the shape to the typed character">Isolate</button>
         <button class="pill" id="reviewAlt">Try another shape</button>
+        <button class="pill" id="reviewAddPart" title="This character has another piece (the dot of an i, the point of a !): click it in the photo next">Add part</button>
         <button class="pill" id="reviewUndoCut" style="display:none">Undo cut</button>
         <button class="pill" id="reviewEdit">Edit manually</button>
         <button class="pill" id="reviewSkip">Skip photo</button>

@@ -25,12 +25,17 @@
   live.rebuild = function () {
     const t0 = performance.now();
     const st = ST.store.state;
-    const maps = [ST.metrics.buildFontGlyphs(st.glyphs, { mirrorCase: st.mirrorCase })];
+    const tst = st.tester || {};
+    // weight mode shows, in every slot, the variant nearest the slider's
+    // target; cycling alternates would undo that, so only the base set builds
+    const wt = tst.weightOn ? (tst.weight == null ? 50 : tst.weight) / 100 : null;
+    live.weight = wt;
+    const maps = [ST.metrics.buildFontGlyphs(st.glyphs, { mirrorCase: st.mirrorCase, weight: wt })];
     let maxVariants = 1;
     for (const ch in st.glyphs) {
       maxVariants = Math.max(maxVariants, st.glyphs[ch].variants.length);
     }
-    const nMaps = Math.min(maxVariants, 1 + MAX_CYCLE_FONTS);
+    const nMaps = wt == null ? Math.min(maxVariants, 1 + MAX_CYCLE_FONTS) : 1;
     for (let k = 1; k < nMaps; k++) {
       maps.push(ST.metrics.buildFontGlyphs(st.glyphs, { mirrorCase: st.mirrorCase, variantOffset: k }));
     }
@@ -74,8 +79,13 @@
     $('#dlName').textContent = `${psName()}.ttf`;
     if (ms >= 0) {
       const alts = live.glyphMaps.length - 1;
-      $('#compileMeta').textContent =
-        `${n} character${n === 1 ? '' : 's'}${alts ? ` · ${alts} alternate set${alts === 1 ? '' : 's'}` : ''}`;
+      const ligs = live.glyphMaps[0] && live.glyphMaps[0].ligatures ? live.glyphMaps[0].ligatures.length : 0;
+      const chars = n - ligs;
+      const parts = [`${chars} character${chars === 1 ? '' : 's'}`];
+      if (ligs) parts.push(`${ligs} ligature${ligs === 1 ? '' : 's'}`);
+      if (alts) parts.push(`${alts} alternate set${alts === 1 ? '' : 's'}`);
+      if (live.weight != null) parts.push(`weight ${Math.round(live.weight * 100)}%`);
+      $('#compileMeta').textContent = parts.join(' · ');
     }
     updateCoverage();
   }
@@ -84,11 +94,16 @@
     const box = $('#coverage');
     const map = live.glyphMaps[0];
     if (!map) { box.textContent = ''; return; }
-    const text = $('#tester').textContent || '';
+    const chars = Array.from($('#tester').textContent || '');
+    const ligKeys = ST.metrics.ligatureKeys(map);
     const missing = new Set();
-    for (const ch of text) {
-      if (ch === '\n' || ch === ' ') continue;
+    for (let i = 0; i < chars.length;) {
+      const ch = chars[i];
+      if (ch === '\n' || ch === ' ') { i++; continue; }
+      const lig = ST.metrics.ligatureAt(chars, i, ligKeys);
+      if (lig) { i += lig.length; continue; }
       if (!map.has(ch.codePointAt(0))) missing.add(ch);
+      i++;
     }
     box.textContent = missing.size
       ? 'Missing: ' + Array.from(missing).slice(0, 24).join(' ')
@@ -134,44 +149,99 @@
     sel.addRange(range);
   }
 
+  // One span per glyph: a character, or a captured ligature's letters kept
+  // together so the font's substitution can fire (ligatures never form
+  // across element boundaries).
   function rewrap(preserveCaret) {
     const el = tester();
     if (!el) return;
+    hideSource();
     const text = el.textContent;
     const caret = preserveCaret ? getCaretOffset(el) : null;
     const st = ST.store.state.tester;
     const nMaps = live.glyphMaps.length;
     const cycling = st.cycle && nMaps > 1;
+    const ligKeys = ST.metrics.ligatureKeys(live.glyphMaps[0]);
     const occurrence = {};
     el.textContent = '';
     const frag = g.document.createDocumentFragment();
+    const chars = Array.from(text);
     let idx = 0;
-    for (const ch of text) {
+    for (let i = 0; i < chars.length;) {
+      const ch = chars[i];
       if (ch === '\n') {
         frag.appendChild(g.document.createTextNode('\n'));
-        idx++;
+        idx++; i++;
         continue;
       }
+      const lig = ST.metrics.ligatureAt(chars, i, ligKeys);
+      const key = lig || ch;
       const span = g.document.createElement('span');
       span.className = 'tl';
       span.dataset.i = idx;
-      span.textContent = ch;
-      if (cycling && ch !== ' ') {
-        const occ = occurrence[ch] || 0;
-        occurrence[ch] = occ + 1;
+      if (lig) span.dataset.lig = lig;
+      span.textContent = key;
+      if (cycling && key !== ' ') {
+        const occ = occurrence[key] || 0;
+        occurrence[key] = occ + 1;
         const k = occ % nMaps;
         if (k > 0) span.classList.add('cyc' + k);
       }
       const kern = live.kerns[idx];
       if (kern) span.style.marginLeft = kern + 'em';
       frag.appendChild(span);
-      idx++;
+      idx += key.length; i += key.length;
     }
     el.appendChild(frag);
     if (preserveCaret) setCaretOffset(el, caret);
     updateCoverage();
   }
   live.rewrap = rewrap;
+
+  // ---------- source popup: hover a letter, see the photo it came from ----------
+  let pop = null, popToken = 0;
+  function outlineForSpan(span) {
+    const k = +((span.className.match(/cyc(\d)/) || [0, 0])[1]);
+    const maps = [live.glyphMaps[k], live.glyphMaps[0]].filter(Boolean);
+    const lig = span.dataset.lig;
+    const cp = span.textContent.codePointAt(0);
+    for (const m of maps) {
+      const o = lig ? (m.liga && m.liga.get(lig)) : (m.has(cp) ? m.get(cp) : null);
+      if (o) return o;
+    }
+    return null;
+  }
+  function showSource(span) {
+    const outline = outlineForSpan(span);
+    hideSource();
+    if (!outline || !outline.id || !ST.sources) return;
+    const token = ++popToken;
+    ST.sources.get(outline.id).then((url) => {
+      if (token !== popToken || !url) return;
+      if (!pop) {
+        pop = ST.el('div', { class: 'src-pop' });
+        g.document.body.appendChild(pop);
+      }
+      pop.innerHTML = '';
+      pop.appendChild(ST.el('img', { src: url, alt: '' }));
+      pop.appendChild(ST.el('div', { class: 'src-pop-label' }, outline.char || ''));
+      pop.classList.add('on');
+      const r = span.getBoundingClientRect();
+      const pw = pop.offsetWidth, ph = pop.offsetHeight;
+      let x = r.left + r.width / 2 - pw / 2;
+      let y = r.top - ph - 8;
+      x = Math.max(6, Math.min(g.innerWidth - pw - 6, x));
+      if (y < 6) y = r.bottom + 8;
+      pop.style.left = x + 'px';
+      pop.style.top = y + 'px';
+    });
+  }
+  function hideSource() {
+    popToken++;
+    if (pop) pop.classList.remove('on');
+  }
+  live.showSource = showSource;
+  live.hideSource = hideSource;
 
   // ---------- kern mode ----------
   function setKernMode(on) {
@@ -218,6 +288,10 @@
     $('#trackRange').value = st.tracking;
     $('#leadRange').value = st.leading;
     $('#cycleToggle').checked = !!st.cycle;
+    $('#weightToggle').checked = !!st.weightOn;
+    $('#weightRange').value = st.weight == null ? 50 : st.weight;
+    $('#weightRange').disabled = !st.weightOn;
+    $('#cycleToggle').disabled = !!st.weightOn;
     ST.$$('.align-btn').forEach((b) => b.classList.toggle('on', b.dataset.align === st.align));
     ST.$$('.aspect-btn').forEach((b) => b.classList.toggle('on', b.dataset.aspect === st.aspect));
     if (st.aspect === 'free') {
@@ -336,6 +410,24 @@
       upd({ cycle: e.target.checked });
       rewrap();
     });
+    // weight: the font recompiles with each slot's nearest-weight variant
+    const rebuildForWeight = ST.debounce(() => live.rebuild(), 120);
+    $('#weightToggle').addEventListener('change', (e) => {
+      upd({ weightOn: e.target.checked });
+      live.rebuild();
+    });
+    $('#weightRange').addEventListener('input', (e) => {
+      upd({ weight: +e.target.value });
+      rebuildForWeight();
+    });
+
+    // hover a letterform → the photo it was cut from
+    el.addEventListener('mouseover', (e) => {
+      const span = e.target.closest && e.target.closest('span.tl');
+      if (span) showSource(span); else hideSource();
+    });
+    el.addEventListener('mouseleave', hideSource);
+    g.addEventListener('scroll', hideSource, true);
 
     $('#fontNameInput').value = ST.store.state.fontName;
     $('#fontNameInput').addEventListener('input', (e) => ST.store.setFontName(e.target.value));

@@ -215,6 +215,32 @@
     return out;
   };
 
+  // Distance to the paint measured along the wall→paint axis, with the
+  // region PAST the paint counted as paint: metallic and glossy paint
+  // (silver, chrome, gloss under light) shades and glints along that very
+  // axis — dull to bright — so a sphere around one paint color misses half
+  // of it, while a cylinder around the axis keeps it and still rejects
+  // off-axis colors (a different-colored neighbor, a halo). In redmean-
+  // weighted RGB; same units as colorDistMap, identical for pixels on the
+  // wall side of the paint. → Float32Array
+  raster.axisDistMap = function (data, w, h, paint, wall) {
+    const rm = (paint.r + wall.r) / 2;
+    const wr = Math.sqrt(2 + rm / 256), wg = 2, wb = Math.sqrt(2 + (255 - rm) / 256);
+    const ax = (paint.r - wall.r) * wr, ay = (paint.g - wall.g) * wg, az = (paint.b - wall.b) * wb;
+    const len2 = ax * ax + ay * ay + az * az;
+    if (len2 < 1) return raster.colorDistMap(data, w, h, [paint]);
+    const out = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+      const vx = (data[p] - wall.r) * wr, vy = (data[p + 1] - wall.g) * wg, vz = (data[p + 2] - wall.b) * wb;
+      let u = (vx * ax + vy * ay + vz * az) / len2;
+      const rx = vx - u * ax, ry = vy - u * ay, rz = vz - u * az; // off-axis residual
+      if (u > 1) u = 1;                                              // past the paint = paint
+      const along = (1 - u) * (1 - u) * len2;
+      out[i] = Math.sqrt(rx * rx + ry * ry + rz * rz + along);
+    }
+    return out;
+  };
+
   // Per-pixel chroma (max−min of RGB): spray and marker are chromatic,
   // walls are mostly gray — a far more reliable separator than luminance
   // whenever the paint has any color at all.

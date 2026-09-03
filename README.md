@@ -40,17 +40,28 @@ Ink controls: automatic Otsu thresholding or **Pick paint** color matching
   back through the blocked zone with a morphological inference of where the
   hidden edge continues. Brush size and bridge reach are adjustable.
 
-**Auto capture (single or batch).** Select one or many photos: each is
-auto-straightened (gradient-orientation deskew) and its paint is separated
-from the wall or paper by color contrast against the background — the paper
-is the frame's dominant color, paint is whatever contrasts most with it, and
-the threshold sits where the boundary is sharpest, never past the midpoint
-between the two. That keeps marker strokes stroke-thin on fibrous paper
-instead of swallowing the pink bleed halo around them. Everything lands in a
-review queue — the photo with the shape boxed, the traced letterform beside
-it — where you type the character and **Add**, **Skip**, or **Edit manually**
-(drops that photo into the manual studio, pre-lassoed). A photo leaves the
-queue only when its letterform was added or skipped.
+**Auto capture (single or batch).** Select one or many photos: each has its
+paint separated from the wall or paper by color contrast against the
+background — the wall is the frame's dominant color, paint is whatever
+contrasts most with it, and the threshold sits where the boundary is
+sharpest, never past the midpoint between the two. That keeps marker strokes
+stroke-thin on fibrous paper instead of swallowing the pink bleed halo
+around them. The classifier works along the wall→paint color axis, so
+metallic and glossy paint whose highlights and shading run *past* the paint
+color (silver on dark red, chrome on brick) still reads as one shape, and
+compact patches inside the paint that are neither paint nor wall — pocks,
+cracks, dirt in a porous wall — are read as paint under it, not as holes.
+Streaky strokes are jumped across at up to half a stroke width. The photo is
+then straightened by the paint's own edges (its stems set upright, not the
+wall's bricks or the paper's edge), and its resolution is normalized: a
+letter shot from across the street is brought up to the same pixel height as
+one shot up close before smoothing, so both get the same treatment.
+Everything lands in a review queue — the photo with the shape boxed, the
+traced letterform beside it — with a **Detail** knob (low heals gaps and
+smooths hard, high keeps every nuance) where you type the character and
+**Add**, **Skip**, or **Edit manually** (drops that photo into the manual
+studio, pre-lassoed). A photo leaves the queue only when its letterform was
+added or skipped.
 
 ![Review queue](docs/shots/review.png)
 
@@ -77,6 +88,14 @@ where a cut sliced a stroke flat, the sliced face is capped the same way.
 
 ![Isolate a fused 2](docs/shots/isolate-2.png)
 
+**Ligatures and two-part characters.** Type two to four letters ("ar",
+"bl", "gr") for a connected pair and it is captured as a ligature: the font
+swaps it in whenever that sequence is typed (a GSUB `liga`/`rlig` lookup,
+so it also fires in Illustrator, Figma, and browsers with tracking applied).
+A character in pieces — the stem and point of a "!", an "i" and its dot —
+is assembled with **Add part**: click the other piece and both are traced as
+one glyph.
+
 ## The optical fitting
 
 Every glyph is fitted into a 1000-UPM em by its character class (caps and
@@ -92,8 +111,9 @@ for lowercase; a tuned table for marks), then corrected:
   metrics.
 
 The compiler emits a complete TrueType font (cubic→quadratic, winding
-normalization, all ten required tables, correct checksums) and hot-swaps it
-into the page via the FontFace API in a few milliseconds.
+normalization, all ten required tables, a GSUB ligature lookup when the
+library has ligatures, correct checksums) and hot-swaps it into the page via
+the FontFace API in a few milliseconds.
 
 ## The tester
 
@@ -103,8 +123,15 @@ into the page via the FontFace API in a few milliseconds.
 - **Variant cycling** — when a character has several captured letterforms,
   repeated letters rotate through them (alternate fonts are compiled per
   variant slot), so doubles never twin. Toggleable.
+- **Weight slider** — runs from the library's lightest captured letterform
+  to its heaviest; every letter shows the variant nearest that weight, so
+  the whole line thickens as you slide (letters with one variant keep it).
+- **Where did that come from?** Hover any letterform and the bit of photo it
+  was cut from pops up (stored on this device, beside the library).
 - **Manual kerning** — hit **Kern**, click a letterform, and arrow-key it
   (shift for coarse). Esc returns to typing; kern tweaks carry into exports.
+- Captured ligatures shape as one glyph while you type, in the tester and in
+  every export.
 - Background color, text color, and alignment controls; tracking down to
   −0.25 em; canvas aspect presets (Free / iPhone / Square / 16:9 / Poster)
   for mockups.
@@ -130,8 +157,9 @@ local-only exactly as before.
 
 ## Glyphs, sharing, design
 
-The **Glyphs** tab holds the full character grid: per-slot variants,
-activation, optical nudges (size, baseline, sidebearings), delete. The
+The **Glyphs** tab holds the full character grid (plus a Ligatures row once
+you have captured any): per-slot variants, activation, optical nudges (size,
+baseline, sidebearings), delete. The
 library persists locally and round-trips through **Export / Import JSON** so
 sets can be shared and merged. The **Design** tab live-adjusts the interface
 itself — text size, padding, gaps, control height, corner radius, line
@@ -149,8 +177,9 @@ js/
   raster.js      Otsu, color match, morphology, components, fill-holes,
                  occlusion bridge
   trace.js       mask → boundary loops → corner-aware Bézier contours
-  fitting.js     char classes, overshoot, auto-spacing, variant sets
-  ttf.js         dependency-free TrueType compiler
+  fitting.js     char classes, overshoot, auto-spacing, variant sets,
+                 ligature keys, weight targeting
+  ttf.js         dependency-free TrueType compiler (+ GSUB ligatures)
   classify.js    template character classifier (local, human-confirmed)
   auto.js        deskew + letter detection for the automated lane
   heic.js        HEIC/HEIF intake (vendored libheif, lazy-loaded)
@@ -167,13 +196,16 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 30 unit tests: geometry, tracing, fitting, morphology,
-                # deskew, classifier scoring, TTF byte format, and the api
-                # routes (JWT signing verified against a real keypair,
-                # Drive calls stubbed)
+npm test        # 49 unit tests: geometry, tracing, fitting, morphology,
+                # deskew, seeded extraction, stroke-graph isolation,
+                # classifier scoring, ligature keys + GSUB, weight targeting,
+                # TTF byte format, and the api routes (JWT signing verified
+                # against a real keypair, Drive calls stubbed)
 npm run e2e     # headless Chromium: freehand + polygon lasso, flatten,
                 # pick-paint, fill-gaps, HEIC intake, auto capture + review,
-                # variant cycling, kerning, exports, TTF download — plus the
+                # click-to-trace, cuts, Isolate, Detail, variant cycling,
+                # ligature shaping, weight slider, source popup, kerning,
+                # exports, TTF download (fontTools-validated) — plus the
                 # full sync flow (gate, inbox extraction, SVG mirroring,
                 # wiped-device restore, site→Drive upload) against an
                 # in-memory mock of the api contract

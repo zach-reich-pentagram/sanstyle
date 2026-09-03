@@ -23,6 +23,10 @@
     const lineH = o.size * o.leading;
     const ascent = o.size * 0.76;
     const maps = o.glyphMaps && o.glyphMaps.length ? o.glyphMaps : [new Map()];
+    const ligKeys = ST.metrics.ligatureKeys(maps[0]);
+    const lookup = (m, key) => key.length > 1
+      ? (m.liga && m.liga.get(key)) || null
+      : (m.has(key.codePointAt(0)) ? m.get(key.codePointAt(0)) : null);
     const occurrence = {};
     const lines = [];
     let maxW = 0;
@@ -31,21 +35,20 @@
     for (const lineText of String(text).split('\n')) {
       const glyphs = [];
       let x = 0;
-      for (const ch of lineText) {
-        const cp = ch.codePointAt(0);
-        const idx = charIndex++;
+      const chars = Array.from(lineText);
+      for (let i = 0; i < chars.length;) {
+        // a captured ligature swallows its letters, like the font's GSUB does
+        const key = ST.metrics.ligatureAt(chars, i, ligKeys) || chars[i];
+        const idx = charIndex;
+        charIndex += key.length;
+        i += key.length;
         const kern = (o.kerns && o.kerns[idx]) ? o.kerns[idx] * o.size : 0;
         x += kern;
-        let outline = null;
-        if (maps[0].has(cp)) {
-          let m = maps[0];
-          if (o.cycle && maps.length > 1) {
-            const occ = occurrence[ch] || 0;
-            occurrence[ch] = occ + 1;
-            m = maps[occ % maps.length];
-            if (!m.has(cp)) m = maps[0];
-          }
-          outline = m.get(cp);
+        let outline = lookup(maps[0], key);
+        if (outline && o.cycle && maps.length > 1) {
+          const occ = occurrence[key] || 0;
+          occurrence[key] = occ + 1;
+          outline = lookup(maps[occ % maps.length], key) || outline;
         }
         if (outline) {
           glyphs.push({ outline, x });
@@ -149,6 +152,7 @@
   };
 
   ex.charLabel = function (ch) {
+    if (/^[A-Za-z0-9]{2,4}$/.test(ch)) return ch + '-liga';
     if (/^[A-Z]$/.test(ch)) return ch + '-caps';
     if (/^[a-z]$/.test(ch)) return ch + '-lower';
     if (/^[0-9]$/.test(ch)) return ch;

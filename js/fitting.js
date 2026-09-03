@@ -52,7 +52,28 @@
     '@': { top: M.CAP, bottom: -40, os: false },
   };
 
+  // The library key for what was typed: one character, or a ligature of
+  // two to four letters/digits ("ar", "bl", "gr") that the font swaps in
+  // whenever that sequence is typed.
+  M.charKey = function (value) {
+    const v = (value || '').trim();
+    if (!v) return '';
+    if (v.length >= 2 && v.length <= 4 && /^[A-Za-z0-9]+$/.test(v)) return v;
+    const ch = v.slice(-1);
+    return ch === ' ' ? '' : ch;
+  };
+
   M.classFor = function (ch) {
+    if (ch && ch.length > 1) {
+      // a ligature ("ar", "bl", "gr"): the box that spans its members —
+      // the tallest member's top, the lowest member's bottom
+      let top = -Infinity, bottom = Infinity, os = false;
+      for (const c of ch) {
+        const k = M.classFor(c);
+        top = Math.max(top, k.top); bottom = Math.min(bottom, k.bottom); os = os || k.os;
+      }
+      return { name: 'liga', top, bottom, os };
+    }
     if (PUNCT[ch]) return Object.assign({ name: 'mark' }, PUNCT[ch]);
     if (/[A-Z0-9]/.test(ch)) return { name: 'cap', top: M.CAP, bottom: 0, os: true };
     if (/[a-z]/.test(ch)) {
@@ -185,7 +206,7 @@
     if (!fitted) return null;
     const sp = M.spacing(fitted);
     const r2 = ST.round2;
-    return {
+    const rec = {
       id: ST.uid(),
       char: ch,
       contours: fitted.contours.map((c) => ({
@@ -200,6 +221,32 @@
       nudge: { scale: 0, dy: 0, dl: 0, dr: 0 },
       created: Date.now(),
     };
+    rec.weight = M.weightOf(rec);
+    return rec;
+  };
+
+  // Visual weight of a letterform: its mean stroke thickness as a fraction
+  // of its class height. For a stroke shape, ink area ≈ thickness × path
+  // length and perimeter ≈ 2 × path length, so thickness ≈ 2·area/perimeter
+  // (counters subtract from the area). Cached on the record.
+  M.weightOf = function (v) {
+    if (typeof v.weight === 'number') return v.weight;
+    const polys = ST.trace.flattenAll(v.contours, 6).filter((p) => p.length >= 3);
+    let area = 0, per = 0;
+    polys.forEach((poly, i) => {
+      const a = Math.abs(V.signedArea(poly));
+      let depth = 0;
+      for (let j = 0; j < polys.length; j++) if (j !== i && V.pointInPoly(poly[0], polys[j])) depth++;
+      area += depth % 2 ? -a : a;
+      for (let k = 0; k < poly.length; k++) {
+        const p = poly[k], q = poly[(k + 1) % poly.length];
+        per += Math.hypot(q.x - p.x, q.y - p.y);
+      }
+    });
+    const cls = M.classFor(v.char || 'A');
+    const thickness = per > 0 ? (2 * Math.max(0, area)) / per : 0;
+    v.weight = Math.round((thickness / Math.max(1, cls.top - cls.bottom)) * 1000) / 1000;
+    return v.weight;
   };
 
   // Apply manual nudges → final outline + metrics used by preview & compiler.
@@ -222,29 +269,62 @@
 
   /**
    * Assemble the compile-ready glyph set from the library.
-   * glyphsByChar: { char: {variants:[...], active: index} }
+   * glyphsByChar: { key: {variants:[...], active: index} } — a key is one
+   *   character, or a ligature's letters ("ar").
    * opts.mirrorCase: map missing case onto the drawn counterpart.
    * opts.variantOffset: rotate each slot's pick by N — used to build the
    *   alternate "cycle fonts" so repeated letters vary in the tester.
-   * Returns Map(codepoint → {contours, advance, lsb}) — shared objects when
-   * two codepoints reuse one drawing.
+   * opts.weight: 0..1 — instead of each slot's active pick, show the variant
+   *   nearest a target weight that runs from the library's lightest
+   *   letterform (0) to its heaviest (1). Slots with one variant repeat it.
+   * Returns Map(codepoint → {contours, advance, lsb, id, char, weight}) —
+   * shared objects when two codepoints reuse one drawing — with
+   * `ligatures` ([{chars, glyph}]) and `liga` (Map chars → glyph) attached.
    */
   M.buildFontGlyphs = function (glyphsByChar, opts) {
+    const o = opts || {};
     const map = new Map();
+    map.ligatures = [];
+    map.liga = new Map();
     const finalized = {};
-    const offset = (opts && opts.variantOffset) || 0;
+    const offset = o.variantOffset || 0;
+    let target = null;
+    if (typeof o.weight === 'number') {
+      let lo = Infinity, hi = -Infinity;
+      for (const ch in glyphsByChar) {
+        for (const v of (glyphsByChar[ch] && glyphsByChar[ch].variants) || []) {
+          const wv = M.weightOf(v);
+          lo = Math.min(lo, wv); hi = Math.max(hi, wv);
+        }
+      }
+      if (isFinite(lo)) target = lo + Math.max(0, Math.min(1, o.weight)) * (hi - lo);
+    }
     for (const ch in glyphsByChar) {
       const slot = glyphsByChar[ch];
       if (!slot || !slot.variants || !slot.variants.length) continue;
       const n = slot.variants.length;
-      const idx = ((Math.min(slot.active || 0, n - 1) + offset) % n + n) % n;
+      let idx = ((Math.min(slot.active || 0, n - 1) + offset) % n + n) % n;
+      if (target != null) {
+        let bestD = Infinity;
+        slot.variants.forEach((v, i) => {
+          const d = Math.abs(M.weightOf(v) - target);
+          if (d < bestD - 1e-9 || (Math.abs(d - bestD) <= 1e-9 && i === slot.active)) { bestD = d; idx = i; }
+        });
+      }
       const v = slot.variants[idx];
-      finalized[ch] = M.finalizeVariant(v);
-      map.set(ch.codePointAt(0), finalized[ch]);
+      const fin = M.finalizeVariant(v);
+      fin.id = v.id; fin.char = ch; fin.weight = M.weightOf(v);
+      finalized[ch] = fin;
+      if (ch.length > 1) {
+        map.ligatures.push({ chars: ch, glyph: fin });
+        map.liga.set(ch, fin);
+      } else {
+        map.set(ch.codePointAt(0), fin);
+      }
     }
-    if (opts && opts.mirrorCase) {
+    if (o.mirrorCase) {
       for (const ch in finalized) {
-        if (/[a-zA-Z]/.test(ch)) {
+        if (ch.length === 1 && /[a-zA-Z]/.test(ch)) {
           const other = ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase();
           const cp = other.codePointAt(0);
           if (!map.has(cp)) map.set(cp, finalized[ch]);
@@ -254,5 +334,19 @@
     // Space is always present so the tester reads as text immediately.
     if (!map.has(32)) map.set(32, { contours: [], advance: M.SPACE_ADV, lsb: 0 });
     return map;
+  };
+
+  // Longest-first ligature match at position i of a character array.
+  M.ligatureAt = function (chars, i, keys) {
+    for (const L of keys) {
+      if (i + L.length > chars.length) continue;
+      let ok = true;
+      for (let k = 0; k < L.length; k++) if (chars[i + k] !== L[k]) { ok = false; break; }
+      if (ok) return L;
+    }
+    return null;
+  };
+  M.ligatureKeys = function (map) {
+    return map && map.ligatures ? map.ligatures.map((l) => l.chars).sort((a, b) => b.length - a.length) : [];
   };
 })(typeof window !== 'undefined' ? window : globalThis);
