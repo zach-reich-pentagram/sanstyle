@@ -351,6 +351,117 @@
     return Math.max(0, Math.min((U - r) * 0.6, 1.5 * sw));
   };
 
+  // ---------- bites ----------
+  // Where something hides a stroke along its side (a sticker over its
+  // edge, another color painted along it), the stroke shows narrower than
+  // it is. Put the hidden side back out to the stroke's width, measured
+  // from the edge that does show — only onto hidden ground, never over
+  // visible wall. The width is the stroke's own (its wider stretches); a
+  // stroke hidden along most of its length (all that shows is a sliver)
+  // takes the letter's usual width. Works on `mask` (W×H) inside `box`;
+  // returns the pixels to add (W×H) or null.
+  C.restoreWidth = function (mask, W, H, at, box, rLetter, only) {
+    const x0 = Math.max(0, box.x0), y0 = Math.max(0, box.y0), x1 = Math.min(W - 1, box.x1), y1 = Math.min(H - 1, box.y1);
+    const bw = x1 - x0 + 3, bh = y1 - y0 + 3;
+    if (bw < 8 || bh < 8) return null;
+    const sub = new Uint8Array(bw * bh);
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const i = y * W + x;
+      if (mask[i] && (!only || only(i))) sub[(y - y0 + 1) * bw + (x - x0 + 1)] = 1;
+    }
+    const sw = R.strokeWidth(sub, bw, bh);
+    if (!(sw >= 4)) return null;
+    const graph = ST.extract.strokeGraph(sub, bw, bh, sw);
+    const dt = R.distanceTransform(sub, bw, bh);
+    const X = (p) => p % bw, Y = (p) => (p / bw) | 0;
+    const inSub = (x, y) => x >= 0 && y >= 0 && x < bw && y < bh && sub[Math.round(y) * bw + Math.round(x)] === 1;
+    // class just past the edge reached from (px, py) along (nx, ny)
+    const edgeAndBeyond = (px, py, nx, ny, maxD) => {
+      let d = 0;
+      while (d < maxD && inSub(px + nx * (d + 0.5), py + ny * (d + 0.5))) d += 0.5;
+      let hid = 0, n = 0;
+      for (let k = 2; k <= 5; k++) {
+        const c = at(Math.round(px + nx * (d + k)) + x0 - 1, Math.round(py + ny * (d + k)) + y0 - 1);
+        n++;
+        if (c === HIDDEN) hid++;
+      }
+      return { d, hidden: hid * 2 > n };
+    };
+    let add = null;
+    for (const s of graph.segments) {
+      const px = s.pixels, n = px.length;
+      if (n < 6) continue;
+      const vals = px.map((p) => dt[p]).sort((a, b) => a - b);
+      const own = vals[Math.floor(vals.length * 0.75)];
+      const k = Math.max(3, Math.round(0.5 * own));
+      const plan = [];
+      let bitten = 0;
+      for (let i = 0; i < n; i++) {
+        const a = px[Math.max(0, i - k)], b = px[Math.min(n - 1, i + k)];
+        let tx = X(b) - X(a), ty = Y(b) - Y(a);
+        const tl = Math.hypot(tx, ty);
+        if (!tl) continue;
+        tx /= tl; ty /= tl;
+        const nx = -ty, ny = tx, cx = X(px[i]), cy = Y(px[i]);
+        const A = edgeAndBeyond(cx, cy, nx, ny, 3 * own + 4), B = edgeAndBeyond(cx, cy, -nx, -ny, 3 * own + 4);
+        if (A.hidden !== B.hidden) bitten++;
+        plan.push({ cx, cy, nx, ny, A, B });
+      }
+      // hidden along most of its length: the letter's width, else its own
+      const target = bitten >= 0.7 * plan.length ? Math.max(own, 0.9 * rLetter) : own;
+      for (const q of plan) {
+        const width = q.A.d + q.B.d;
+        if (width >= 2 * target * 0.85) continue;
+        let cx, cy;
+        if (q.A.hidden && !q.B.hidden) { cx = q.cx - q.nx * q.B.d + q.nx * target; cy = q.cy - q.ny * q.B.d + q.ny * target; }
+        else if (q.B.hidden && !q.A.hidden) { cx = q.cx + q.nx * q.A.d - q.nx * target; cy = q.cy + q.ny * q.A.d - q.ny * target; }
+        else continue;
+        // stamp, onto hidden ground only
+        const r = target, rr = (r + 0.5) * (r + 0.5);
+        const gx = cx + x0 - 1, gy = cy + y0 - 1;
+        for (let yy = Math.max(0, Math.floor(gy - r)); yy <= Math.min(H - 1, Math.ceil(gy + r)); yy++) {
+          for (let xx = Math.max(0, Math.floor(gx - r)); xx <= Math.min(W - 1, Math.ceil(gx + r)); xx++) {
+            if ((xx - gx) * (xx - gx) + (yy - gy) * (yy - gy) > rr) continue;
+            const i = yy * W + xx;
+            if (mask[i] || at(xx, yy) !== HIDDEN) continue;
+            if (!add) add = new Uint8Array(W * H);
+            add[i] = 1;
+          }
+        }
+      }
+    }
+    return add;
+  };
+
+  // A cut-short end with no partner may still run on, under what hides it,
+  // into the side of another stroke of the letter (an N's stem hidden all
+  // the way down to the N's bottom corner): the first ink straight ahead,
+  // with nothing but hidden ground on the way — never visible wall.
+  // (a small fan of rays: what shows of a hidden stroke may sit to one side
+  // of its centerline and lean a few degrees)
+  C.joinAhead = function (end, at, labels, W, H, sizeOk) {
+    const maxLen = Math.round(4 * end.sw);
+    let best = null;
+    for (const off of [0, -0.5, 0.5]) {
+      for (const deg of [0, -8, 8]) {
+        const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+        const dx = end.dx * c - end.dy * s, dy = end.dx * s + end.dy * c;
+        const ox = end.x - end.dy * off * end.r, oy = end.y + end.dx * off * end.r;
+        for (let d = 2; d <= maxLen; d++) {
+          const x = Math.round(ox + dx * d), y = Math.round(oy + dy * d);
+          if (x < 0 || y < 0 || x >= W || y >= H) break;
+          const L = labels[y * W + x];
+          if (L && sizeOk(L) && (L !== end.comp || d > 2 * end.r)) {
+            if (!best || d < best.d) best = { comp: L, d };
+            break;
+          }
+          if (at(x, y) === WALL) break;
+        }
+      }
+    }
+    return best;
+  };
+
   // ---------- drawing ----------
   function stampDisc(out, w, h, cx, cy, r) {
     const rr = (r + 0.5) * (r + 0.5);
@@ -384,6 +495,38 @@
     const at = o.at;
     const P = o.pad != null ? o.pad : Math.round(0.15 * Math.max(W, H));
     const W2 = W + 2 * P, H2 = H + 2 * P;
+    // strokes bitten along their side by what hides them get their width
+    // back first, so their ends and directions read true
+    let restored = null;
+    if (!o.noRestore) {
+      const first = R.components(mask, W, H);
+      const nb = first.sizes.length;
+      const fx0 = new Int32Array(nb).fill(W), fy0 = new Int32Array(nb).fill(H), fx1 = new Int32Array(nb).fill(-1), fy1 = new Int32Array(nb).fill(-1);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const L = first.labels[y * W + x];
+        if (!L) continue;
+        if (x < fx0[L]) fx0[L] = x; if (x > fx1[L]) fx1[L] = x;
+        if (y < fy0[L]) fy0[L] = y; if (y > fy1[L]) fy1[L] = y;
+      }
+      const seedL0 = o.seed != null ? first.labels[o.seed] : 0;
+      const rLetter = 0.5 * (o.letterWidth || R.strokeWidth(mask, W, H));
+      const b0 = o.box || { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
+      const minA = o.minArea || 200;
+      for (let L = 1; L < nb; L++) {
+        if (first.sizes[L] < minA && L !== seedL0) continue;
+        if (fx1[L] < b0.x0 || fx0[L] > b0.x1 || fy1[L] < b0.y0 || fy0[L] > b0.y1) continue;
+        const m = Math.round(3 * rLetter + 4);
+        const add = C.restoreWidth(mask, W, H, at, { x0: fx0[L] - m, y0: fy0[L] - m, x1: fx1[L] + m, y1: fy1[L] + m }, rLetter, (i) => first.labels[i] === L);
+        if (!add) continue;
+        if (!restored) restored = new Uint8Array(W * H);
+        for (let i = 0; i < add.length; i++) if (add[i]) restored[i] = 1;
+      }
+      if (restored) {
+        const m2 = new Uint8Array(mask);
+        for (let i = 0; i < m2.length; i++) if (restored[i]) m2[i] = 1;
+        mask = m2;
+      }
+    }
     const { labels, sizes } = R.components(mask, W, H);
     const n = sizes.length;
     const bx0 = new Int32Array(n).fill(W), by0 = new Int32Array(n).fill(H), bx1 = new Int32Array(n).fill(-1), by1 = new Int32Array(n).fill(-1);
@@ -408,8 +551,9 @@
       return endsOf.get(L);
     };
     let box = o.box || { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
-    let ends = [], pairs = [];
+    let ends = [], pairs = [], joins = [];
     const keep = new Uint8Array(n);
+    const sizeOk = (L) => sizes[L] >= minArea || L === seedL;
     // the pieces near the letter; when completion joins one that reaches
     // further, look around it too
     for (let iter = 0; iter < 6; iter++) {
@@ -420,15 +564,23 @@
         for (const e of endsFor(L)) ends.push(e);
       }
       pairs = C.pairEnds(ends, at);
+      // unpartnered cut-short ends that run on into another piece
+      const paired = new Uint8Array(ends.length);
+      for (const p of pairs) paired[p.i] = paired[p.j] = 1;
+      joins = [];
+      ends.forEach((e, k) => {
+        if (paired[k] || e.status !== 'hidden') return;
+        const j = C.joinAhead(e, at, labels, W, H, sizeOk);
+        if (j) joins.push({ k, comp: j.comp, d: j.d });
+      });
       keep.fill(0);
       if (!seedL) { for (let L = 1; L < n; L++) keep[L] = 1; break; }
       keep[seedL] = 1;
       for (let changed = true; changed;) {
         changed = false;
-        for (const p of pairs) {
-          const a = ends[p.i].comp, b = ends[p.j].comp;
-          if (keep[a] !== keep[b]) { keep[a] = keep[b] = 1; changed = true; }
-        }
+        const link = (a, b) => { if (keep[a] !== keep[b]) { keep[a] = keep[b] = 1; changed = true; } };
+        for (const p of pairs) link(ends[p.i].comp, ends[p.j].comp);
+        for (const j of joins) link(ends[j.k].comp, j.comp);
       }
       let nb = { x0: box.x0, y0: box.y0, x1: box.x1, y1: box.y1 }, grew = false;
       for (let L = 1; L < n; L++) {
@@ -445,8 +597,11 @@
     const out = new Uint8Array(W2 * H2), tubes = new Uint8Array(W2 * H2);
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const L = labels[y * W + x];
-        if (L && keep[L]) out[(y + P) * W2 + (x + P)] = 1;
+        const i = y * W + x, L = labels[i];
+        if (L && keep[L]) {
+          out[(y + P) * W2 + (x + P)] = 1;
+          if (restored && restored[i]) tubes[(y + P) * W2 + (x + P)] = 1;
+        }
       }
     }
     const used = new Uint8Array(ends.length);
@@ -460,6 +615,16 @@
       stampDisc(tubes, W2, H2, A.x - A.dx * A.r * 0.5 + P, A.y - A.dy * A.r * 0.5 + P, A.r);
       stampDisc(tubes, W2, H2, B.x - B.dx * B.r * 0.5 + P, B.y - B.dy * B.r * 0.5 + P, B.r);
       drawn.push({ a: { x: A.x, y: A.y }, b: { x: B.x, y: B.y }, r: [A.r, B.r], kind: A.status === 'frame' || B.status === 'frame' ? 'frame' : 'hidden' });
+    }
+    for (const j of joins) {
+      const e = ends[j.k];
+      if (!keep[e.comp]) continue;
+      used[j.k] = 1;
+      // on into the other stroke by half a width, so they fuse
+      const s0 = { x: e.x - e.dx * e.r, y: e.y - e.dy * e.r };
+      const s1 = { x: e.x + e.dx * (j.d + 0.5 * e.r), y: e.y + e.dy * (j.d + 0.5 * e.r) };
+      stampCurve(tubes, W2, H2, P, P, (t) => ({ x: s0.x + (s1.x - s0.x) * t, y: s0.y + (s1.y - s0.y) * t }), Math.hypot(s1.x - s0.x, s1.y - s0.y), e.r, e.r);
+      drawn.push({ a: { x: e.x, y: e.y }, b: { x: s1.x, y: s1.y }, r: [e.r, e.r], kind: 'join' });
     }
     const extensions = [];
     for (let k = 0; k < ends.length; k++) {
@@ -508,13 +673,17 @@
     return filled ? out : mask;
   };
 
-  // A throw-up's outline: a band of hidden (other-colored) pixels that
-  // hugs the letter — much of its edge touches the letter, the rest the
-  // wall — and is thin next to the strokes. It belongs to the letter.
+  // A throw-up's outline: a band of another color hugging the letter —
+  // most of its inner edge runs along the letter (across the thin blend
+  // between them), and it is thin next to the strokes. The outline round
+  // the outside must wrap most of the letter (a drop shadow on one side is
+  // not the letter's); a ring inside a counter only has to hug the counter.
+  // It belongs to the letter, together with the blend between.
   // mask: w×h at photo offset (ox, oy); cls: photo classes (W×H).
   C.absorbOutline = function (mask, w, h, cls, W, H, ox, oy) {
     const sw = R.strokeWidth(mask, w, h);
-    if (!(sw >= 4)) return mask;
+    if (!(sw >= 4)) return { mask, counters: null };
+    const GAP = 3.5;
     const hid = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -524,50 +693,87 @@
     }
     const { labels, sizes } = R.components(hid, w, h);
     const n = sizes.length;
-    if (n <= 1) return mask;
-    const edge = new Int32Array(n), touch = new Int32Array(n);
-    let letterEdge = 0;
-    const letterTouch = new Int32Array(n);
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = y * w + x;
-        if (mask[i]) {
-          const nb = [labels[i - 1], labels[i + 1], labels[i - w], labels[i + w]];
-          if (!mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) {
-            letterEdge++;
-            const seen = new Set();
-            for (const L of nb) if (L && !seen.has(L)) { seen.add(L); letterTouch[L]++; }
-          }
-          continue;
-        }
-        const L = labels[i];
-        if (!L) continue;
-        if (!hid[i - 1] || !hid[i + 1] || !hid[i - w] || !hid[i + w]) {
-          edge[L]++;
-          if (mask[i - 1] || mask[i + 1] || mask[i - w] || mask[i + w]) touch[L]++;
-        }
-      }
-    }
-    // band thickness: distance of its pixels from the letter
+    if (n <= 1) return { mask, counters: null };
+    // distance from the letter; which background pieces are the letter's holes
     const inv = new Uint8Array(w * h);
     for (let i = 0; i < inv.length; i++) inv[i] = mask[i] ? 0 : 1;
     const dl = R.distanceTransform(inv, w, h, { borderInk: true });
-    const dtH = R.distanceTransform(hid, w, h);
+    const bgc = R.components(inv, w, h);
+    const outerBg = new Uint8Array(bgc.sizes.length);
+    for (let x = 0; x < w; x++) { outerBg[bgc.labels[x]] = 1; outerBg[bgc.labels[(h - 1) * w + x]] = 1; }
+    for (let y = 0; y < h; y++) { outerBg[bgc.labels[y * w]] = 1; outerBg[bgc.labels[y * w + w - 1]] = 1; }
+    const inHole = new Uint8Array(n), outside = new Uint8Array(n);
+    const edge = new Int32Array(n), touch = new Int32Array(n);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x, L = labels[i];
+        if (!L) continue;
+        if (outerBg[bgc.labels[i]]) outside[L] = 1; else inHole[L] = 1;
+        const onEdge = x === 0 || y === 0 || x === w - 1 || y === h - 1 || !hid[i - 1] || !hid[i + 1] || !hid[i - w] || !hid[i + w];
+        if (!onEdge) continue;
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) continue; // the crop's edge says nothing
+        edge[L]++;
+        if (dl[i] <= GAP) touch[L]++;
+      }
+    }
+    // how much of the letter's own edge each piece runs along
+    let letterEdge = 0;
+    const along = new Int32Array(n);
+    const r = Math.ceil(GAP);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        if (!mask[i] || (mask[i - 1] && mask[i + 1] && mask[i - w] && mask[i + w])) continue;
+        letterEdge++;
+        const seen = new Set();
+        for (let dy = -r; dy <= r; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -r; dx <= r; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= w || dx * dx + dy * dy > GAP * GAP) continue;
+            const L = labels[yy * w + xx];
+            if (L && !seen.has(L)) { seen.add(L); along[L]++; }
+          }
+        }
+      }
+    }
+    // the band's thickness next to the letter
+    const dtH = R.distanceTransform(hid, w, h, { borderInk: true });
     const thick = new Float32Array(n);
     for (let i = 0; i < hid.length; i++) {
       const L = labels[i];
       if (L && dl[i] <= 0.8 * sw && dtH[i] > thick[L]) thick[L] = dtH[i];
     }
-    const out = new Uint8Array(mask);
-    let any = false;
+    const take = new Uint8Array(n);
+    let any = false, maxBand = 0;
     for (let L = 1; L < n; L++) {
       if (!edge[L]) continue;
-      const share = touch[L] / edge[L];               // its edge that touches the letter
-      const wraps = letterTouch[L] / Math.max(1, letterEdge); // the letter's edge it covers
+      const share = touch[L] / edge[L];
+      const wraps = along[L] / Math.max(1, letterEdge);
       const band = 2 * thick[L];
-      if (share < 0.3 || wraps < 0.15 || band > 0.5 * sw || band < 2) continue;
-      for (let i = 0; i < hid.length; i++) if (labels[i] === L && dl[i] <= band + 2) { out[i] = 1; any = true; }
+      if (C.debug && sizes[L] > 200) (C.outlineDbg = C.outlineDbg || []).push({ L, size: sizes[L], share: +share.toFixed(2), wraps: +wraps.toFixed(2), band, sw: +sw.toFixed(1), inHole: !!inHole[L] && !outside[L] });
+      if (share < 0.3 || band > 0.5 * sw || band < 2) continue;
+      const enclosed = inHole[L] && !outside[L];
+      if (!enclosed && wraps < 0.45) continue;
+      take[L] = 1; any = true; maxBand = Math.max(maxBand, band);
     }
-    return any ? out : mask;
+    if (!any) return { mask, counters: null };
+    const out = new Uint8Array(mask);
+    for (let i = 0; i < hid.length; i++) if (take[labels[i]] && dl[i] <= 2 * thick[labels[i]] + GAP + 1) out[i] = 1;
+    // the blend between letter and outline
+    const closed = R.close(out, w, h, Math.ceil(GAP));
+    for (let i = 0; i < out.length; i++) if (closed[i] && !out[i] && dl[i] <= GAP + 1) out[i] = 1;
+    // a hole ringed by an outline is a counter, however small next to the
+    // strokes: the clean-up must not fill it
+    const ringed = new Uint8Array(bgc.sizes.length);
+    for (let i = 0; i < hid.length; i++) if (take[labels[i]] && !outerBg[bgc.labels[i]]) ringed[bgc.labels[i]] = 1;
+    let counters = null;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i] || !ringed[bgc.labels[i]]) continue;
+      if (!counters) counters = new Uint8Array(w * h);
+      counters[i] = 1;
+    }
+    return { mask: out, counters };
   };
 })(typeof window !== 'undefined' ? window : globalThis);

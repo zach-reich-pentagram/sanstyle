@@ -967,13 +967,15 @@
         seed: y * w + x,
         box: { x0: Math.max(0, bb.x0 - margin), y0: Math.max(0, bb.y0 - margin), x1: Math.min(w - 1, bb.x1 + margin), y1: Math.min(h - 1, bb.y1 + margin) },
         margin,
+        letterWidth: sw0,
         minArea: Math.max(60, Math.round(count * 0.01)),
       });
       P = completion.P; W2 = completion.W2; H2 = completion.H2;
       full = completion.mask; tubes = completion.tubes;
     }
 
-    const cropP = bboxOf(full, W2, H2, 12);
+    // room round the letter for an outline hugging it
+    const cropP = bboxOf(full, W2, H2, 12 + Math.round(0.25 * sw0));
     if (!cropP) return null;
     const crop = { x: cropP.x - P, y: cropP.y - P, w: cropP.w, h: cropP.h };
     let sub = cropMask(full, W2, cropP);
@@ -990,14 +992,17 @@
     // spun over inside corners
     sub = ex.keepBridges(base, sub, crop.w, crop.h);
     if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i]) sub[i] = 1;
+    let counters = null;
     if (cls) {
       const at = ST.complete.sampler(cls, w, h);
       // a throw-up's outline is the letter's; so is a hole that shows no wall
-      sub = ST.complete.absorbOutline(sub, crop.w, crop.h, cls, w, h, crop.x, crop.y);
+      const ol = ST.complete.absorbOutline(sub, crop.w, crop.h, cls, w, h, crop.x, crop.y);
+      sub = ol.mask; counters = ol.counters;
       sub = ST.complete.fillHiddenHoles(sub, crop.w, crop.h, at, crop.x, crop.y);
     }
     const lx = x - crop.x, ly = y - crop.y;
     let whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing, { noRound: o.noRound });
+    if (counters) for (let i = 0; i < whole.length; i++) if (counters[i]) whole[i] = 0;
     // a cut slices the stroke flat; give the sliced ends a marker's round cap
     if (excl && !o.noRound) whole = ex.roundCutEnds(whole, crop.w, crop.h, cropAny(excl, w, h, crop, 0));
 

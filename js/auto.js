@@ -332,12 +332,13 @@
         cls = ST.complete.classify(img.data, W, H, { bg: pm.bg, seed: pm.seed, paint: pm.raw, wall: pm.wall, sw });
         const done = ST.complete.complete(m, W, H, {
           at: ST.complete.sampler(cls, W, H),
+          letterWidth: sw,
           minArea: Math.round(Math.max(420, area * 0.0018) / 3),
         });
         m = done.mask; tubes = done.tubes; P = done.P; MW = done.W2; MH = done.H2;
       }
       const det = detectCandidates(m, MW, MH, area, { x0: P, y0: P, x1: P + W - 1, y1: P + H - 1 });
-      if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length, P, MW, MH, tubes };
+      if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length, P, MW, MH, tubes, sw };
     }
     if (!first) first = tryPolarity(mean <= 128);
     if (!first.n) {
@@ -348,8 +349,8 @@
     const P = first.P || 0, MW = first.MW || W, MH = first.MH || H, tubes = first.tubes || null;
     const candidates = [];
     if (det.groups) {
+      const pad = 10 + Math.round(0.25 * (first.sw || 0));
       for (const grp of det.groups) {
-        const pad = 10;
         // in the (padded) mask's coordinates; the crop is the photo's
         const cx0 = Math.max(0, grp.x0 - pad), cy0 = Math.max(0, grp.y0 - pad);
         const cx1 = Math.min(MW, grp.x1 + 1 + pad), cy1 = Math.min(MH, grp.y1 + 1 + pad);
@@ -377,15 +378,18 @@
           sub = ST.extract.keepBridges(rawSub, sub, cw, ch);
           if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i]) sub[i] = 1;
         }
+        let counters = null;
         if (cls) {
           // a throw-up's outline is the letter's; so is a hole showing no wall
-          sub = ST.complete.absorbOutline(sub, cw, ch, cls, W, H, crop.x, crop.y);
+          const ol = ST.complete.absorbOutline(sub, cw, ch, cls, W, H, crop.x, crop.y);
+          sub = ol.mask; counters = ol.counters;
           sub = ST.complete.fillHiddenHoles(sub, cw, ch, ST.complete.sampler(cls, W, H), crop.x, crop.y);
         }
         // same stroke-width-capped clean-up as click-to-trace and the studio
         const clean = ST.extract
           ? ST.extract.cleanMask(sub, cw, ch, o.smoothing != null ? o.smoothing : 4)
           : ST.raster.fillHoles(ST.raster.close(sub, cw, ch, 1), cw, ch, o.fillHoles);
+        if (counters) for (let i = 0; i < clean.length; i++) if (counters[i]) clean[i] = 0;
         const paths = ST.trace.vectorize(clean, cw, ch, {});
         if (!paths.length) continue;
         candidates.push({ crop, mask: clean, w: cw, h: ch, paths });

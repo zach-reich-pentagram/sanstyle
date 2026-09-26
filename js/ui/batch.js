@@ -357,7 +357,7 @@
     reapplyParts(item);
     $('#reviewChar').value = keep;
     syncIsolateLabel();
-    if (wasIsolated && keep.trim()) batch.isolate();
+    if (wasIsolated && keep.trim()) batch.isolate({ quiet: true });
   };
 
   function cutWidthFor(item) {
@@ -433,6 +433,19 @@
     const item = batch.queue[batch.idx];
     if (!item || !item.history || !item.history.length) return false;
     const last = item.history.pop();
+    if (last.type === 'isolate') {
+      // back to the shape as it was before the trim
+      const k = item.candidates.findIndex((c) => c.kind === 'isolated');
+      if (k >= 0) item.candidates.splice(k, 1);
+      item.ci = 0;
+      const keep = $('#reviewChar').value;
+      renderCurrent();
+      $('#reviewChar').value = keep;
+      syncIsolateLabel();
+      ST.capture.updatePreview();
+      ST.toast('Trim undone.');
+      return true;
+    }
     if (last.type === 'cut' && item.cuts && item.cuts.length) item.cuts.pop();
     else if (last.type === 'part' && item.parts && item.parts.length) item.parts.pop();
     rebuild(item);
@@ -452,31 +465,23 @@
     rebuild(item);
   };
 
-  // "Isolate the 2": template-guided trim of the current shape to the typed
-  // character, keeping the piece under the last click.
-  batch.isolate = function () {
-    const item = batch.queue[batch.idx];
-    const cand = item && item.candidates[item.ci];
-    const ch = batch.charKey($('#reviewChar').value);
-    if (!cand || !ch) { ST.toast('Type the character first, then Isolate.', 'warn'); return false; }
-    if (ch.length > 1) { ST.toast('Isolate works one character at a time — type just the letter to trim to.', 'warn'); return false; }
-    if (!ST.classify) return false;
+  // "Isolate the 2": template-guided trim of a shape to the typed
+  // character, keeping the piece under the last click — the strokes that
+  // leave the character's box (a neighbor's) are cut off at their joins,
+  // and the joins healed. → { cand, res } or null
+  function isolatedCandidate(item, cand, ch) {
     const lc = item.lastClick
       ? { x: item.lastClick.x - cand.crop.x, y: item.lastClick.y - cand.crop.y }
       : { x: cand.w / 2, y: cand.h / 2 };
     // a loose match still says which strokes are the neighbor's; only a
-    // hopeless one is refused (the previous shape stays under Try another)
+    // hopeless one is refused
     const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y, 0.18);
-    if (!res) {
-      ST.toast(`Couldn't find a “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
-      return false;
-    }
-    // strokes that leave the box are a neighbor's: drop them at their joins
+    if (!res) return null;
     const strokes = res.margin ? ST.extract.isolateStrokes(cand.mask, cand.w, cand.h, res.margin, lc.x, lc.y) : null;
     const clean = ST.extract.cleanMask(strokes ? strokes.mask : res.mask, cand.w, cand.h, 4);
     // re-crop to the isolated letter so the photo pane boxes just it
     const bb = ST.raster.maskBounds(clean, cand.w, cand.h);
-    if (!bb) return false;
+    if (!bb) return null;
     const pad = 10;
     const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
     const x1 = Math.min(cand.w, bb.x1 + 1 + pad), y1 = Math.min(cand.h, bb.y1 + 1 + pad);
@@ -484,21 +489,71 @@
     const sub = new Uint8Array(cw * chh);
     for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) sub[y * cw + x] = clean[(y + y0) * cand.w + (x + x0)];
     const paths = ST.trace.vectorize(sub, cw, chh, {});
-    if (!paths.length) return false;
+    if (!paths.length) return null;
     const crop = { x: cand.crop.x + x0, y: cand.crop.y + y0, w: cw, h: chh };
-    item.candidates.unshift({ crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated' });
+    return { cand: { crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated' }, res };
+  }
+
+  function showIsolated(item, got) {
+    item.candidates.unshift(got.cand);
     item.ci = 0;
     reapplyParts(item);
     const keep = $('#reviewChar').value;
     renderCurrent();
     $('#reviewChar').value = keep;
     syncIsolateLabel();
-    const pct = Math.round(res.score * 100);
-    if (res.score < 0.3) {
+    ST.capture.updatePreview();
+  }
+
+  batch.isolate = function (opts) {
+    const quiet = !!(opts && opts.quiet);
+    const item = batch.queue[batch.idx];
+    const cand = item && item.candidates[item.ci];
+    const ch = batch.charKey($('#reviewChar').value);
+    if (!cand || !ch) { ST.toast('Type the character first, then Isolate.', 'warn'); return false; }
+    if (ch.length > 1) { ST.toast('Isolate works one character at a time — type just the letter to trim to.', 'warn'); return false; }
+    if (!ST.classify) return false;
+    const got = isolatedCandidate(item, cand, ch);
+    if (!got) {
+      ST.toast(`Couldn't find a “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
+      return false;
+    }
+    cand._autoTried = ch;
+    showIsolated(item, got);
+    if (quiet) return true;
+    item.history = (item.history || []).concat([{ type: 'isolate' }]);
+    const pct = Math.round(got.res.score * 100);
+    if (got.res.score < 0.3) {
       ST.toast(`Trimmed to the best “${ch}” match found (only ${pct}%) — check the trace; Try another shape brings the full shape back.`, 'warn');
     } else {
       ST.toast(`Isolated a “${ch}” (match ${pct}%).`);
     }
+    return true;
+  };
+
+  // Typing the character is enough: when the shape is a letter fused with
+  // a neighbor of the same paint (touching it, crossing it, running into
+  // it), it is trimmed to the typed character by itself — but only when
+  // the trimmed shape matches that character clearly better than the whole
+  // did, and something neighbor-sized came off. ⌘Z (or Try another shape)
+  // brings the whole shape back.
+  batch.autoIsolate = function () {
+    const item = batch.queue[batch.idx];
+    const cand = item && item.candidates[item.ci];
+    if (!cand || !ST.classify || cand.kind === 'isolated') return false;
+    const ch = batch.charKey($('#reviewChar').value);
+    if (!ch || ch.length !== 1 || cand._autoTried === ch) return false;
+    cand._autoTried = ch;
+    const got = isolatedCandidate(item, cand, ch);
+    if (!got) return false;
+    const before = ST.raster.count(cand.mask), after = ST.raster.count(got.cand.mask);
+    if (after > 0.85 * before || after < 0.2 * before) return false;
+    const whole = ST.classify.scoreFor(cand.paths, ch), trimmed = ST.classify.scoreFor(got.cand.paths, ch);
+    if (!(trimmed >= 0.3 && trimmed >= whole + 0.06)) return false;
+    got.cand._autoTried = ch;
+    showIsolated(item, got);
+    item.history = (item.history || []).concat([{ type: 'isolate' }]);
+    ST.toast(`Trimmed the neighbor off the “${ch}” — ⌘Z brings it back.`);
     return true;
   };
 
@@ -561,7 +616,7 @@
     $('#reviewAccept').addEventListener('click', batch.accept);
     $('#reviewAlt').addEventListener('click', batch.tryNext);
     $('#reviewSkip').addEventListener('click', batch.skip);
-    $('#reviewIsolate').addEventListener('click', batch.isolate);
+    $('#reviewIsolate').addEventListener('click', () => batch.isolate());
     $('#reviewDetail').addEventListener('input', ST.debounce((e) => batch.setDetail(+e.target.value), 220));
     // ⌘Z / Ctrl-Z on the capture tab undoes the last cut or added piece
     g.addEventListener('keydown', (e) => {
@@ -575,6 +630,7 @@
       batch.undo();
     });
     $('#reviewChar').addEventListener('input', syncIsolateLabel);
+    $('#reviewChar').addEventListener('input', ST.debounce(() => batch.autoIsolate(), 380));
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }
