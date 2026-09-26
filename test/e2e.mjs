@@ -639,6 +639,24 @@ await page.waitForTimeout(200);
 const fusedUndo = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind, ch: document.getElementById('reviewChar').value }; });
 check(fusedUndo.kind !== 'isolated' && fusedUndo.w === fusedBefore.w && fusedUndo.ch === 'T',
   `Ctrl-Z brings the whole shape back, the typed character stays (${fusedUndo.w} px wide)`);
+// Option-click takes a piece off: click the O's far side
+const oSpot = await page.evaluate(() => {
+  const r = document.getElementById('stage').getBoundingClientRect();
+  const sp = ST.capture.toScreen({ x: 770, y: 330 });
+  return { x: r.left + sp.x, y: r.top + sp.y };
+});
+await page.keyboard.down('Alt');
+await page.mouse.click(oSpot.x, oSpot.y);
+await page.keyboard.up('Alt');
+await page.waitForTimeout(400);
+const removed = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[it.ci]; const bb = ST.raster.maskBounds(c.mask, c.w, c.h); return { kind: c.kind, left: c.crop.x + bb.x0, right: c.crop.x + bb.x1, bar: c.mask[(220 - c.crop.y) * c.w + (480 - c.crop.x)], n: (it.removals || []).length }; });
+check(removed.kind === 'trimmed' && removed.n === 1 && removed.right < 610 && removed.left < 110 && removed.bar === 1,
+  `Option-click on the fused O takes it off, the T's bar stays whole through the crossing (${removed.left}–${removed.right})`);
+await page.focus('#reviewChar');
+await page.keyboard.press('Control+z');
+await page.waitForTimeout(400);
+const unremoved = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[it.ci]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, n: (it.removals || []).length }; });
+check(unremoved.n === 0 && unremoved.w === fusedBefore.w, `Ctrl-Z puts the removed piece back (${unremoved.w} px wide)`);
 await page.evaluate(() => ST.batch.skip());
 
 // ---- live font + variant cycling ---------------------------------------------
@@ -913,6 +931,8 @@ await page2.click('#inboxExtract');
 // first photo lands on the stage as soon as it's fetched+analyzed (incremental intake)
 await page2.waitForFunction(() => __st.state().current !== null, { timeout: 20000 });
 for (let p = 0; p < 2; p++) {
+  // photos are analyzed in the background: the next one may still be on its way
+  await page2.waitForFunction(() => !!ST.batch.queue[ST.batch.idx], { timeout: 20000 });
   const ch = await page2.evaluate(() =>
     /wall-n/.test(ST.batch.queue[ST.batch.idx].name) ? 'N' : 'T');
   await page2.fill('#reviewChar', ch);

@@ -28,8 +28,9 @@ decodes locally).
 
 Drop photos on the Capture tab (one or a hundred; iPhone HEIC works), share
 them into the Drive inbox from your phone, or pick any photo from the Drive
-gallery in the Glyphs tab. Each photo is analyzed and lands on the stage in
-turn: the paint is separated from the wall or paper by color contrast
+gallery in the Glyphs tab. Each photo is analyzed in a background worker —
+the page stays responsive while a stack of photos or a Drive re-scan is
+worked through — and lands on the stage in turn: the paint is separated from the wall or paper by color contrast
 against the background — the wall is the frame's dominant color, paint is
 whatever contrasts most with it, and the threshold sits where the boundary
 is sharpest, never past the midpoint between the two. That keeps marker
@@ -63,7 +64,10 @@ character clearly better than the whole did (⌘Z brings the whole back). Two
 readings compete: the shape grown stroke by stroke from the one you clicked
 (strokes rejoined through junctions by good continuation, so a bar that
 crosses a neighbor's O stays one bar and the O stays one ring), and a
-template search. Or drag a short cut across the join and the region regrows
+template search. Or **Option-click** the neighbor: the stroke under the
+click goes, with whatever hangs on the letter only through it (a fused
+neighbor, a drip, a stray blob), and the faces where it came off are healed
+and capped. Or drag a short cut across the join and the region regrows
 without it — or press **Isolate** to force the trim: a stroke-weight-agnostic template search (two-way
 chamfer match against system-font renders, scored on the ink connected to
 your click) finds where that character sits inside the fused shape. The
@@ -129,7 +133,8 @@ shift-click puts back a bit that the extraction, a cut or Isolate left out
 (where no paint reads under the click at all — a glint, a worn patch — it
 brushes in a stroke-width spot), and the pieces are remembered when the
 shape is rebuilt by the Detail knob, a cut, an undo or an Isolate.
-**⌘Z / Ctrl-Z** undoes the most recent cut, added piece or trim.
+**⌘Z / Ctrl-Z** undoes the most recent cut, added or removed piece, or trim;
+every one of them is remembered and replayed when the shape is rebuilt.
 
 ## The optical fitting
 
@@ -251,6 +256,7 @@ js/
   ttf.js         dependency-free TrueType compiler (+ GSUB ligatures)
   classify.js    template character classifier (local, human-confirmed)
   auto.js        deskew + letter detection for the automated lane
+  worker.js      runs the automated lane off the page's thread
   extract.js     click-to-trace, clean-up, stroke graph, stroke chains
   complete.js    occlusion: hidden stroke ends, joins, frame completion,
                  bitten strokes, outlines
@@ -269,7 +275,7 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 62 unit tests: geometry, tracing, fitting, morphology,
+npm test        # 63 unit tests: geometry, tracing, fitting, morphology,
                 # deskew, seeded extraction, stroke-graph isolation,
                 # occlusion completion (hidden ends, joins across occluders
                 # and past the frame, bitten strokes, outlines), stroke
@@ -279,7 +285,7 @@ npm test        # 62 unit tests: geometry, tracing, fitting, morphology,
                 # against a real keypair, Drive calls stubbed)
 npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
-                # Isolate, trim on typing + ⌘Z, a letter behind a pipe, one
+                # Isolate, trim on typing + ⌘Z, Option-click removal, a letter behind a pipe, one
                 # cut off by the frame, a throw-up's outline,
                 # Detail, variant cycling, ligature shaping, weight
                 # slider, source popup, kerning, exports, TTF download

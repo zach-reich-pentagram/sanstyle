@@ -93,8 +93,7 @@
     if (templates) return templates;
     templates = [];
     const size = 110;
-    const cnv = g.document.createElement('canvas');
-    cnv.width = size; cnv.height = size;
+    const cnv = ST.makeCanvas(size, size);
     const c = cnv.getContext('2d');
     for (const ch of cls.charset) {
       for (const font of FONT_STACKS) {
@@ -124,8 +123,7 @@
     if (!bb || bb.w < 2 || bb.h < 2) return null;
     const size = 110;
     const s = Math.min((size - 8) / bb.w, (size - 8) / bb.h);
-    const cnv = g.document.createElement('canvas');
-    cnv.width = size; cnv.height = size;
+    const cnv = ST.makeCanvas(size, size);
     const c = cnv.getContext('2d');
     const path = new Path2D();
     for (const p of paths) {
@@ -297,6 +295,37 @@
    */
   cls.locate = function (mask, w, h, ch, opts) {
     const o = opts || {};
+    // the match is read on a 24×24 grid: a big mask searched at full size
+    // costs far more and finds the same boxes, so search a small copy
+    // (a block counts as ink when a quarter of it is) and scale back
+    const LIMIT = 320;
+    if (!o.noScale && Math.max(w, h) > LIMIT) {
+      const f = Math.ceil(Math.max(w, h) / LIMIT);
+      const sw = Math.ceil(w / f), sh = Math.ceil(h / f);
+      const small = new Uint8Array(sw * sh);
+      for (let y = 0; y < sh; y++) {
+        for (let x = 0; x < sw; x++) {
+          let ink = 0, n = 0;
+          for (let yy = y * f; yy < Math.min(h, (y + 1) * f); yy++) {
+            for (let xx = x * f; xx < Math.min(w, (x + 1) * f); xx++) { ink += mask[yy * w + xx]; n++; }
+          }
+          small[y * sw + x] = ink * 4 >= n ? 1 : 0;
+        }
+      }
+      const r = cls.locate(small, sw, sh, ch, Object.assign({}, o, {
+        noScale: true,
+        cx: Number.isFinite(o.cx) ? o.cx / f : o.cx, cy: Number.isFinite(o.cy) ? o.cy / f : o.cy,
+      }));
+      if (!r) return null;
+      const up = (b) => {
+        const x = Math.max(0, Math.round(b.x * f)), y = Math.max(0, Math.round(b.y * f));
+        return { x, y, w: Math.min(w - x, Math.round(b.w * f)), h: Math.min(h - y, Math.round(b.h * f)) };
+      };
+      return {
+        box: up(r.box), score: r.score, ch: r.ch, coarse: r.coarse && { box: up(r.coarse.box), score: r.coarse.score },
+        alternatives: r.alternatives && r.alternatives.map((a) => ({ box: up(a.box), score: a.score, ch: a.ch })),
+      };
+    }
     const bb = ST.raster.maskBounds(mask, w, h);
     if (!bb) return null;
     const tpls = cls.buildTemplates().filter((t) => t.ch === ch.toUpperCase() || t.ch === ch);

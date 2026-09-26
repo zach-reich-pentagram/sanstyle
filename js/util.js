@@ -41,6 +41,17 @@
 
   ST.uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
 
+  // A drawing surface: a <canvas> on the page, an OffscreenCanvas in the
+  // background worker that analyzes photos.
+  ST.makeCanvas = function (w, h) {
+    if (typeof g.document !== 'undefined') {
+      const c = g.document.createElement('canvas');
+      c.width = w; c.height = h;
+      return c;
+    }
+    return new OffscreenCanvas(w, h);
+  };
+
   // --- DOM helpers (browser only) ---
   if (typeof g.document !== 'undefined') {
     ST.$ = (sel, root) => (root || g.document).querySelector(sel);

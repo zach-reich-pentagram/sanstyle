@@ -734,6 +734,19 @@
   }
   ex.strokeGraph = strokeGraph;
 
+  // A shape that is only read (a candidate's mask, trimmed several ways
+  // in a row) is skeletonized once.
+  const graphCache = new WeakMap();
+  function cachedGraph(mask, w, h) {
+    let c = graphCache.get(mask);
+    if (!c || c.w !== w || c.h !== h) {
+      const sw = R.strokeWidth(mask, w, h);
+      c = { w, h, sw, graph: sw > 1 ? strokeGraph(mask, w, h, sw) : null };
+      graphCache.set(mask, c);
+    }
+    return c;
+  }
+
   /**
    * "Cut off the excess": keep the strokes of a fused shape that belong to
    * the letter inside `box` ({x0, y0, x1, y1}, exclusive, the template's
@@ -744,10 +757,8 @@
    * and capped. Returns { mask, removed, strokes } or null.
    */
   ex.isolateStrokes = function (mask, w, h, box, cx, cy) {
-    const sw = R.strokeWidth(mask, w, h);
-    if (!(sw > 1)) return null;
-    const graph = strokeGraph(mask, w, h, sw);
-    if (!graph.segments.length) return null;
+    const { sw, graph } = cachedGraph(mask, w, h);
+    if (!(sw > 1) || !graph || !graph.segments.length) return null;
     // A neighbor's stroke reaches far beyond the box, or crosses the box
     // edge and carries on into more strokes out there — either joining the
     // letter side-on at a T inside, or living mostly outside. The letter's
@@ -869,9 +880,8 @@
   // Returns { n, owner (Int32: chain id ≥ 1, −(cluster+1) at junctions),
   //   armsOf (cluster → chain ids), adj (chain → Set of chains), sw } or null.
   ex.strokeChains = function (mask, w, h) {
-    const sw = R.strokeWidth(mask, w, h);
-    if (!(sw > 2)) return null;
-    const graph = strokeGraph(mask, w, h, sw);
+    const { sw, graph } = cachedGraph(mask, w, h);
+    if (!(sw > 2) || !graph) return null;
     const segs = graph.segments;
     if (segs.length < 2) return null;
     const X = (p) => p % w, Y = (p) => (p / w) | 0;
@@ -1031,6 +1041,62 @@
     for (const c of set) for (const i of sc.tubes[c]) out[i] = 1;
     return out;
   }
+
+  /**
+   * Take a piece off a shape: the stroke under (px, py) and whatever hangs
+   * on the shape only through it — a neighbor's letter fused on, a drip, a
+   * stray blob — keeping the part that holds `anchor` ({x, y}, the letter
+   * you clicked; else the biggest part). A piece not joined to the letter
+   * at all goes whole. The faces where it came off are healed and capped.
+   * → { mask, removed } or null (nothing there, or it is the whole shape)
+   */
+  ex.removePiece = function (mask, w, h, px, py, anchor) {
+    const sw = R.strokeWidth(mask, w, h);
+    const x = Math.round(px), y = Math.round(py);
+    if (x < 0 || y < 0 || x >= w || y >= h) return null;
+    const at = nearestInk(mask, w, h, x, y, Math.max(6, Math.round(sw)));
+    if (at < 0) return null;
+    const total = R.count(mask);
+    const { labels, sizes } = R.components(mask, w, h);
+    const anchorIdx = anchor ? nearestInk(mask, w, h, Math.max(0, Math.min(w - 1, Math.round(anchor.x))), Math.max(0, Math.min(h - 1, Math.round(anchor.y))), 3) : -1;
+    let mainL = anchorIdx >= 0 ? labels[anchorIdx] : 0;
+    if (!mainL) { let best = 0; for (let L = 1; L < sizes.length; L++) if (sizes[L] > best) { best = sizes[L]; mainL = L; } }
+    let out;
+    if (labels[at] !== mainL) {
+      // a separate piece: all of it goes
+      out = new Uint8Array(mask);
+      for (let i = 0; i < out.length; i++) if (labels[i] === labels[at]) out[i] = 0;
+    } else {
+      const sc = ex.strokeChains(mask, w, h);
+      if (!sc) return null;
+      let chain = sc.owner[at];
+      if (chain < 0) {
+        // on a junction: the stroke through it whose tube holds the click
+        const arms = Array.from(sc.armsOf[-chain - 1]);
+        chain = arms.find((c) => sc.tubes[c].indexOf(at) >= 0) || arms[0];
+      }
+      if (!(chain > 0)) return null;
+      const rest = new Set();
+      for (let c = 1; c <= sc.n; c++) if (c !== chain) rest.add(c);
+      const kept = renderChains(sc, mask, rest);
+      // what still holds the letter: the part with the anchor if it
+      // survived, else the biggest part
+      const kc = R.components(kept, w, h);
+      let keepL = anchorIdx >= 0 && kept[anchorIdx] ? kc.labels[anchorIdx] : 0;
+      if (!keepL) { let best = 0; for (let L = 1; L < kc.sizes.length; L++) if (kc.sizes[L] > best) { best = kc.sizes[L]; keepL = L; } }
+      if (!keepL) return null;
+      out = new Uint8Array(w * h);
+      for (let i = 0; i < out.length; i++) if (kc.labels[i] === keepL) out[i] = 1;
+      // other separate pieces of the shape stay as they were
+      for (let i = 0; i < out.length; i++) if (mask[i] && labels[i] !== mainL) out[i] = 1;
+    }
+    const removed = new Uint8Array(w * h);
+    let n = 0;
+    for (let i = 0; i < mask.length; i++) if (mask[i] && !out[i]) { removed[i] = 1; n++; }
+    if (!n || R.count(out) < total * 0.05) return null;
+    if (sw > 1) out = healCut(out, mask, removed, w, h, sw);
+    return { mask: out, removed: n };
+  };
 
   /**
    * The letter under a click in a shape fused with same-colored neighbors,

@@ -113,8 +113,7 @@
     const s = Math.abs(Math.sin(rad)), c = Math.abs(Math.cos(rad));
     const W = Math.round(src.width * c + src.height * s);
     const H = Math.round(src.width * s + src.height * c);
-    const out = g.document.createElement('canvas');
-    out.width = W; out.height = H;
+    const out = ST.makeCanvas(W, H);
     const ctx = out.getContext('2d');
     let fill = { r: 128, g: 128, b: 128 };
     try {
@@ -131,15 +130,13 @@
     // are past the photo's edge, and a letter the photo cut off there is
     // finished past it like at any frame edge
     try {
-      const m = g.document.createElement('canvas');
-      m.width = W; m.height = H;
+      const m = ST.makeCanvas(W, H);
       const mc = m.getContext('2d');
       mc.translate(W / 2, H / 2);
       mc.rotate(rad);
       if (src._inPhoto) {
         // turning a photo that was turned before: its own edge still counts
-        const pc = g.document.createElement('canvas');
-        pc.width = src.width; pc.height = src.height;
+        const pc = ST.makeCanvas(src.width, src.height);
         const px = pc.getContext('2d'), pd = px.createImageData(src.width, src.height);
         for (let i = 0; i < src._inPhoto.length; i++) if (src._inPhoto[i]) pd.data[i * 4 + 3] = 255;
         px.putImageData(pd, 0, 0);
@@ -305,9 +302,7 @@
     let work = srcCanvas;
     const s = Math.min(1, o.maxEdge / Math.max(work.width, work.height));
     if (s < 1) {
-      const c = g.document.createElement('canvas');
-      c.width = Math.round(work.width * s);
-      c.height = Math.round(work.height * s);
+      const c = ST.makeCanvas(Math.round(work.width * s), Math.round(work.height * s));
       c.getContext('2d').drawImage(work, 0, 0, c.width, c.height);
       scaleInPhoto(work, c);
       work = c;
@@ -337,16 +332,22 @@
     const paint = pm ? pm.filled : null, paintRaw = pm ? pm.raw : null;
 
     const W = work.width, H = work.height, area = W * H;
+    // the luminance fallback, prepared only if the color route finds nothing:
     // pre-blur the field so broken/chalky paint textures threshold cleanly
-    const blurred = ST.raster.blur(gray, W, H, 2);
-    gray = new Uint8Array(W * H);
-    for (let i = 0; i < gray.length; i++) gray[i] = Math.max(0, Math.min(255, Math.round(blurred[i])));
-    const t = ST.raster.otsu(gray, null);
-    let mean = 0;
-    for (let i = 0; i < gray.length; i++) mean += gray[i];
-    mean /= gray.length;
+    let t = 0, mean = 0, lumaReady = false;
+    const prepLuma = () => {
+      if (lumaReady) return;
+      lumaReady = true;
+      const blurred = ST.raster.blur(gray, W, H, 2);
+      gray = new Uint8Array(W * H);
+      for (let i = 0; i < gray.length; i++) gray[i] = Math.max(0, Math.min(255, Math.round(blurred[i])));
+      t = ST.raster.otsu(gray, null);
+      for (let i = 0; i < gray.length; i++) mean += gray[i];
+      mean /= gray.length;
+    };
 
     const tryPolarity = (invert) => {
+      prepLuma();
       let mask = ST.raster.maskFromLuma(gray, null, t, invert);
       mask = ST.raster.open(mask, W, H, 1);
       const det = detectCandidates(mask, W, H, area);
@@ -381,7 +382,7 @@
       const det = detectCandidates(m, MW, MH, area, { x0: P, y0: P, x1: P + W - 1, y1: P + H - 1 });
       if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length, P, MW, MH, tubes, sw };
     }
-    if (!first) first = tryPolarity(mean <= 128);
+    if (!first) { prepLuma(); first = tryPolarity(mean <= 128); }
     if (!first.n) {
       const second = tryPolarity(mean > 128);
       if (second.n) first = second;
@@ -446,8 +447,7 @@
       for (const c of candidates) tallest = Math.max(tallest, Math.max(c.crop.h, c.crop.w * 0.8));
       const k = Math.min(2.5, 520 / Math.max(1, tallest));
       if (k > 1.15) {
-        const up = g.document.createElement('canvas');
-        up.width = Math.round(W * k); up.height = Math.round(H * k);
+        const up = ST.makeCanvas(Math.round(W * k), Math.round(H * k));
         const uc = up.getContext('2d');
         uc.imageSmoothingEnabled = true;
         uc.imageSmoothingQuality = 'high';

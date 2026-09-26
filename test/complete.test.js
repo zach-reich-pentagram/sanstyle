@@ -149,3 +149,24 @@ test('growLetter: a T whose bar crosses an O is split off it stroke by stroke', 
   assert.ok(score(got.mask) > 0.9, `the T comes out (IoU ${score(got.mask).toFixed(3)})`);
   assert.strictEqual(got.mask[100 * w + 330], 1, 'the bar is whole where it crosses the ring');
 });
+
+test('removePiece: Option-click takes the fused O off the T, or a stray blob off the letter', () => {
+  const w = 700, h = 600;
+  const T = strokes(w, h, [[60, 100, 400, 100], [200, 100, 200, 520]], 20);
+  const m = new Uint8Array(T);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const dx = (x - 460) / 130, dy = (y - 200) / 170, rr = Math.hypot(dx, dy), gr = Math.hypot(dx / 130, dy / 170);
+    if (Math.abs(rr - 1) / gr <= 20) m[y * w + x] = 1;
+  }
+  const iou = (s) => { let i = 0, u = 0; for (let k = 0; k < s.length; k++) { if (s[k] && T[k]) i++; if (s[k] || T[k]) u++; } return i / u; };
+  const got = ST.extract.removePiece(m, w, h, 590, 200, { x: 200, y: 400 });
+  assert.ok(got, 'removed');
+  assert.ok(iou(got.mask) > 0.9, `the T is left (IoU ${iou(got.mask).toFixed(3)})`);
+  assert.strictEqual(got.mask[100 * w + 330], 1, 'the bar is whole where the ring crossed it');
+  // a separate blob goes whole
+  const withBlob = new Uint8Array(T);
+  for (let y = 300; y < 340; y++) for (let x = 500; x < 540; x++) withBlob[y * w + x] = 1;
+  const blob = ST.extract.removePiece(withBlob, w, h, 520, 320, { x: 200, y: 400 });
+  assert.ok(blob && blob.removed >= 1500 && iou(blob.mask) > 0.95, 'the stray blob is gone, the letter untouched');
+  assert.strictEqual(ST.extract.removePiece(T, w, h, 650, 560, null), null, 'nothing under the click: nothing removed');
+});

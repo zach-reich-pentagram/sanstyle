@@ -40,9 +40,74 @@
     el.textContent = text;
   }
 
+  // ---------- analysis off the page's thread ----------
+  // Straightening a photo and finding its letterforms takes a second or two
+  // of number crunching; done here it would freeze the page for every photo
+  // in a stack. A background worker (js/worker.js, the same code) does it
+  // instead. Where workers can't draw (old browsers), it runs on the page.
+  let worker = null, workerOk = true, nextJob = 1;
+  const workerJobs = new Map();
+  function analysisWorker() {
+    if (!workerOk) return null;
+    if (worker) return worker;
+    try {
+      if (typeof g.Worker === 'undefined' || typeof g.OffscreenCanvas === 'undefined' || !g.createImageBitmap) throw new Error('unsupported');
+      worker = new g.Worker('js/worker.js');
+      worker.onmessage = (e) => {
+        const done = workerJobs.get(e.data.id);
+        if (done) { workerJobs.delete(e.data.id); done(e.data); }
+      };
+      worker.onerror = (e) => {
+        console.warn('analysis worker failed — analyzing on the page instead', e && e.message);
+        workerOk = false;
+        worker = null;
+        for (const [id, done] of workerJobs) done({ id, ok: false, error: 'worker failed' });
+        workerJobs.clear();
+      };
+    } catch (e) {
+      workerOk = false;
+      worker = null;
+    }
+    return worker;
+  }
+
+  batch.analyze = async function (canvas, opts) {
+    const w = analysisWorker();
+    if (w) {
+      try {
+        const bitmap = await g.createImageBitmap(canvas);
+        const id = nextJob++;
+        const r = await new Promise((resolve) => {
+          workerJobs.set(id, resolve);
+          w.postMessage({ id, bitmap, opts: opts || {} }, [bitmap]);
+        });
+        if (r.ok) {
+          const c = ST.makeCanvas(r.width, r.height);
+          c.getContext('2d').drawImage(r.image, 0, 0);
+          if (r.image.close) r.image.close();
+          if (r.inPhoto) c._inPhoto = r.inPhoto;
+          return { canvas: c, angle: r.angle, candidates: r.candidates };
+        }
+        console.warn('analysis in the worker failed — analyzing on the page instead:', r.error);
+      } catch (e) {
+        console.warn('analysis in the worker failed — analyzing on the page instead:', e);
+      }
+    }
+    return ST.auto.processImage(canvas, opts || {});
+  };
+
   // ---------- intake ----------
   function pushPhoto(canvas, name, sourceId) {
-    const result = ST.auto.processImage(canvas, {});
+    return pushResult(ST.auto.processImage(canvas, {}), name, sourceId);
+  }
+  batch.addCanvas = pushPhoto;
+
+  // the same, analyzed in the background
+  async function pushPhotoAsync(canvas, name, sourceId) {
+    return pushResult(await batch.analyze(canvas, {}), name, sourceId);
+  }
+
+  function pushResult(result, name, sourceId) {
     batch.queue.push({
       name: name || 'photo',
       sourceId: sourceId || null,
@@ -56,7 +121,6 @@
     updateQueuePill();
     return result.candidates.length;
   }
-  batch.addCanvas = pushPhoto;
 
   let intakeStart = 0;
   function startIntake() {
@@ -90,11 +154,10 @@
             if (sourceId) stored++;
           } catch (e) { console.warn('drive upload failed', e); }
         }
-        pushPhoto(canvas, file.name, sourceId);
+        await pushPhotoAsync(canvas, file.name, sourceId);
       } catch (e) {
         console.warn('auto: skipped', file.name, e);
       }
-      await new Promise((r) => setTimeout(r, 10));
     }
     if (stored) ST.toast(`${stored} photo${stored === 1 ? '' : 's'} stored in the Drive inbox.`);
     endIntake();
@@ -112,7 +175,7 @@
       kick(i + 2);
       try {
         const canvas = await jobs[i].promise;
-        pushPhoto(canvas, jobs[i].photo.name, jobs[i].photo.id);
+        await pushPhotoAsync(canvas, jobs[i].photo.name, jobs[i].photo.id);
       } catch (e) {
         console.warn('inbox photo failed', jobs[i].photo.name, e);
       }
@@ -175,11 +238,11 @@
     if (!cand) {
       $('#reviewHint').textContent = 'Nothing traced yet — click the letter in the photo to trace it, or skip the photo.';
     } else {
-      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (with added pieces)' }[cand.kind] || '';
+      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (with added pieces)', trimmed: ' (pieces removed)' }[cand.kind] || '';
       $('#reviewHint').textContent =
         `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote}. ` +
-        'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate. ' +
-        'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it. ⌘Z undoes the last cut or added piece.';
+        'Wrong shape? Click the letter in the photo. Fused with a neighbor? Type the character, Option-click the neighbor to take it off, or drag a cut across the join. ' +
+        'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it. ⌘Z undoes the last change.';
     }
     const tab = $('#tab-capture');
     if (tab && tab.classList.contains('active')) setTimeout(() => input.focus(), 60);
@@ -205,7 +268,7 @@
     if (res.click) item.lastClick = res.click;
     // a plain click starts over on the letter under it; the internal
     // re-traces (Detail, cuts, undo) keep the shift-clicked pieces
-    if (!(opts && opts.keepParts)) item.parts = [];
+    if (!(opts && opts.keepParts)) { item.parts = []; item.removals = []; }
     item.candidates = res.candidates.concat(item.candidates);
     item.ci = 0;
     renderCurrent();
@@ -326,11 +389,43 @@
     return 1;
   };
 
-  // Shift-clicked pieces are remembered, so a Detail change, a cut, an undo
-  // or an Isolate can rebuild the shape and put them back.
+  // Option-click: take a piece off the shape — the stroke under the click
+  // and whatever hangs on the letter only through it (a neighbor fused on,
+  // a drip, a stray blob). The letter you clicked stays.
+  batch.removeAt = function (x, y, opts) {
+    const o = opts || {};
+    const item = batch.queue[batch.idx];
+    const cur = item && item.candidates[item.ci];
+    if (!cur) return 0;
+    const anchor = item.lastClick ? { x: item.lastClick.x - cur.crop.x, y: item.lastClick.y - cur.crop.y } : null;
+    const res = ST.extract.removePiece(cur.mask, cur.w, cur.h, x - cur.crop.x, y - cur.crop.y, anchor);
+    if (!res) {
+      if (!o.quiet) ST.toast('Nothing to take off there — Option-click a piece of the outlined shape (not the whole of it).', 'warn');
+      return 0;
+    }
+    const paths = ST.trace.vectorize(res.mask, cur.w, cur.h, {});
+    if (!paths.length) return 0;
+    item.candidates[item.ci] = { crop: cur.crop, mask: res.mask, w: cur.w, h: cur.h, paths, kind: 'trimmed', _autoTried: cur._autoTried };
+    if (!o.replay) {
+      item.removals = (item.removals || []).concat([{ x, y }]);
+      item.history = (item.history || []).concat([{ type: 'remove' }]);
+      const keep = $('#reviewChar').value;
+      renderCurrent();
+      $('#reviewChar').value = keep;
+      syncIsolateLabel();
+      ST.capture.updatePreview();
+      ST.toast('Piece removed — ⌘Z brings it back.');
+    }
+    return 1;
+  };
+
+  // Shift-clicked pieces (and Option-clicked removals) are remembered, so a
+  // Detail change, a cut, an undo or an Isolate can rebuild the shape and
+  // put them back.
   function reapplyParts(item) {
     let n = 0;
     for (const p of item.parts || []) n += batch.addPart(p.x, p.y, { replay: true, quiet: true });
+    for (const r of item.removals || []) n += batch.removeAt(r.x, r.y, { replay: true, quiet: true });
     if (n) {
       const keep = $('#reviewChar').value;
       renderCurrent();
@@ -448,8 +543,9 @@
     }
     if (last.type === 'cut' && item.cuts && item.cuts.length) item.cuts.pop();
     else if (last.type === 'part' && item.parts && item.parts.length) item.parts.pop();
+    else if (last.type === 'remove' && item.removals && item.removals.length) item.removals.pop();
     rebuild(item);
-    ST.toast(last.type === 'cut' ? 'Cut undone.' : 'Added piece undone.');
+    ST.toast({ cut: 'Cut undone.', part: 'Added piece undone.', remove: 'Removed piece is back.' }[last.type] || 'Undone.');
     return true;
   };
 
@@ -477,25 +573,30 @@
     // each trims the shape, and the trim that looks most like the character
     // wins (the best-matching box can still take a bit of the neighbor)
     const found = ST.classify.locate(cand.mask, cand.w, cand.h, ch, { cx: lc.x, cy: lc.y, alternatives: 3 });
-    let best = null;
-    const consider = (mask, res) => {
-      const got = trimTo(cand, mask, res);
-      if (!got) return;
-      got.fit = ST.classify.scoreFor(got.cand.paths, ch);
-      if (!best || got.fit > best.fit) best = got;
-    };
+    // every reading, ranked on the raw trim (cheap); only the front
+    // runners are cleaned up and traced
+    const trims = [];
     for (const place of (found && (found.alternatives || [found])) || []) {
       // a loose match still says which strokes are the neighbor's; only a
       // hopeless one is refused
       const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y, 0.18, { found: place });
       if (!res) continue;
       const strokes = res.margin ? ST.extract.isolateStrokes(cand.mask, cand.w, cand.h, res.margin, lc.x, lc.y) : null;
-      consider(strokes ? strokes.mask : res.mask, res);
+      trims.push({ mask: strokes ? strokes.mask : res.mask, res });
     }
     // and stroke by stroke: from the stroke clicked, the touching strokes
     // that make the shape most like the character
     const grown = ST.extract.growLetter(cand.mask, cand.w, cand.h, lc.x, lc.y, (m) => ST.classify.scoreMask(m, cand.w, cand.h, ch));
-    if (grown) consider(grown.mask, { score: grown.score });
+    if (grown) trims.push({ mask: grown.mask, res: { score: grown.score } });
+    for (const t of trims) t.rank = ST.classify.scoreMask(t.mask, cand.w, cand.h, ch);
+    trims.sort((a, b) => b.rank - a.rank);
+    let best = null;
+    for (const t of trims.slice(0, 2)) {
+      const got = trimTo(cand, t.mask, t.res);
+      if (!got) continue;
+      got.fit = ST.classify.scoreFor(got.cand.paths, ch);
+      if (!best || got.fit > best.fit) best = got;
+    }
     return best;
   }
 
@@ -566,11 +667,14 @@
     const ch = batch.charKey($('#reviewChar').value);
     if (!ch || ch.length !== 1 || cand._autoTried === ch) return false;
     cand._autoTried = ch;
+    // a shape that already reads as the character has nothing fused to it
+    const whole = ST.classify.scoreFor(cand.paths, ch);
+    if (whole >= 0.5) return false;
     const got = isolatedCandidate(item, cand, ch);
     if (!got) return false;
     const before = ST.raster.count(cand.mask), after = ST.raster.count(got.cand.mask);
     if (after > 0.85 * before || after < 0.2 * before) return false;
-    const whole = ST.classify.scoreFor(cand.paths, ch), trimmed = got.fit;
+    const trimmed = got.fit;
     if (!(trimmed >= 0.3 && trimmed >= whole + 0.06)) return false;
     got.cand._autoTried = ch;
     showIsolated(item, got);
@@ -638,8 +742,9 @@
     $('#reviewAccept').addEventListener('click', batch.accept);
     $('#reviewAlt').addEventListener('click', batch.tryNext);
     $('#reviewSkip').addEventListener('click', batch.skip);
-    $('#reviewIsolate').addEventListener('click', () => batch.isolate());
-    $('#reviewDetail').addEventListener('input', ST.debounce((e) => batch.setDetail(+e.target.value), 220));
+    $('#reviewIsolate').addEventListener('click', () => busy('Isolating…', () => batch.isolate()));
+    const busy = (label, fn) => (ST.capture.busy ? ST.capture.busy(label, fn) : fn());
+    $('#reviewDetail').addEventListener('input', ST.debounce((e) => { const v = +e.target.value; busy('Re-reading the photo…', () => batch.setDetail(v)); }, 220));
     // ⌘Z / Ctrl-Z on the capture tab undoes the last cut or added piece
     g.addEventListener('keydown', (e) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || (e.key !== 'z' && e.key !== 'Z')) return;
@@ -649,7 +754,7 @@
       const item = batch.queue[batch.idx];
       if (!item || !item.history || !item.history.length) return;
       e.preventDefault();
-      batch.undo();
+      busy('Undoing…', () => batch.undo());
     });
     $('#reviewChar').addEventListener('input', syncIsolateLabel);
     $('#reviewChar').addEventListener('input', ST.debounce(() => batch.autoIsolate(), 380));

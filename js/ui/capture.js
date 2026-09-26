@@ -64,7 +64,7 @@
     if (tag) { tag.classList.toggle('active', !!cand); tag.classList.toggle('locked', !cand); }
     if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall.');
     else if (!cand) setHint('Nothing traced yet — click the letter in the photo, or skip it.');
-    else setHint('Click a letter to trace it · shift-click adds a piece · drag a short cut across a join · scroll zooms, space pans');
+    else setHint('Click a letter to trace it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans');
     drawTrace();
     updatePreview();
     requestDraw();
@@ -252,8 +252,9 @@
   function draw() {
     if (!ctx) return;
     const dpr = g.devicePixelRatio || 1;
-    stage.width = stage.clientWidth * dpr;
-    stage.height = stage.clientHeight * dpr;
+    // resizing a canvas reallocates it: only when its size really changed
+    const bw = Math.round(stage.clientWidth * dpr), bh = Math.round(stage.clientHeight * dpr);
+    if (stage.width !== bw || stage.height !== bh) { stage.width = bw; stage.height = bh; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, stage.clientWidth, stage.clientHeight);
 
@@ -327,7 +328,7 @@
       return;
     }
     if (ev.button !== 0) return;
-    dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, moved: false, shift: ev.shiftKey };
+    dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, moved: false, shift: ev.shiftKey, alt: ev.altKey };
   }
 
   function onPointerMove(ev) {
@@ -351,15 +352,30 @@
     if (!d || d.kind !== 'gesture' || !cap.item || !cap.img) { requestDraw(); return; }
     const inside = (p) => p.x >= 0 && p.y >= 0 && p.x < cap.img.width && p.y < cap.img.height;
     if (d.moved) {
-      if (inside(d.start) || inside(d.last)) ST.batch.addCut(d.start.x, d.start.y, d.last.x, d.last.y);
+      if (inside(d.start) || inside(d.last)) busy('Cutting…', () => ST.batch.addCut(d.start.x, d.start.y, d.last.x, d.last.y));
       else requestDraw();
+    } else if (d.alt || ev.altKey) {
+      // Option-click: take that piece off the shape (a piece completed past
+      // the photo's edge can be clicked there too)
+      busy('Removing…', () => ST.batch.removeAt(d.start.x, d.start.y));
     } else if (inside(d.start)) {
-      if (d.shift || ev.shiftKey) ST.batch.addPart(d.start.x, d.start.y);
-      else ST.batch.clickTrace(d.start.x, d.start.y);
+      if (d.shift || ev.shiftKey) busy('Adding the piece…', () => ST.batch.addPart(d.start.x, d.start.y));
+      else busy('Tracing…', () => ST.batch.clickTrace(d.start.x, d.start.y));
     } else {
       requestDraw();
     }
   }
+
+  // Tracing, cutting and re-reading run on the page and take a moment:
+  // say so (cursor and hint) and let that paint before the work starts.
+  function busy(label, fn) {
+    setHint(label);
+    if (stage) stage.style.cursor = 'progress';
+    g.requestAnimationFrame(() => g.setTimeout(() => {
+      try { fn(); } finally { setTool(cap.tool); requestDraw(); }
+    }, 0));
+  }
+  cap.busy = busy;
 
   function onWheel(ev) {
     if (!cap.img) return;

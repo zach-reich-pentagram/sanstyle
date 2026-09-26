@@ -511,9 +511,24 @@
       const rLetter = 0.5 * (o.letterWidth || R.strokeWidth(mask, W, H));
       const b0 = o.box || { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
       const minA = o.minArea || 200;
+      // only a piece with hidden ground right against it can have been bitten
+      const touchesHidden = (L) => {
+        for (let y = Math.max(1, fy0[L]); y <= Math.min(H - 2, fy1[L]); y++) {
+          for (let x = Math.max(1, fx0[L]); x <= Math.min(W - 2, fx1[L]); x++) {
+            const i = y * W + x;
+            if (first.labels[i] !== L) continue;
+            if (first.labels[i - 1] === L && first.labels[i + 1] === L && first.labels[i - W] === L && first.labels[i + W] === L) continue;
+            for (let d = 1; d <= 4; d++) {
+              if (at(x + d, y) === HIDDEN || at(x - d, y) === HIDDEN || at(x, y + d) === HIDDEN || at(x, y - d) === HIDDEN) return true;
+            }
+          }
+        }
+        return false;
+      };
       for (let L = 1; L < nb; L++) {
         if (first.sizes[L] < minA && L !== seedL0) continue;
         if (fx1[L] < b0.x0 || fx0[L] > b0.x1 || fy1[L] < b0.y0 || fy0[L] > b0.y1) continue;
+        if (!touchesHidden(L)) continue;
         const m = Math.round(3 * rLetter + 4);
         const add = C.restoreWidth(mask, W, H, at, { x0: fx0[L] - m, y0: fy0[L] - m, x1: fx1[L] + m, y1: fy1[L] + m }, rLetter, (i) => first.labels[i] === L);
         if (!add) continue;

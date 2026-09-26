@@ -255,11 +255,15 @@
 
   // Connected region (4-neighborhood) of the predicate containing (sx, sy).
   // pred(i) → truthy for pixels that belong. Returns {mask, count}.
+  // (the stack is shared between calls: a click grows a region at a dozen
+  // tolerances, and a fresh photo-sized stack each time adds up)
+  let floodStack = null;
   raster.floodFrom = function (w, h, sx, sy, pred) {
     const mask = new Uint8Array(w * h);
     const start = sy * w + sx;
     if (sx < 0 || sy < 0 || sx >= w || sy >= h || !pred(start)) return { mask, count: 0 };
-    const stack = new Int32Array(w * h);
+    if (!floodStack || floodStack.length < w * h) floodStack = new Int32Array(w * h);
+    const stack = floodStack;
     let sp = 0, count = 0;
     stack[sp++] = start;
     mask[start] = 1;
@@ -424,6 +428,11 @@
   };
 
   // Zhang–Suen thinning → one-pixel-wide, 8-connected skeleton of the ink.
+  // Only pixels on the ink's edge can ever be deleted (an interior pixel
+  // has all 8 neighbors and fails B ≤ 6), so each pass looks at the edge
+  // alone — the current edge, plus the ink uncovered by the last pass's
+  // deletions — instead of rescanning the whole frame: same skeleton,
+  // a fraction of the work.
   raster.thin = function (mask, w, h) {
     const img = new Uint8Array(mask);
     const bb = raster.maskBounds(img, w, h);
@@ -432,30 +441,53 @@
     // the frame edge is treated as background: clear the outermost ring
     for (let x = 0; x < w; x++) { img[x] = 0; img[(h - 1) * w + x] = 0; }
     for (let y = 0; y < h; y++) { img[y * w] = 0; img[y * w + w - 1] = 0; }
-    const del = [];
+    const inEdge = new Uint8Array(w * h);
+    let cap = 1024, edge = new Int32Array(cap), n = 0;
+    const push = (i) => {
+      if (n === cap) { cap *= 2; const e2 = new Int32Array(cap); e2.set(edge); edge = e2; }
+      edge[n++] = i; inEdge[i] = 1;
+    };
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const i = y * w + x;
+        if (img[i] && (!img[i - w - 1] || !img[i - w] || !img[i - w + 1] || !img[i - 1] ||
+            !img[i + 1] || !img[i + w - 1] || !img[i + w] || !img[i + w + 1])) push(i);
+      }
+    }
+    let del = new Int32Array(1024), nd = 0;
+    const touch = (j) => { if (img[j] && !inEdge[j]) push(j); };
     let changed = true;
     while (changed) {
       changed = false;
       for (let step = 0; step < 2; step++) {
-        del.length = 0;
-        for (let y = y0; y <= y1; y++) {
-          for (let x = x0; x <= x1; x++) {
-            const i = y * w + x;
-            if (!img[i]) continue;
-            const p2 = img[i - w], p3 = img[i - w + 1], p4 = img[i + 1], p5 = img[i + w + 1];
-            const p6 = img[i + w], p7 = img[i + w - 1], p8 = img[i - 1], p9 = img[i - w - 1];
-            const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-            if (B < 2 || B > 6) continue;
-            let A = 0;
-            if (!p2 && p3) A++; if (!p3 && p4) A++; if (!p4 && p5) A++; if (!p5 && p6) A++;
-            if (!p6 && p7) A++; if (!p7 && p8) A++; if (!p8 && p9) A++; if (!p9 && p2) A++;
-            if (A !== 1) continue;
-            if (step === 0) { if (p2 * p4 * p6 || p4 * p6 * p8) continue; }
-            else if (p2 * p4 * p8 || p2 * p6 * p8) continue;
-            del.push(i);
-          }
+        nd = 0;
+        for (let k = 0; k < n; k++) {
+          const i = edge[k];
+          const p2 = img[i - w], p3 = img[i - w + 1], p4 = img[i + 1], p5 = img[i + w + 1];
+          const p6 = img[i + w], p7 = img[i + w - 1], p8 = img[i - 1], p9 = img[i - w - 1];
+          const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+          if (B < 2 || B > 6) continue;
+          let A = 0;
+          if (!p2 && p3) A++; if (!p3 && p4) A++; if (!p4 && p5) A++; if (!p5 && p6) A++;
+          if (!p6 && p7) A++; if (!p7 && p8) A++; if (!p8 && p9) A++; if (!p9 && p2) A++;
+          if (A !== 1) continue;
+          if (step === 0) { if (p2 * p4 * p6 || p4 * p6 * p8) continue; }
+          else if (p2 * p4 * p8 || p2 * p6 * p8) continue;
+          if (nd === del.length) { const d2 = new Int32Array(del.length * 2); d2.set(del); del = d2; }
+          del[nd++] = i;
         }
-        if (del.length) { changed = true; for (const i of del) img[i] = 0; }
+        if (!nd) continue;
+        changed = true;
+        for (let k = 0; k < nd; k++) img[del[k]] = 0;
+        // drop what was deleted from the edge, then add the ink it uncovered
+        let m = 0;
+        for (let k = 0; k < n; k++) { const i = edge[k]; if (img[i]) edge[m++] = i; else inEdge[i] = 0; }
+        n = m;
+        for (let k = 0; k < nd; k++) {
+          const i = del[k];
+          touch(i - w - 1); touch(i - w); touch(i - w + 1); touch(i - 1);
+          touch(i + 1); touch(i + w - 1); touch(i + w); touch(i + w + 1);
+        }
       }
     }
     return img;
