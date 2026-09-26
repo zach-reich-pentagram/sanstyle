@@ -163,7 +163,6 @@
     syncIsolateLabel();
     $('#reviewDetail').value = item ? item.detail || 5 : 5;
     $('#reviewDetail').disabled = !item;
-    $('#reviewUndoCut').style.display = item && item.cuts && item.cuts.length ? '' : 'none';
     $('#reviewAlt').disabled = !item || item.candidates.length < 2;
     $('#reviewIsolate').disabled = !cand;
     $('#reviewSkip').disabled = !item;
@@ -180,7 +179,7 @@
       $('#reviewHint').textContent =
         `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote}. ` +
         'Wrong shape? Click the letter in the photo. Fused with a neighbor? Drag a cut across the join, or type the character and Isolate. ' +
-        'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it.';
+        'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it. ⌘Z undoes the last cut or added piece.';
     }
     const tab = $('#tab-capture');
     if (tab && tab.classList.contains('active')) setTimeout(() => input.focus(), 60);
@@ -262,32 +261,67 @@
     return { crop: { x: x0, y: y0, w, h }, mask, w, h, paths, kind: 'parts' };
   }
 
+  // A stroke-width spot at (x, y): what a shift-click brushes in when the
+  // classifier sees no paint there (a glint, a worn patch) — the click itself
+  // says there is.
+  function discPart(x, y, r, W, H) {
+    const cx = Math.round(x), cy = Math.round(y);
+    const x0 = Math.max(0, cx - r - 1), y0 = Math.max(0, cy - r - 1);
+    const x1 = Math.min(W, cx + r + 2), y1 = Math.min(H, cy + r + 2);
+    const w = x1 - x0, h = y1 - y0;
+    const mask = new Uint8Array(w * h);
+    for (let yy = 0; yy < h; yy++) {
+      for (let xx = 0; xx < w; xx++) {
+        const dx = xx + x0 - cx, dy = yy + y0 - cy;
+        if (dx * dx + dy * dy <= (r + 0.5) * (r + 0.5)) mask[yy * w + xx] = 1;
+      }
+    }
+    return { crop: { x: x0, y: y0, w, h }, mask, w, h, paths: [], kind: 'brush' };
+  }
+
+  const covers = (cand, x, y) => {
+    const cx = Math.round(x) - cand.crop.x, cy = Math.round(y) - cand.crop.y;
+    return cx >= 0 && cy >= 0 && cx < cand.w && cy < cand.h && !!cand.mask[cy * cand.w + cx];
+  };
+
   batch.addPart = function (x, y, opts) {
     const o = opts || {};
     const item = batch.queue[batch.idx];
     if (!item) return 0;
     const cur = item.candidates[item.ci];
     if (!cur) return batch.clickTrace(x, y);
-    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null, smoothing: smoothingFor(item) });
-    if (!res) {
-      if (!o.quiet) ST.toast('Nothing paint-like under that click — try the middle of the piece.', 'warn');
+    if (covers(cur, x, y)) {
+      if (!o.quiet) ST.toast('That spot is already part of the shape.');
       return 0;
     }
-    const whole = res.candidates[res.candidates.length - 1];
     const sw = ST.raster.strokeWidth(cur.mask, cur.w, cur.h);
-    const merged = mergePart(cur, whole, { x, y }, res.click || { x, y }, sw);
+    // 1. the paint under the click, grown from the click itself (never
+    //    snapped away onto the shape that is already there)
+    let merged = null;
+    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null, smoothing: smoothingFor(item), noSnap: true });
+    if (res) merged = mergePart(cur, res.candidates[res.candidates.length - 1], { x, y }, res.click || { x, y }, sw);
+    // 2. still nothing at the clicked spot: brush in a stroke-width spot
+    let brushed = false;
+    if (!merged || !covers(merged, x, y)) {
+      const base = merged || cur;
+      const r = Math.max(3, Math.round(sw * 0.35));
+      const disc = mergePart(base, discPart(x, y, r, item.canvas.width, item.canvas.height), { x, y }, { x, y }, sw);
+      if (disc) { merged = disc; brushed = true; }
+    }
     if (!merged) {
-      if (!o.quiet) ST.toast('That piece is already part of the shape.');
+      if (!o.quiet) ST.toast('That spot is already part of the shape.');
       return 0;
     }
     item.candidates[item.ci] = merged;
     if (!o.replay) {
       item.parts = (item.parts || []).concat([{ x, y }]);
+      item.history = (item.history || []).concat([{ type: 'part' }]);
       const keep = $('#reviewChar').value;
       renderCurrent();
       $('#reviewChar').value = keep;
       syncIsolateLabel();
-      ST.toast('Piece added to the shape.');
+      ST.capture.updatePreview();
+      ST.toast(brushed ? 'Filled in a stroke-width spot.' : 'Piece added to the shape.');
     }
     return 1;
   };
@@ -372,19 +406,50 @@
     let n = batch.clickTrace(seed.x, seed.y, { keepParts: true });
     if (!n && item.lastClick) n = batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
     reapplyParts(item);
-    $('#reviewUndoCut').style.display = '';
+    item.history = (item.history || []).concat([{ type: 'cut' }]);
     return n > 0;
   };
 
+  // Rebuild the shape from what's left: the last click (or the automatic
+  // shapes), the remaining cuts, the remaining added pieces.
+  function rebuild(item) {
+    const keep = $('#reviewChar').value;
+    if (item.lastClick) {
+      batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
+    } else {
+      const res = ST.auto.processImage(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+      item.candidates = res.candidates;
+      item.ci = 0;
+      renderCurrent();
+    }
+    reapplyParts(item);
+    $('#reviewChar').value = keep;
+    syncIsolateLabel();
+    ST.capture.updatePreview();
+  }
+
+  // ⌘Z: the last cut or added piece, most recent first.
+  batch.undo = function () {
+    const item = batch.queue[batch.idx];
+    if (!item || !item.history || !item.history.length) return false;
+    const last = item.history.pop();
+    if (last.type === 'cut' && item.cuts && item.cuts.length) item.cuts.pop();
+    else if (last.type === 'part' && item.parts && item.parts.length) item.parts.pop();
+    rebuild(item);
+    ST.toast(last.type === 'cut' ? 'Cut undone.' : 'Added piece undone.');
+    return true;
+  };
+
+  // The most recent cut specifically; anything added after it stays.
   batch.undoCut = function () {
     const item = batch.queue[batch.idx];
     if (!item || !item.cuts || !item.cuts.length) return;
     item.cuts.pop();
-    if (item.lastClick) {
-      batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
-      reapplyParts(item);
-    } else renderCurrent();
-    if (!item.cuts.length) $('#reviewUndoCut').style.display = 'none';
+    if (item.history) {
+      const k = item.history.map((a) => a.type).lastIndexOf('cut');
+      if (k >= 0) item.history.splice(k, 1);
+    }
+    rebuild(item);
   };
 
   // "Isolate the 2": template-guided trim of the current shape to the typed
@@ -497,8 +562,18 @@
     $('#reviewAlt').addEventListener('click', batch.tryNext);
     $('#reviewSkip').addEventListener('click', batch.skip);
     $('#reviewIsolate').addEventListener('click', batch.isolate);
-    $('#reviewUndoCut').addEventListener('click', batch.undoCut);
     $('#reviewDetail').addEventListener('input', ST.debounce((e) => batch.setDetail(+e.target.value), 220));
+    // ⌘Z / Ctrl-Z on the capture tab undoes the last cut or added piece
+    g.addEventListener('keydown', (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || (e.key !== 'z' && e.key !== 'Z')) return;
+      const tab = $('#tab-capture');
+      if (!tab || !tab.classList.contains('active')) return;
+      if (e.target && e.target.isContentEditable) return;
+      const item = batch.queue[batch.idx];
+      if (!item || !item.history || !item.history.length) return;
+      e.preventDefault();
+      batch.undo();
+    });
     $('#reviewChar').addEventListener('input', syncIsolateLabel);
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {

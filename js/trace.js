@@ -145,35 +145,47 @@
     return cur;
   }
 
+  // The turn at index i: the angle between the chords reaching `span` of
+  // arc back and forward (one noisy vertex can't fake a corner), and the
+  // side it turns to.
+  function turnAt(pts, i, span) {
+    const n = pts.length;
+    let back = (i + n - 1) % n, db = V.dist(pts[i], pts[back]);
+    while (db < span && back !== i) {
+      const nb = (back + n - 1) % n;
+      if (nb === i) break;
+      db += V.dist(pts[back], pts[nb]);
+      back = nb;
+    }
+    let fwd = (i + 1) % n, df = V.dist(pts[i], pts[fwd]);
+    while (df < span && fwd !== i) {
+      const nf = (fwd + 1) % n;
+      if (nf === i) break;
+      df += V.dist(pts[fwd], pts[nf]);
+      fwd = nf;
+    }
+    const v1 = V.norm(V.sub(pts[i], pts[back]));
+    const v2 = V.norm(V.sub(pts[fwd], pts[i]));
+    return { turn: Math.acos(ST.clamp(V.dot(v1, v2), -1, 1)), cross: v1.x * v2.y - v1.y * v2.x };
+  }
+
   // Corner detection with support: directions are measured over minSpan of
-  // arc on each side, so one noisy vertex can't fake a corner, and clusters
-  // of flagged vertices collapse to the sharpest one.
-  function findCorners(pts, cornerRad, minSpan) {
+  // arc on each side, and clusters of flagged vertices collapse to the
+  // sharpest one. Concave turns (into the shape) may use their own, lower
+  // threshold: where two strokes meet, the inside corner is always sharp.
+  function findCorners(pts, cornerRad, minSpan, concaveRad, area) {
     const n = pts.length;
     const span = Math.max(3, minSpan || 3);
     const turns = new Float64Array(n);
+    const flagged = [];
     for (let i = 0; i < n; i++) {
-      let back = (i + n - 1) % n, db = V.dist(pts[i], pts[back]);
-      while (db < span && back !== i) {
-        const nb = (back + n - 1) % n;
-        if (nb === i) break;
-        db += V.dist(pts[back], pts[nb]);
-        back = nb;
-      }
-      let fwd = (i + 1) % n, df = V.dist(pts[i], pts[fwd]);
-      while (df < span && fwd !== i) {
-        const nf = (fwd + 1) % n;
-        if (nf === i) break;
-        df += V.dist(pts[fwd], pts[nf]);
-        fwd = nf;
-      }
-      const v1 = V.norm(V.sub(pts[i], pts[back]));
-      const v2 = V.norm(V.sub(pts[fwd], pts[i]));
-      turns[i] = Math.acos(ST.clamp(V.dot(v1, v2), -1, 1));
+      const t = turnAt(pts, i, span);
+      turns[i] = t.turn;
+      const concave = area && t.cross * area < 0;
+      const thr = concave && concaveRad != null ? concaveRad : cornerRad;
+      if (t.turn > thr) flagged.push(i);
     }
     // collect maxima above threshold, suppressing neighbors within the span
-    const flagged = [];
-    for (let i = 0; i < n; i++) if (turns[i] > cornerRad) flagged.push(i);
     if (!flagged.length) return [];
     const corners = [];
     let cluster = [flagged[0]];
@@ -215,12 +227,100 @@
     return V.norm(V.sub(pts[f], pts[b]));
   }
 
-  function fitLoop(pts, cornerRad, fitErr, cornerSpan, tanSpan) {
+  // From corner i, walk `dir` (±1) out of the curved region onto the
+  // straight edge beyond it: the first point where the boundary runs
+  // straight (small local turn over ±s0) for `straightLen` of arc. Returns
+  // the tangent point and the edge's direction, pointing away from the
+  // corner — or null when no straight edge shows up within maxWalk.
+  function edgeBeyond(pts, i, dir, s0, maxWalk, straightLen) {
     const n = pts.length;
-    if (n < 3) return null;
+    const straight = (k) => turnAt(pts, k, s0).turn < 0.14; // ~8°
+    let j = i, arc = 0;
+    while (arc < maxWalk) {
+      const nj = (j + dir + n) % n;
+      arc += V.dist(pts[j], pts[nj]);
+      j = nj;
+      if (j === i || !straight(j)) continue;
+      let k = j, len = 0, ok = true;
+      while (len < straightLen) {
+        const nk = (k + dir + n) % n;
+        len += V.dist(pts[k], pts[nk]);
+        k = nk;
+        if (k === i || !straight(k)) { ok = false; break; }
+      }
+      if (!ok) continue;
+      return { idx: j, p: pts[j], dir: V.norm(V.sub(pts[k], pts[j])) };
+    }
+    return null;
+  }
+
+  // Put the point back on the corners. Smoothing blunts every corner, and a
+  // closing's fillet rounds inside corners off by up to several stroke
+  // widths; but the two edges that meet there are straight, so where both
+  // can be found the corner is their intersection. The curved stretch
+  // between the tangent points is replaced by that vertex.
+  function sharpenCorners(pts, corners, sw) {
+    const n = pts.length;
+    const s0 = Math.max(2.5, sw * 0.12);
+    const maxWalk = 3.5 * sw, straightLen = Math.max(6, sw * 0.5);
+    const fixes = [];
+    for (const i of corners) {
+      const back = edgeBeyond(pts, i, -1, s0, maxWalk, straightLen);
+      const fwd = edgeBeyond(pts, i, 1, s0, maxWalk, straightLen);
+      if (!back || !fwd) continue;
+      const d1 = back.dir, d2 = fwd.dir;
+      const den = d1.x * d2.y - d1.y * d2.x;
+      const ang = Math.acos(ST.clamp(V.dot(d1, d2), -1, 1));
+      if (Math.abs(den) < 1e-6 || ang < 0.3 || ang > 2.8) continue; // 17°..160° between the edges
+      const dx = fwd.p.x - back.p.x, dy = fwd.p.y - back.p.y;
+      const t = (dx * d2.y - dy * d2.x) / den;
+      const vtx = { x: back.p.x + d1.x * t, y: back.p.y + d1.y * t };
+      const u = (vtx.x - fwd.p.x) * d2.x + (vtx.y - fwd.p.y) * d2.y;
+      if (t > 0 || u > 0) continue;                 // the edges must converge toward the corner
+      if (V.dist(vtx, pts[i]) > maxWalk) continue;
+      fixes.push({ i, back: back.idx, fwd: fwd.idx, vtx });
+    }
+    if (!fixes.length) return pts;
+    // the stretch (back, fwd) of each fix is dropped and its vertex put in;
+    // stretches may not overlap another fix
+    const skip = new Uint8Array(n), insertAt = new Map();
+    const marks = new Uint8Array(n);
+    for (const f of fixes) { marks[f.i] = 1; marks[f.back] = 1; marks[f.fwd] = 1; }
+    for (const f of fixes) {
+      const range = [];
+      let ok = true;
+      for (let k = (f.back + 1) % n; k !== f.fwd; k = (k + 1) % n) {
+        if ((marks[k] && k !== f.i) || skip[k]) { ok = false; break; }
+        range.push(k);
+        if (range.length > n) { ok = false; break; }
+      }
+      if (!ok) continue;
+      for (const k of range) skip[k] = 1;
+      insertAt.set(f.back, f.vtx);
+    }
+    if (!insertAt.size) return pts;
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      if (!skip[k]) out.push(pts[k]);
+      if (insertAt.has(k)) out.push(insertAt.get(k));
+    }
+    return out.length >= 3 ? out : pts;
+  }
+
+  function fitLoop(pts, cornerRad, fitErr, cornerSpan, tanSpan, opts) {
+    const o = opts || {};
+    if (pts.length < 3) return null;
     const span = cornerSpan || 3;
     const tspan = tanSpan || span;
-    const corners = findCorners(pts, cornerRad, span);
+    let corners = findCorners(pts, cornerRad, span, o.concaveRad, o.area);
+    if (o.sharpen && corners.length) {
+      const sharpened = sharpenCorners(pts, corners, o.sw);
+      if (sharpened !== pts) {
+        pts = sharpened;
+        corners = findCorners(pts, cornerRad, span, o.concaveRad, o.area);
+      }
+    }
+    const n = pts.length;
     const cubics = [];
     if (corners.length >= 2) {
       for (let k = 0; k < corners.length; k++) {
@@ -320,7 +420,14 @@
         pts = smoothClosed(loop, o.smoothIter); // dense, for the same reason
       }
       if (pts.length < 3) continue;
-      const cubics = fitLoop(pts, (o.cornerDeg * Math.PI) / 180, fitErr, cornerSpan, tanSpan);
+      const big = o.autoScale && size > 260 && sw > 0;
+      const cubics = fitLoop(pts, (o.cornerDeg * Math.PI) / 180, fitErr, cornerSpan, tanSpan, {
+        area,
+        sw,
+        // inside corners of stroke unions are always sharp: flag them sooner
+        concaveRad: big ? (50 * Math.PI) / 180 : undefined,
+        sharpen: big,
+      });
       if (cubics) out.push({ cubics, area });
     }
     return out;

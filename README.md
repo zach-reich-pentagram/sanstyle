@@ -90,10 +90,11 @@ so it also fires in Illustrator, Figma, and browsers with tracking applied).
 A character in pieces — the stem and point of a "!", an "i" and its dot —
 is assembled by **shift-clicking** the other piece: only the new ink under
 that click joins the shape, so a neighbor it touches stays out. The same
-shift-click puts back a bit that the extraction, a cut or Isolate left out,
-and the pieces are remembered when the shape is rebuilt by the Detail knob,
-a cut, an undo or an Isolate. In the studio, shift-click with the Click tool
-scans another piece into the same loop.
+shift-click puts back a bit that the extraction, a cut or Isolate left out
+(where no paint reads under the click at all — a glint, a worn patch — it
+brushes in a stroke-width spot), and the pieces are remembered when the
+shape is rebuilt by the Detail knob, a cut, an undo or an Isolate.
+**⌘Z / Ctrl-Z** undoes the most recent cut or added piece.
 
 ## The optical fitting
 

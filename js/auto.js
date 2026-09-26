@@ -228,6 +228,17 @@
       sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
     }
     if (sep < 60) return null;
+    // shaded or metallic paint: the strongest contrast is its darkest
+    // streak, the paint itself is the most common tone along that axis
+    const wallTol = ST.extract.wallTolerance(data, W, H, bg);
+    const wall = ST.extract.wallMask(data, W, H, bg, wallTol);
+    const nonWall = new Uint8Array(W * H);
+    for (let i = 0; i < nonWall.length; i++) nonWall[i] = wall[i] ? 0 : 1;
+    const dom = ST.extract.dominantAlongAxis(data, W, H, nonWall, seed, bg);
+    if (dom) {
+      const dsep = R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b);
+      if (dsep >= 60) { seed = dom; sep = dsep; }
+    }
     // along the wall→paint axis: metallic/glossy paint shading past the
     // paint color still counts (see raster.axisDistMap)
     field = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, 2);
@@ -235,9 +246,10 @@
       .filter((t) => t <= Math.max(40, sep * 0.55));
     const best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
     if (!best) return null;
-    // pocks, cracks and dirt inside the paint read as paint
-    const wall = ST.extract.wallMask(data, W, H, bg, ST.extract.wallTolerance(data, W, H, bg));
-    return ST.extract.absorbDefects(best.mask, wall, W, H);
+    // pocks, cracks and dirt inside the paint read as paint (`filled`); the
+    // classified paint itself (`raw`) is what the stroke-tube filter later
+    // measures every fill against
+    return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H) };
   }
 
   /**
@@ -265,20 +277,21 @@
 
     // paint first, then straighten by the PAINT's own edges: the letter's
     // stems define upright, not the wall's bricks or the paper's edge
-    let paint = paintMask(img.data, work.width, work.height);
+    let pm = paintMask(img.data, work.width, work.height);
     if (o.deskew) {
-      const zone = paint ? edgeZone(paint, work.width, work.height) : null;
+      const zone = pm ? edgeZone(pm.filled, work.width, work.height) : null;
       angle = auto.estimateSkewAngle(gray, work.width, work.height, zone);
       if (Math.abs(angle) >= 1.5 && Math.abs(angle) <= 20) {
         work = rotateCanvas(work, angle);
         ctx = work.getContext('2d');
         img = ctx.getImageData(0, 0, work.width, work.height);
         gray = ST.raster.luma(img.data, work.width, work.height);
-        paint = paintMask(img.data, work.width, work.height);
+        pm = paintMask(img.data, work.width, work.height);
       } else {
         angle = 0;
       }
     }
+    const paint = pm ? pm.filled : null, paintRaw = pm ? pm.raw : null;
 
     const W = work.width, H = work.height, area = W * H;
     // pre-blur the field so broken/chalky paint textures threshold cleanly
@@ -321,14 +334,21 @@
         const cx0 = Math.max(0, grp.x0 - pad), cy0 = Math.max(0, grp.y0 - pad);
         const cx1 = Math.min(W, grp.x1 + 1 + pad), cy1 = Math.min(H, grp.y1 + 1 + pad);
         const cw = cx1 - cx0, ch = cy1 - cy0;
-        const sub = new Uint8Array(cw * ch);
+        let sub = new Uint8Array(cw * ch);
         const want = new Set(grp.labels);
+        const rawSub = paintRaw ? new Uint8Array(cw * ch) : null;
         for (let y = 0; y < ch; y++) {
           for (let x = 0; x < cw; x++) {
             const gi = (y + cy0) * W + (x + cx0);
-            if (mask[gi] && want.has(det.labels[gi])) sub[y * cw + x] = 1;
+            if (mask[gi] && want.has(det.labels[gi])) {
+              sub[y * cw + x] = 1;
+              if (rawSub && paintRaw[gi]) rawSub[y * cw + x] = 1;
+            }
           }
         }
+        // the gap-jump closing's and the defect fill's bridges and pocks
+        // stay; their webs over inside corners go
+        if (rawSub && ST.extract) sub = ST.extract.keepBridges(rawSub, sub, cw, ch);
         // same stroke-width-capped clean-up as click-to-trace and the studio
         const clean = ST.extract
           ? ST.extract.cleanMask(sub, cw, ch, o.smoothing != null ? o.smoothing : 4)

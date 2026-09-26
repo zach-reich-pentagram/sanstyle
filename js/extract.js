@@ -292,7 +292,11 @@
       // average stroke): fibers are thin, so a modest disk still removes them
       const rt = R.thinRadius(m, w, h);
       const ro = Math.max(0, Math.min(rc, rt > 0 ? Math.floor(rt * 0.7) : rc));
-      if (rc > 0) m = R.close(m, w, h, rc);
+      if (rc > 0) {
+        // the closing's bridges heal; its fillets at inside corners don't stay
+        const closed = R.close(m, w, h, rc);
+        m = rc > 2 ? ex.keepBridges(m, closed, w, h) : closed;
+      }
       if (ro > 0) m = R.open(m, w, h, ro);
       if (!(opts && opts.noRound)) {
         m = ex.roundEnds(m, w, h, null);
@@ -300,10 +304,12 @@
       }
     }
     // fill speckle gaps — holes smaller than the pen could leave on purpose
-    // (well under a stroke width across, more with the knob up); a counter,
-    // even a small one in a fat letter, is never that small
+    // (well under a stroke width across, more with the knob up), and slits
+    // of any length that are never more than a third of a stroke thick (a
+    // metallic glint or bare wall showing along a stroke); a counter, even a
+    // small one in a fat letter, is neither
     const cap = sw > 0 ? Math.pow(0.6 * sw * (0.5 + sm / 8), 2) : undefined;
-    m = R.fillHoles(m, w, h, 0.06, cap);
+    m = R.fillHoles(m, w, h, 0.06, cap, sw > 0 && sm > 0 ? sw * 0.35 : 0);
     m = R.despeckle(m, w, h, 0.04, 24);
     return m;
   };
@@ -317,6 +323,157 @@
     const r = Math.round(rt * 0.7);
     return r >= 2 ? R.pruneThin(mask, w, h, r, region) : mask;
   };
+
+  // Keep only the BRIDGES of a closing. `closed` is `paint` closed by some
+  // radius: the new pixels heal streak gaps, cracks and notches — and also
+  // web over every acute inside corner where two strokes meet, with a
+  // fillet the pen never drew. A bridge lies inside a stroke: within that
+  // stroke's half-width of its skeleton. A corner web lies outside every
+  // stroke. So the skeleton of the closed shape is read stroke by stroke
+  // (each with its median half-width; skeleton pieces that run through
+  // the new pixels themselves are a web's and don't count), every new
+  // pixel is handed to its nearest skeleton pixel, and only those within
+  // reach of that stroke's half-width survive.
+  ex.keepBridges = function (paint, closed, w, h) {
+    const sw = R.strokeWidth(closed, w, h);
+    if (sw < 3) return closed;
+    let any = false;
+    for (let i = 0; i < closed.length; i++) if (closed[i] && !paint[i]) { any = true; break; }
+    if (!any) return closed;
+    // the paint's own distance transform: at a skeleton pixel on paint, the
+    // exact radius of the maximal disc there — the union of those discs IS
+    // the paint, with no bulge into a concave corner
+    const dtP = R.distanceTransform(paint, w, h);
+    const graph = strokeGraph(closed, w, h, sw);
+    const rad = new Float32Array(w * h);
+    const src = new Uint8Array(w * h); // pixels that may own ink
+    const own = (q, r) => {
+      if (q < 0 || !closed[q]) return;
+      if (!src[q] || r > rad[q]) rad[q] = r;
+      src[q] = 1;
+    };
+    const X = (p) => p % w, Y = (p) => (p / w) | 0;
+    const dtC = R.distanceTransform(closed, w, h);
+    for (const s of graph.segments) {
+      const px = s.pixels, n = px.length;
+      // the stroke's usual half-width: the median of the closed shape's
+      // distance transform along it (a slit or streak inside the stroke
+      // doesn't narrow the closed shape; a web beside it only widens it
+      // locally)
+      const vals = [];
+      for (const p of px) vals.push(dtC[p]);
+      vals.sort((a, b) => a - b);
+      const med = vals.length ? vals[vals.length >> 1] : 0;
+      const guard = Math.ceil(2.5 * Math.max(med, 2));
+      const joinAt = s.ends.map((e) => e >= 0 && !graph.endpoint[e]);
+      // a short piece from one junction to another is the web's own link
+      // between two strokes, not a stroke with a gap in it
+      const link = joinAt[0] && joinAt[1] && n < 2.5 * sw;
+      const strict = (k) => link || (joinAt[0] && k < guard) || (joinAt[1] && n - 1 - k < guard);
+      // Where the closed shape has the stroke's usual width, its skeleton IS
+      // the stroke's centerline and its disc there is the stroke's own
+      // (a slit, a streak gap, a notch are healed at the stroke's width).
+      // Where it is wider than usual, a web is spun beside the stroke: the
+      // web widens the closed shape and its medial axis bows out into it.
+      // Such a stretch is bridged along the curve that continues the
+      // trusted centerline from either side, at the stroke's usual width —
+      // the web, which lies outside that tube, is dropped. Near a junction
+      // there is nothing to continue from, and only the paint counts.
+      const reliable = (k) => dtC[px[k]] <= 1.2 * med;
+      let i = 0;
+      while (i < n) {
+        if (reliable(i)) {
+          own(px[i], Math.max(1, strict(i) ? dtP[px[i]] : dtC[px[i]]));
+          i++;
+          continue;
+        }
+        let j = i;
+        while (j < n && !reliable(j)) j++;
+        // the run's own paint pixels own their exact paint disc, no more
+        for (let k = i; k < j; k++) if (paint[px[k]]) own(px[k], Math.max(1, dtP[px[k]]));
+        if (i > 0 && j < n && !link && !strict(i - 1) && !strict(j)) {
+          const a = px[i - 1], b = px[j];
+          const ra = Math.min(dtC[a], med), rb = Math.min(dtC[b], med);
+          // tangents from the trusted skeleton on either side
+          const m = Math.max(3, Math.min(Math.round(med), 12));
+          const a0 = px[Math.max(0, i - 1 - m)], b1 = px[Math.min(n - 1, j + m)];
+          const ax = X(a), ay = Y(a), bx = X(b), by = Y(b);
+          const L = Math.hypot(bx - ax, by - ay);
+          let tax = ax - X(a0), tay = ay - Y(a0), tbx = X(b1) - bx, tby = Y(b1) - by;
+          const la = Math.hypot(tax, tay) || 1, lb = Math.hypot(tbx, tby) || 1;
+          tax = (tax / la) * L; tay = (tay / la) * L; tbx = (tbx / lb) * L; tby = (tby / lb) * L;
+          const steps = Math.max(2, Math.ceil(L * 2));
+          for (let q = 0; q <= steps; q++) {
+            const t = q / steps, t2 = t * t, t3 = t2 * t;
+            const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+            const cx = Math.round(h00 * ax + h10 * tax + h01 * bx + h11 * tbx);
+            const cy = Math.round(h00 * ay + h10 * tay + h01 * by + h11 * tby);
+            if (cx < 0 || cy < 0 || cx >= w || cy >= h) continue;
+            own(cy * w + cx, Math.max(1, ra + (rb - ra) * t));
+          }
+        }
+        i = j;
+      }
+    }
+    for (let i = 0; i < graph.skel.length; i++) {
+      if (graph.skel[i] && paint[i] && !src[i]) { src[i] = 1; rad[i] = Math.max(1, dtP[i]); }
+    }
+    const owner = new Int32Array(w * h).fill(-1);
+    const queue = new Int32Array(w * h);
+    let qh = 0, qt = 0;
+    for (let i = 0; i < src.length; i++) if (src[i] && closed[i]) { owner[i] = i; queue[qt++] = i; }
+    if (!qt) return closed;
+    while (qh < qt) {
+      const i = queue[qh++], o = owner[i], x = i % w;
+      if (x > 0 && closed[i - 1] && owner[i - 1] < 0) { owner[i - 1] = o; queue[qt++] = i - 1; }
+      if (x < w - 1 && closed[i + 1] && owner[i + 1] < 0) { owner[i + 1] = o; queue[qt++] = i + 1; }
+      if (i >= w && closed[i - w] && owner[i - w] < 0) { owner[i - w] = o; queue[qt++] = i - w; }
+      if (i + w < closed.length && closed[i + w] && owner[i + w] < 0) { owner[i + w] = o; queue[qt++] = i + w; }
+    }
+    const out = new Uint8Array(paint);
+    for (let i = 0; i < closed.length; i++) {
+      if (!closed[i] || paint[i]) continue;
+      const o = owner[i];
+      if (o < 0) continue;
+      const dx = (i % w) - (o % w), dy = ((i / w) | 0) - ((o / w) | 0);
+      if (Math.sqrt(dx * dx + dy * dy) <= rad[o] + 1.5) out[i] = 1;
+    }
+    if (ex.debugBridges) {
+      const segOf = new Int32Array(w * h).fill(-1);
+      graph.segments.forEach((s, k) => { for (const p of s.pixels) segOf[p] = k; });
+      const segInfo = graph.segments.map((s) => ({ n: s.pixels.length, ends: s.ends.map((e) => (e < 0 ? 'none' : graph.junction[e] ? 'J' : graph.endpoint[e] ? 'E' : 'node')), joinAt: s.ends.map((e) => e >= 0 && !graph.endpoint[e]) }));
+      (ex.bridgeCalls = ex.bridgeCalls || []).push({ paint, closed, skel: graph.skel, node: graph.node, rad, src, owner, out, w, h, segments: graph.segments.length, sw, dtP, segOf, segInfo });
+    }
+    return out;
+  };
+
+  // The paint's own tone: among the non-wall pixels of `include` that lie
+  // along the wall→sample color axis (the shades and glints of ONE paint,
+  // not a differently colored neighbor), the most common color. A click on
+  // silver's dark shading, or on its bright glint, then still reads the
+  // silver body as the paint.
+  function dominantAlongAxis(data, w, h, include, sample, bg) {
+    const ax = sample.r - bg.r, ay = sample.g - bg.g, az = sample.b - bg.b;
+    const len2 = ax * ax + ay * ay + az * az;
+    if (len2 < 400) return null;
+    const len = Math.sqrt(len2), maxRes = Math.max(30, len * 0.25);
+    const keep = new Uint8Array(w * h);
+    let n = 0;
+    for (let i = 0, p = 0; i < keep.length; i++, p += 4) {
+      if (!include[i]) continue;
+      const vx = data[p] - bg.r, vy = data[p + 1] - bg.g, vz = data[p + 2] - bg.b;
+      const u = (vx * ax + vy * ay + vz * az) / len2;
+      // a bleed halo or overspray sits a short way off the wall; a paint's
+      // body tone (silver's, next to its darkest shading) well along
+      if (u < 0.3 || u > 1.6) continue;
+      const rx = vx - u * ax, ry = vy - u * ay, rz = vz - u * az;
+      if (Math.sqrt(rx * rx + ry * ry + rz * rz) > maxRes) continue;
+      keep[i] = 1; n++;
+    }
+    if (n < 60) return null;
+    return R.dominantColor(data, w, h, (x, y) => keep[y * w + x] === 1);
+  }
+  ex.dominantAlongAxis = dominantAlongAxis;
 
   // Marker caps. A stroke that fades out — spray thinning, a marker lifting
   // — tapers to a point in the mask, and no pen leaves a point. Walk the
@@ -708,7 +865,7 @@
     const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
     const excl = ex.cutMask(w, h, o.cuts);
     const bg = ex.backgroundColor(data, w, h);
-    if (bg) {
+    if (bg && !o.noSnap) {
       const snap = snapToInk(data, w, h, x, y, Math.max(6, Math.round(Math.max(w, h) * 0.03)), bg);
       x = snap.x; y = snap.y;
     }
@@ -727,6 +884,29 @@
       }
       seed = { r: r / core.count, g: g / core.count, b: b / core.count };
     }
+    // Metallic and shaded paint has several tones, and the click (or the
+    // densest spot it snapped to) may sit on the darkest streak: the paint's
+    // BODY tone is the most common non-wall color around the click that
+    // shares the wall→sample axis (a neighbor of another color does not)
+    let wall = null;
+    if (bg) {
+      wall = ex.wallMask(data, w, h, bg, ex.wallTolerance(data, w, h, bg));
+      const reach = Math.round(Math.max(w, h) * 0.2);
+      const x0 = Math.max(0, x - reach), x1 = Math.min(w - 1, x + reach);
+      const y0 = Math.max(0, y - reach), y1 = Math.min(h - 1, y + reach);
+      const blob = R.floodFrom(w, h, x, y, (i) => {
+        if (wall[i] || (excl && excl[i])) return false;
+        const px = i % w, py = (i / w) | 0;
+        return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+      });
+      if (blob.count >= 60) {
+        const dom = dominantAlongAxis(data, w, h, blob.mask, seed, bg);
+        ex.lastSeedDebug = { blob: blob.count, sample: seed, dom, wallAtClick: !!wall[y * w + x] };
+        if (dom && R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b) >= 40) seed = dom;
+      } else {
+        ex.lastSeedDebug = { blob: blob.count, sample: seed, wallAtClick: !!wall[y * w + x] };
+      }
+    }
     // the field: distance along the wall→paint axis, so metallic and glossy
     // paint that shades and glints past the paint color still counts
     field = bg ? R.axisDistMap(data, w, h, seed, bg) : R.colorDistMap(data, w, h, [seed]);
@@ -741,26 +921,31 @@
     // into fragments a plain flood stops at. Grow again on the paint closed
     // by up to half a stroke (scaled by the smoothing knob), so a streaky
     // stroke reads as one — unless that suddenly pulls in far more.
-    let region = grown.mask, count = grown.count;
+    let region = grown.mask, count = grown.count, paintT = null;
     const sw0 = R.strokeWidth(grown.mask, w, h);
     const g = Math.round(Math.min(sw0 * 0.45, Math.max(w, h) * 0.02) * (o.smoothing / 4));
     if (g >= 2) {
-      const paintT = new Uint8Array(w * h);
+      paintT = new Uint8Array(w * h);
       for (let i = 0; i < paintT.length; i++) paintT[i] = field[i] <= grown.t && !(excl && excl[i]) ? 1 : 0;
       const closed = R.close(paintT, w, h, g);
       if (excl) for (let i = 0; i < closed.length; i++) if (excl[i]) closed[i] = 0;
       const re = R.floodFrom(w, h, x, y, (i) => closed[i] === 1);
       if (re.count >= count && re.count <= count * 2.5 && !leaks(re.mask, re.count, w, h, 0.35)) { region = re.mask; count = re.count; }
+      else paintT = null;
     }
 
     const crop = bboxOf(region, w, h, 12);
     if (!crop) return null;
     let sub = cropMask(region, w, crop);
+    // the paint as classified, before any filling
+    const base = paintT ? cropMask(paintT, w, crop) : Uint8Array.from(sub);
+    if (paintT) for (let i = 0; i < base.length; i++) if (!sub[i]) base[i] = 0;
     // pocks, cracks and dirt inside the paint read as paint
-    if (bg) {
-      const wall = ex.wallMask(data, w, h, bg, ex.wallTolerance(data, w, h, bg));
-      sub = ex.absorbDefects(sub, cropMask(wall, w, crop), crop.w, crop.h);
-    }
+    if (wall) sub = ex.absorbDefects(sub, cropMask(wall, w, crop), crop.w, crop.h);
+    // of everything the gap-jump closing and the defect fill added, keep the
+    // bridges across gaps and the pocks inside the strokes — not the webs
+    // spun over inside corners
+    sub = ex.keepBridges(base, sub, crop.w, crop.h);
     const lx = x - crop.x, ly = y - crop.y;
     let whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing, { noRound: o.noRound });
     // a cut slices the stroke flat; give the sliced ends a marker's round cap

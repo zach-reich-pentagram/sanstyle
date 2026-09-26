@@ -278,14 +278,14 @@ const cutRes = await page.evaluate(() => {
   // a vertical cut just right of the click severs the right stem of the N
   ST.batch.addCut(cx + 45, cy - 260, cx + 45, cy + 260);
   const after = ST.raster.count(item.candidates[0].mask);
-  const undoVisible = document.getElementById('reviewUndoCut').style.display !== 'none';
-  ST.batch.undoCut();
+  const undoable = (item.history || []).length === 1 && item.history[0].type === 'cut';
+  ST.batch.undo();
   const restored = ST.raster.count(item.candidates[0].mask);
-  return { before, after, restored, undoVisible, w: c.width };
+  return { before, after, restored, undoable, w: c.width, historyLeft: item.history.length };
 });
-check(cutRes.after < cutRes.before * 0.8 && cutRes.undoVisible,
-  `a cut across the letter removes the far side (${cutRes.before} → ${cutRes.after} px)`);
-check(cutRes.restored > cutRes.after, `Undo cut regrows the region (${cutRes.restored} px)`);
+check(cutRes.after < cutRes.before * 0.8 && cutRes.undoable,
+  `a cut across the letter removes the far side (${cutRes.before} → ${cutRes.after} px) and goes on the undo stack`);
+check(cutRes.restored > cutRes.after && cutRes.historyLeft === 0, `undo regrows the region (${cutRes.restored} px)`);
 
 // Shift-click adds a piece: after a cut severs the right stem, a shift-click
 // on the severed stem brings just that piece back; a shift-click on ink
@@ -320,13 +320,23 @@ const merged = await page.evaluate(() => {
 });
 check(merged.kind === 'parts' && merged.parts === 1 && merged.ink > partRes.cut * 1.25 && merged.ink >= partRes.before * 0.85,
   `shift-click brings the severed stem back into the shape (${partRes.cut} → ${merged.ink} px of ${partRes.before})`);
-const undone = await page.evaluate(() => {
-  ST.batch.undoCut();
+// Ctrl/⌘-Z: the added piece goes first, the cut second
+await page.keyboard.press('Control+z');
+await page.waitForTimeout(400);
+const afterUndoPart = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];
-  return { ink: ST.raster.count(item.candidates[0].mask), cuts: item.cuts.length, parts: item.parts.length };
+  return { parts: (item.parts || []).length, cuts: item.cuts.length, ink: ST.raster.count(item.candidates[0].mask) };
 });
-check(undone.cuts === 0 && undone.parts === 1 && undone.ink >= partRes.before * 0.95,
-  `Undo cut after a shift-click restores the whole letter (${undone.ink} px)`);
+check(afterUndoPart.parts === 0 && afterUndoPart.cuts === 1 && afterUndoPart.ink < partRes.cut * 1.1,
+  `Ctrl-Z undoes the added piece first (${afterUndoPart.ink} px, cut still in place)`);
+await page.keyboard.press('Control+z');
+await page.waitForTimeout(400);
+const undone = await page.evaluate(() => {
+  const item = ST.batch.queue[ST.batch.idx];
+  return { ink: ST.raster.count(item.candidates[0].mask), cuts: item.cuts.length, parts: item.parts.length, history: item.history.length };
+});
+check(undone.cuts === 0 && undone.parts === 0 && undone.history === 0 && undone.ink >= partRes.before * 0.95,
+  `a second Ctrl-Z undoes the cut and restores the whole letter (${undone.ink} px)`);
 
 // isolate: template-guided trim of the typed character
 const isoRes = await page.evaluate(() => {

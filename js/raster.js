@@ -634,7 +634,11 @@
   // reach both regimes: small values heal infill, cranked values go solid.
   // An optional maxArea (px) caps what may fill regardless of fraction: a
   // fat letter's small counter is a real feature, not a gap.
-  raster.fillHoles = function (mask, w, h, maxFrac, maxArea) {
+  // Fill enclosed holes: those small against the ink (maxFrac, capped by
+  // maxArea px²), and — whatever their area — those never thicker than
+  // maxThick px: a slit of highlight or bare wall running along a stroke is
+  // a gap in the paint, never a counter (a counter is at least a stroke wide).
+  raster.fillHoles = function (mask, w, h, maxFrac, maxArea, maxThick) {
     if (!maxFrac || maxFrac <= 0) return mask;
     const inkArea = raster.count(mask);
     if (!inkArea) return mask;
@@ -650,9 +654,16 @@
       touchesBorder[labels[y * w]] = 1;
       touchesBorder[labels[y * w + w - 1]] = 1;
     }
+    let thick = null;
+    if (maxThick > 0) {
+      const dt = raster.distanceTransform(inv, w, h, { borderInk: true });
+      thick = new Float32Array(sizes.length);
+      for (let i = 0; i < inv.length; i++) if (inv[i] && dt[i] > thick[labels[i]]) thick[labels[i]] = dt[i];
+    }
     const fillLabel = new Uint8Array(sizes.length);
     for (let L = 1; L < sizes.length; L++) {
       if (touchesBorder[L]) continue;
+      if (thick && thick[L] <= maxThick) { fillLabel[L] = 1; continue; }
       if (maxArea != null && sizes[L] > maxArea) continue;
       if (sizes[L] <= maxFrac * (inkArea + sizes[L])) fillLabel[L] = 1;
     }
