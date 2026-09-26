@@ -274,6 +274,21 @@
     return out;
   }
 
+  // A crop that may reach past the frame (a letter completed beyond the
+  // photo's edge): pixels outside the w×h mask read as `outside`.
+  function cropAny(mask, w, h, crop, outside) {
+    const out = new Uint8Array(crop.w * crop.h);
+    for (let y = 0; y < crop.h; y++) {
+      const sy = y + crop.y;
+      for (let x = 0; x < crop.w; x++) {
+        const sx = x + crop.x;
+        out[y * crop.w + x] = sx < 0 || sy < 0 || sx >= w || sy >= h ? outside : mask[sy * w + sx];
+      }
+    }
+    return out;
+  }
+  ex.cropAny = cropAny;
+
   // Scale-aware clean-up shared with the studio: shave fingers, heal gaps,
   // never thinner than a third of the stroke — then round the stroke ends:
   // a marker can't draw anything sharper than its tip, so needle points
@@ -921,45 +936,90 @@
     // into fragments a plain flood stops at. Grow again on the paint closed
     // by up to half a stroke (scaled by the smoothing knob), so a streaky
     // stroke reads as one — unless that suddenly pulls in far more.
-    let region = grown.mask, count = grown.count, paintT = null;
+    let region = grown.mask, count = grown.count;
+    // this paint, as classified, all over the photo
+    const paintT = new Uint8Array(w * h);
+    for (let i = 0; i < paintT.length; i++) paintT[i] = field[i] <= grown.t && !(excl && excl[i]) ? 1 : 0;
+    let pieces = paintT; // what completion may join: the paint, gap-jumped if that held
     const sw0 = R.strokeWidth(grown.mask, w, h);
     const g = Math.round(Math.min(sw0 * 0.45, Math.max(w, h) * 0.02) * (o.smoothing / 4));
     if (g >= 2) {
-      paintT = new Uint8Array(w * h);
-      for (let i = 0; i < paintT.length; i++) paintT[i] = field[i] <= grown.t && !(excl && excl[i]) ? 1 : 0;
       const closed = R.close(paintT, w, h, g);
       if (excl) for (let i = 0; i < closed.length; i++) if (excl[i]) closed[i] = 0;
       const re = R.floodFrom(w, h, x, y, (i) => closed[i] === 1);
-      if (re.count >= count && re.count <= count * 2.5 && !leaks(re.mask, re.count, w, h, 0.35)) { region = re.mask; count = re.count; }
-      else paintT = null;
+      if (re.count >= count && re.count <= count * 2.5 && !leaks(re.mask, re.count, w, h, 0.35)) {
+        region = re.mask; count = re.count; pieces = closed;
+      }
     }
 
-    const crop = bboxOf(region, w, h, 12);
-    if (!crop) return null;
-    let sub = cropMask(region, w, crop);
+    // Occlusion: carry the letter on under whatever hides it — a pipe, a
+    // crack, another color painted over it, the frame edge — joining the
+    // pieces of it that show on the far side (see complete.js)
+    let P = 0, W2 = w, H2 = h, full = region, tubes = null, cls = null, completion = null;
+    if (bg && wall && ST.complete && !o.noComplete) {
+      cls = ST.complete.classify(data, w, h, { bg, seed, paint: paintT, wall, sw: sw0 });
+      // a cut says the letter stops there: nothing is carried across it
+      if (excl) for (let i = 0; i < cls.length; i++) if (excl[i]) cls[i] = ST.complete.WALL;
+      const bb = R.maskBounds(region, w, h);
+      const margin = Math.round(Math.max(5 * sw0, 0.35 * Math.max(bb.w, bb.h)));
+      completion = ST.complete.complete(pieces, w, h, {
+        at: ST.complete.sampler(cls, w, h),
+        seed: y * w + x,
+        box: { x0: Math.max(0, bb.x0 - margin), y0: Math.max(0, bb.y0 - margin), x1: Math.min(w - 1, bb.x1 + margin), y1: Math.min(h - 1, bb.y1 + margin) },
+        margin,
+        minArea: Math.max(60, Math.round(count * 0.01)),
+      });
+      P = completion.P; W2 = completion.W2; H2 = completion.H2;
+      full = completion.mask; tubes = completion.tubes;
+    }
+
+    const cropP = bboxOf(full, W2, H2, 12);
+    if (!cropP) return null;
+    const crop = { x: cropP.x - P, y: cropP.y - P, w: cropP.w, h: cropP.h };
+    let sub = cropMask(full, W2, cropP);
+    const tubeSub = tubes ? cropMask(tubes, W2, cropP) : null;
     // the paint as classified, before any filling
-    const base = paintT ? cropMask(paintT, w, crop) : Uint8Array.from(sub);
-    if (paintT) for (let i = 0; i < base.length; i++) if (!sub[i]) base[i] = 0;
+    const base = cropAny(paintT, w, h, crop, 0);
+    for (let i = 0; i < base.length; i++) if (!sub[i]) base[i] = 0;
+    // what completion drew is set aside while the fills are judged
+    if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i] && !base[i]) sub[i] = 0;
     // pocks, cracks and dirt inside the paint read as paint
-    if (wall) sub = ex.absorbDefects(sub, cropMask(wall, w, crop), crop.w, crop.h);
+    if (wall) sub = ex.absorbDefects(sub, cropAny(wall, w, h, crop, 1), crop.w, crop.h);
     // of everything the gap-jump closing and the defect fill added, keep the
     // bridges across gaps and the pocks inside the strokes — not the webs
     // spun over inside corners
     sub = ex.keepBridges(base, sub, crop.w, crop.h);
+    if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i]) sub[i] = 1;
+    if (cls) {
+      const at = ST.complete.sampler(cls, w, h);
+      // a throw-up's outline is the letter's; so is a hole that shows no wall
+      sub = ST.complete.absorbOutline(sub, crop.w, crop.h, cls, w, h, crop.x, crop.y);
+      sub = ST.complete.fillHiddenHoles(sub, crop.w, crop.h, at, crop.x, crop.y);
+    }
     const lx = x - crop.x, ly = y - crop.y;
     let whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing, { noRound: o.noRound });
     // a cut slices the stroke flat; give the sliced ends a marker's round cap
-    if (excl && !o.noRound) whole = ex.roundCutEnds(whole, crop.w, crop.h, cropMask(excl, w, crop));
+    if (excl && !o.noRound) whole = ex.roundCutEnds(whole, crop.w, crop.h, cropAny(excl, w, h, crop, 0));
 
     const candidates = [];
     const push = (mask, kind) => {
       const paths = ST.trace.vectorize(mask, crop.w, crop.h, {});
       if (paths.length) candidates.push({ crop, mask, w: crop.w, h: crop.h, paths, kind });
     };
-    const separated = ex.separateTouching(whole, crop.w, crop.h, lx, ly);
+    let separated = ex.separateTouching(whole, crop.w, crop.h, lx, ly);
+    // what completion joined is the letter's by evidence: a split that
+    // drops part of it is not a neighbor coming off
+    if (separated && tubeSub) {
+      let t = 0, kept = 0;
+      for (let i = 0; i < tubeSub.length; i++) if (tubeSub[i] && whole[i]) { t++; if (separated[i]) kept++; }
+      if (t && kept < 0.9 * t) separated = null;
+    }
     if (separated) push(separated, 'separated');
     push(whole, 'whole');
     if (!candidates.length) return null;
-    return { seed, bg, click: { x, y }, tolerance: grown.t, region: crop, candidates };
+    return {
+      seed, bg, click: { x, y }, tolerance: grown.t, region: crop, candidates,
+      completion: completion ? { pairs: completion.pairs, extensions: completion.extensions } : null,
+    };
   };
 })(typeof window !== 'undefined' ? window : globalThis);

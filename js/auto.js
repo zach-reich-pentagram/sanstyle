@@ -132,7 +132,10 @@
   auto.rotateCanvas = rotateCanvas; // also used by the manual rotate controls
 
   // ---------- candidate detection ----------
-  function detectCandidates(mask, w, h, imgArea) {
+  // `frame`: where the photo itself lies in the mask (a padded mask holds
+  // letters completed past the photo's edge); default the whole mask
+  function detectCandidates(mask, w, h, imgArea, frame) {
+    const fr = frame || { x0: 0, y0: 0, x1: w - 1, y1: h - 1 };
     const { labels, sizes } = ST.raster.components(mask, w, h);
     const minArea = Math.max(420, imgArea * 0.0018);
     const comps = [];
@@ -156,7 +159,7 @@
       const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1;
       if (bw * bh > imgArea * 0.96) return false;              // the whole wall
       if (c.area / (bw * bh) < 0.02) return false;             // pure wisp
-      const touchL = c.x0 <= 1, touchR = c.x1 >= w - 2, touchT = c.y0 <= 1, touchB = c.y1 >= h - 2;
+      const touchL = c.x0 <= fr.x0 + 1, touchR = c.x1 >= fr.x1 - 1, touchT = c.y0 <= fr.y0 + 1, touchB = c.y1 >= fr.y1 - 1;
       if ((touchL + touchR + touchT + touchB) >= 3) return false; // frame-edge junk
       return true;
     });
@@ -249,7 +252,7 @@
     // pocks, cracks and dirt inside the paint read as paint (`filled`); the
     // classified paint itself (`raw`) is what the stroke-tube filter later
     // measures every fill against
-    return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H) };
+    return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H), bg, seed, wall };
   }
 
   /**
@@ -312,14 +315,29 @@
 
     // paint vs. background by color contrast first; luminance polarity
     // guesses only as the fallback when nothing contrasts with the border
-    let first = null;
+    let first = null, cls = null;
     if (paint) {
       // gap jumping (see extract.seeded): streaky strokes read as one
       const sm = o.smoothing != null ? o.smoothing : 4;
-      const g = Math.round(Math.min(ST.raster.strokeWidth(paint, W, H) * 0.45, Math.max(W, H) * 0.02) * (sm / 4));
-      const m = ST.raster.open(g >= 2 ? ST.raster.close(paint, W, H, g) : paint, W, H, 1);
-      const det = detectCandidates(m, W, H, area);
-      if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length };
+      const sw = ST.raster.strokeWidth(paint, W, H);
+      const g = Math.round(Math.min(sw * 0.45, Math.max(W, H) * 0.02) * (sm / 4));
+      let m = ST.raster.open(g >= 2 ? ST.raster.close(paint, W, H, g) : paint, W, H, 1);
+      // Occlusion: strokes carried on under what hides them — a pipe, a
+      // crack, another color, the frame edge — so a letter split by a
+      // drainpipe is one letter again, and one cut off by the photo's edge
+      // is finished past it (see complete.js). The mask gains a margin
+      // round the photo for that.
+      let P = 0, MW = W, MH = H, tubes = null;
+      if (ST.complete && !o.noComplete) {
+        cls = ST.complete.classify(img.data, W, H, { bg: pm.bg, seed: pm.seed, paint: pm.raw, wall: pm.wall, sw });
+        const done = ST.complete.complete(m, W, H, {
+          at: ST.complete.sampler(cls, W, H),
+          minArea: Math.round(Math.max(420, area * 0.0018) / 3),
+        });
+        m = done.mask; tubes = done.tubes; P = done.P; MW = done.W2; MH = done.H2;
+      }
+      const det = detectCandidates(m, MW, MH, area, { x0: P, y0: P, x1: P + W - 1, y1: P + H - 1 });
+      if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length, P, MW, MH, tubes };
     }
     if (!first) first = tryPolarity(mean <= 128);
     if (!first.n) {
@@ -327,39 +345,50 @@
       if (second.n) first = second;
     }
     const { mask, det } = first;
+    const P = first.P || 0, MW = first.MW || W, MH = first.MH || H, tubes = first.tubes || null;
     const candidates = [];
     if (det.groups) {
       for (const grp of det.groups) {
         const pad = 10;
+        // in the (padded) mask's coordinates; the crop is the photo's
         const cx0 = Math.max(0, grp.x0 - pad), cy0 = Math.max(0, grp.y0 - pad);
-        const cx1 = Math.min(W, grp.x1 + 1 + pad), cy1 = Math.min(H, grp.y1 + 1 + pad);
+        const cx1 = Math.min(MW, grp.x1 + 1 + pad), cy1 = Math.min(MH, grp.y1 + 1 + pad);
         const cw = cx1 - cx0, ch = cy1 - cy0;
+        const crop = { x: cx0 - P, y: cy0 - P, w: cw, h: ch };
         let sub = new Uint8Array(cw * ch);
         const want = new Set(grp.labels);
-        const rawSub = paintRaw ? new Uint8Array(cw * ch) : null;
+        const tubeSub = tubes ? new Uint8Array(cw * ch) : null;
         for (let y = 0; y < ch; y++) {
           for (let x = 0; x < cw; x++) {
-            const gi = (y + cy0) * W + (x + cx0);
+            const gi = (y + cy0) * MW + (x + cx0);
             if (mask[gi] && want.has(det.labels[gi])) {
               sub[y * cw + x] = 1;
-              if (rawSub && paintRaw[gi]) rawSub[y * cw + x] = 1;
+              if (tubeSub && tubes[gi]) tubeSub[y * cw + x] = 1;
             }
           }
         }
+        const rawSub = paintRaw ? ST.extract.cropAny(paintRaw, W, H, crop, 0) : null;
+        if (rawSub) for (let i = 0; i < rawSub.length; i++) if (!sub[i]) rawSub[i] = 0;
         // the gap-jump closing's and the defect fill's bridges and pocks
-        // stay; their webs over inside corners go
-        if (rawSub && ST.extract) sub = ST.extract.keepBridges(rawSub, sub, cw, ch);
+        // stay; their webs over inside corners go (what completion drew is
+        // set aside meanwhile)
+        if (rawSub && ST.extract) {
+          if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i] && !rawSub[i]) sub[i] = 0;
+          sub = ST.extract.keepBridges(rawSub, sub, cw, ch);
+          if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i]) sub[i] = 1;
+        }
+        if (cls) {
+          // a throw-up's outline is the letter's; so is a hole showing no wall
+          sub = ST.complete.absorbOutline(sub, cw, ch, cls, W, H, crop.x, crop.y);
+          sub = ST.complete.fillHiddenHoles(sub, cw, ch, ST.complete.sampler(cls, W, H), crop.x, crop.y);
+        }
         // same stroke-width-capped clean-up as click-to-trace and the studio
         const clean = ST.extract
           ? ST.extract.cleanMask(sub, cw, ch, o.smoothing != null ? o.smoothing : 4)
           : ST.raster.fillHoles(ST.raster.close(sub, cw, ch, 1), cw, ch, o.fillHoles);
         const paths = ST.trace.vectorize(clean, cw, ch, {});
         if (!paths.length) continue;
-        candidates.push({
-          crop: { x: cx0, y: cy0, w: cw, h: ch },
-          mask: clean, w: cw, h: ch,
-          paths,
-        });
+        candidates.push({ crop, mask: clean, w: cw, h: ch, paths });
       }
     }
     // Standardize detail: a letter photographed from far away is small in

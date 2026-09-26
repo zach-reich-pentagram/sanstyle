@@ -522,7 +522,10 @@
         let v = isDilate ? 0 : 1;
         for (let k = 0; k < off.length; k++) {
           const nx = x + off[k][0], ny = y + off[k][1];
-          const nv = (nx < 0 || ny < 0 || nx >= w || ny >= h) ? 0 : mask[ny * w + nx];
+          // past the frame is unknown, not background: erosion must not eat
+          // into a stroke from the photo's edge (a closing would otherwise
+          // shorten every letter the frame cuts)
+          const nv = (nx < 0 || ny < 0 || nx >= w || ny >= h) ? (isDilate ? 0 : 1) : mask[ny * w + nx];
           if (isDilate) { if (nv) { v = 1; break; } }
           else if (!nv) { v = 0; break; }
         }
@@ -576,7 +579,7 @@
     return out;
   }
   function erodeDisk(mask, w, h, r) {
-    const dt = raster.distanceTransform(mask, w, h);
+    const dt = raster.distanceTransform(mask, w, h, { borderInk: true });
     const out = new Uint8Array(w * h);
     for (let i = 0; i < out.length; i++) out[i] = mask[i] && dt[i] > r ? 1 : 0;
     return out;
