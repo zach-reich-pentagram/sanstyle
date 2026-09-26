@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sanstyle Privacy</title>
+<style>
+  :root { --bg: #f6f5f1; --fg: #161616; --muted: #5b5b5b; --rule: #d9d6cf; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #a3a3a3; --rule: #2c2c2c; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 28px; font-weight: 500; margin: 0 0 4px; }
+  h2 { font-size: 17px; font-weight: 600; margin: 32px 0 6px; }
+  p, li { color: var(--fg); }
+  .muted { color: var(--muted); font-size: 14px; }
+  ul { padding-left: 20px; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 32px 0; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sanstyle privacy</h1>
+  <p class="muted">Sanstyle turns photographs of graffiti into a typeface. It is a personal tool with one user: the person who runs it.</p>
+
+  <h2>What it accesses</h2>
+  <p>When cloud sync is set up, the site's server connects to its owner's Google Drive, with the owner's permission, and works with two folders only:</p>
+  <ul>
+    <li>the <strong>inbox folder</strong>, where it lists and reads photos, and stores photos uploaded through the site;</li>
+    <li>the <strong>letterforms folder</strong>, where it reads and writes the letterform library (<code>library.json</code>) and an SVG file for each letterform.</li>
+  </ul>
+  <p>Google's permission for this covers the owner's Drive, but the site only ever lists, reads and writes files in those two folders.</p>
+
+  <h2>Where your data lives</h2>
+  <p>Photos and letterforms stay in the owner's Google Drive and in the owner's browser. Letterform previews and the small photo crops shown in the tester are kept in the browser only. Photos are analyzed in the browser; the server only passes files between the browser and Drive.</p>
+
+  <h2>What it does not do</h2>
+  <p>No analytics, no advertising, no tracking. Nothing is sold or shared with anyone. Sanstyle's use of information received from Google APIs adheres to the Google API Services User Data Policy, including the Limited Use requirements.</p>
+
+  <h2>Removing access</h2>
+  <p>Revoke Sanstyle's access to Google Drive at any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>. Clearing the site's data in your browser removes everything it stored there.</p>
+
+  <hr>
+  <p class="muted">Questions go to the support address shown on Sanstyle's Google sign-in screen.</p>
+</main>
+</body>
+</html>
