@@ -453,12 +453,6 @@
       const dx = (i % w) - (o % w), dy = ((i / w) | 0) - ((o / w) | 0);
       if (Math.sqrt(dx * dx + dy * dy) <= rad[o] + 1.5) out[i] = 1;
     }
-    if (ex.debugBridges) {
-      const segOf = new Int32Array(w * h).fill(-1);
-      graph.segments.forEach((s, k) => { for (const p of s.pixels) segOf[p] = k; });
-      const segInfo = graph.segments.map((s) => ({ n: s.pixels.length, ends: s.ends.map((e) => (e < 0 ? 'none' : graph.junction[e] ? 'J' : graph.endpoint[e] ? 'E' : 'node')), joinAt: s.ends.map((e) => e >= 0 && !graph.endpoint[e]) }));
-      (ex.bridgeCalls = ex.bridgeCalls || []).push({ paint, closed, skel: graph.skel, node: graph.node, rad, src, owner, out, w, h, segments: graph.segments.length, sw, dtP, segOf, segInfo });
-    }
     return out;
   };
 
@@ -839,29 +833,244 @@
       if (id[i] > 0 && foreign[id[i]]) { removed[i] = 1; nRemoved++; } else out[i] = 1;
     }
     let result = R.floodFrom(w, h, sx, sy, (i) => out[i] === 1).mask;
-    if (nRemoved) {
-      // heal the join: a removed stroke's skeleton ran into the letter's
-      // stroke, taking a notch of the letter with it — closing refills the
-      // notch (a concavity) without rebuilding the removed stroke (convex);
-      // then shave the nub and cap the faces
-      const r = Math.max(1, Math.ceil(sw / 2));
-      const near = R.dilate(removed, w, h, r + 1);
-      const closed = R.close(result, w, h, r);
-      for (let i = 0; i < result.length; i++) if (closed[i] && near[i] && mask[i]) result[i] = 1;
-      const opened = R.open(result, w, h, Math.max(1, Math.round(sw * 0.3)));
-      for (let i = 0; i < result.length; i++) if (near[i] && !opened[i]) result[i] = 0;
-      const face = new Uint8Array(w * h);
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const i = y * w + x;
-          if (!result[i]) continue;
-          if ((x > 0 && removed[i - 1]) || (x < w - 1 && removed[i + 1]) ||
-              (y > 0 && removed[i - w]) || (y < h - 1 && removed[i + w])) face[i] = 1;
+    if (nRemoved) result = healCut(result, mask, removed, w, h, sw);
+    return { mask: result, removed: nRemoved, strokes: graph.segments.length, foreign: nForeign, farLimit, info };
+  };
+
+  // Heal where strokes were taken off a shape: a removed stroke's skeleton
+  // ran into the letter's stroke, taking a notch of the letter with it —
+  // closing refills the notch (a concavity) without rebuilding the removed
+  // stroke (convex); then shave the nub and cap the faces.
+  function healCut(result, mask, removed, w, h, sw) {
+    const r = Math.max(1, Math.ceil(sw / 2));
+    const near = R.dilate(removed, w, h, r + 1);
+    const closed = R.close(result, w, h, r);
+    for (let i = 0; i < result.length; i++) if (closed[i] && near[i] && mask[i]) result[i] = 1;
+    const opened = R.open(result, w, h, Math.max(1, Math.round(sw * 0.3)));
+    for (let i = 0; i < result.length; i++) if (near[i] && !opened[i]) result[i] = 0;
+    const face = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!result[i]) continue;
+        if ((x > 0 && removed[i - 1]) || (x < w - 1 && removed[i + 1]) ||
+            (y > 0 && removed[i - w]) || (y < h - 1 && removed[i + w])) face[i] = 1;
+      }
+    }
+    return ex.roundCutEnds(result, w, h, R.dilate(face, w, h, 2));
+  }
+
+  // ---------- strokes as chains ----------
+  // A fused shape as whole strokes: the skeleton's pieces are rejoined
+  // across the letter's own corners, and across junctions by good
+  // continuation — at a crossing the two arms that run straight on are one
+  // stroke (an O's ring stays one ring where a T's bar crosses it; the bar
+  // stays one bar). Every ink pixel belongs to a stroke, or to a junction.
+  // Returns { n, owner (Int32: chain id ≥ 1, −(cluster+1) at junctions),
+  //   armsOf (cluster → chain ids), adj (chain → Set of chains), sw } or null.
+  ex.strokeChains = function (mask, w, h) {
+    const sw = R.strokeWidth(mask, w, h);
+    if (!(sw > 2)) return null;
+    const graph = strokeGraph(mask, w, h, sw);
+    const segs = graph.segments;
+    if (segs.length < 2) return null;
+    const X = (p) => p % w, Y = (p) => (p / w) | 0;
+    // junction clusters: junction pixels within ¾ of a stroke of each other
+    const jpix = [];
+    for (let i = 0; i < graph.junction.length; i++) if (graph.junction[i]) jpix.push(i);
+    const jpar = new Map(jpix.map((p) => [p, p]));
+    const jfind = (p) => { while (jpar.get(p) !== p) { jpar.set(p, jpar.get(jpar.get(p))); p = jpar.get(p); } return p; };
+    const junion = (a, b) => { a = jfind(a); b = jfind(b); if (a !== b) jpar.set(a, b); };
+    const near = 0.75 * sw;
+    for (let a = 0; a < jpix.length; a++) {
+      for (let b = a + 1; b < jpix.length; b++) {
+        if (Math.hypot(X(jpix[a]) - X(jpix[b]), Y(jpix[a]) - Y(jpix[b])) <= near) junion(jpix[a], jpix[b]);
+      }
+    }
+    // a corner split right beside a junction is the junction itself (the
+    // skeleton can pass diagonally by a junction pixel instead of through
+    // it, and read the turn into the stem as a corner)
+    const jNear = new Set();
+    for (const s of segs) {
+      for (const e of s.ends) {
+        if (e < 0 || graph.junction[e] || graph.endpoint[e] || jNear.has(e)) continue;
+        for (const p of jpix) {
+          if (Math.hypot(X(p) - X(e), Y(p) - Y(e)) <= near) { jNear.add(e); jpar.set(e, e); junion(e, p); break; }
         }
       }
-      result = ex.roundCutEnds(result, w, h, R.dilate(face, w, h, 2));
     }
-    return { mask: result, removed: nRemoved, strokes: graph.segments.length, foreign: nForeign, farLimit, info };
+    for (const e of jNear) jpix.push(e);
+    // short pieces between junctions are the junction's own inside
+    const isJ = (e) => e >= 0 && (graph.junction[e] || jNear.has(e));
+    const link = new Uint8Array(segs.length);
+    segs.forEach((s, k) => {
+      const [a, b] = s.ends;
+      if (isJ(a) && isJ(b) && (jfind(a) === jfind(b) || s.pixels.length < 0.6 * sw)) { junion(a, b); link[k] = 1; }
+    });
+    // chains: union-find over segments
+    const par = segs.map((_, k) => k);
+    const find = (k) => { while (par[k] !== k) { par[k] = par[par[k]]; k = par[k]; } return k; };
+    const union = (a, b) => { a = find(a); b = find(b); if (a !== b) par[a] = b; };
+    // across the letter's own corners (split points shared by two pieces)
+    const byNode = new Map();
+    segs.forEach((s, k) => {
+      if (link[k]) return;
+      for (const e of s.ends) {
+        if (e < 0 || graph.junction[e] || graph.endpoint[e] || jNear.has(e)) continue;
+        if (!byNode.has(e)) byNode.set(e, []);
+        byNode.get(e).push(k);
+      }
+    });
+    for (const ks of byNode.values()) for (let i = 1; i < ks.length; i++) union(ks[0], ks[i]);
+    // arms of each junction cluster, with the direction they leave in
+    const arms = new Map(); // cluster root → [{k, dx, dy}]
+    segs.forEach((s, k) => {
+      if (link[k]) return;
+      const n = s.pixels.length;
+      if (!n) return;
+      for (let side = 0; side < 2; side++) {
+        const e = s.ends[side];
+        if (!isJ(e)) continue;
+        const m = Math.min(n - 1, Math.max(2, Math.round(1.5 * sw)));
+        const nearP = side === 0 ? s.pixels[0] : s.pixels[n - 1];
+        const farP = side === 0 ? s.pixels[m] : s.pixels[n - 1 - m];
+        let dx = X(farP) - X(nearP), dy = Y(farP) - Y(nearP);
+        const L = Math.hypot(dx, dy) || 1;
+        const root = jfind(e);
+        if (!arms.has(root)) arms.set(root, []);
+        arms.get(root).push({ k, dx: dx / L, dy: dy / L });
+      }
+    });
+    // good continuation: the arms that run straight on through a junction
+    for (const list of arms.values()) {
+      const pairs = [];
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const dev = Math.acos(Math.max(-1, Math.min(1, -(list[i].dx * list[j].dx + list[i].dy * list[j].dy))));
+          if (dev < (40 * Math.PI) / 180) pairs.push({ i, j, dev });
+        }
+      }
+      pairs.sort((a, b) => a.dev - b.dev);
+      const used = new Uint8Array(list.length);
+      for (const p of pairs) {
+        if (used[p.i] || used[p.j]) continue;
+        used[p.i] = used[p.j] = 1;
+        union(list[p.i].k, list[p.j].k);
+      }
+    }
+    // number the chains
+    const chainId = new Int32Array(segs.length);
+    let n = 0;
+    const idOf = new Map();
+    segs.forEach((_, k) => {
+      if (link[k]) return;
+      const r = find(k);
+      if (!idOf.has(r)) idOf.set(r, ++n);
+      chainId[k] = idOf.get(r);
+    });
+    if (n < 2) return null;
+    const clusterIdx = new Map();
+    let nc = 0;
+    for (const p of jpix) { const r = jfind(p); if (!clusterIdx.has(r)) clusterIdx.set(r, nc++); }
+    const armsOf = Array.from({ length: nc }, () => new Set());
+    for (const [root, list] of arms) for (const a of list) armsOf[clusterIdx.get(root)].add(chainId[a.k]);
+    const adj = Array.from({ length: n + 1 }, () => new Set());
+    for (const set of armsOf) for (const a of set) for (const b of set) if (a !== b) adj[a].add(b);
+    // every ink pixel to its nearest skeleton owner
+    const owner = new Int32Array(w * h);
+    const queue = new Int32Array(w * h);
+    let qh = 0, qt = 0;
+    segs.forEach((s, k) => {
+      const id = link[k] ? -(clusterIdx.get(jfind(s.ends[0])) + 1) : chainId[k];
+      for (const p of s.pixels) if (!owner[p]) { owner[p] = id; queue[qt++] = p; }
+    });
+    for (const p of jpix) if (!owner[p]) { owner[p] = -(clusterIdx.get(jfind(p)) + 1); queue[qt++] = p; }
+    while (qh < qt) {
+      const i = queue[qh++], o = owner[i], x = i % w;
+      if (x > 0 && mask[i - 1] && !owner[i - 1]) { owner[i - 1] = o; queue[qt++] = i - 1; }
+      if (x < w - 1 && mask[i + 1] && !owner[i + 1]) { owner[i + 1] = o; queue[qt++] = i + 1; }
+      if (i >= w && mask[i - w] && !owner[i - w]) { owner[i - w] = o; queue[qt++] = i - w; }
+      if (i + w < mask.length && mask[i + w] && !owner[i + w]) { owner[i + w] = o; queue[qt++] = i + w; }
+    }
+    // each chain's whole tube — the discs of its skeleton — so a stroke
+    // kept stays whole where it crosses one taken away
+    const dt = R.distanceTransform(mask, w, h);
+    const tubes = Array.from({ length: n + 1 }, () => null);
+    const mark = new Uint8Array(w * h);
+    for (let c = 1; c <= n; c++) {
+      const idx = [];
+      segs.forEach((sg, k) => {
+        if (link[k] || chainId[k] !== c) return;
+        for (const p of sg.pixels) {
+          const r = dt[p], px = X(p), py = Y(p), rr = (r + 0.5) * (r + 0.5);
+          for (let yy = Math.max(0, Math.floor(py - r)); yy <= Math.min(h - 1, Math.ceil(py + r)); yy++) {
+            for (let xx = Math.max(0, Math.floor(px - r)); xx <= Math.min(w - 1, Math.ceil(px + r)); xx++) {
+              const i = yy * w + xx;
+              if (mark[i] || !mask[i] || (xx - px) * (xx - px) + (yy - py) * (yy - py) > rr) continue;
+              mark[i] = 1; idx.push(i);
+            }
+          }
+        }
+      });
+      for (const i of idx) mark[i] = 0;
+      tubes[c] = Int32Array.from(idx);
+    }
+    return { n, owner, armsOf, adj, sw, tubes };
+  };
+
+  // The shape made of some of the chains (a Set of ids), with the junctions
+  // any of them runs into.
+  function renderChains(sc, mask, set) {
+    const out = new Uint8Array(mask.length);
+    const jIn = sc.armsOf.map((arms) => { for (const a of arms) if (set.has(a)) return true; return false; });
+    for (let i = 0; i < mask.length; i++) {
+      const o = sc.owner[i];
+      if (!mask[i] || !o) continue;
+      if (o > 0 ? set.has(o) : jIn[-o - 1]) out[i] = 1;
+    }
+    for (const c of set) for (const i of sc.tubes[c]) out[i] = 1;
+    return out;
+  }
+
+  /**
+   * The letter under a click in a shape fused with same-colored neighbors,
+   * grown stroke by stroke: from the stroke under (cx, cy), add whichever
+   * touching stroke makes the shape score best as the letter (`score(mask)`,
+   * e.g. a template match for the typed character), and keep the best
+   * shape met along the way. → { mask, score, strokes, of } or null
+   */
+  ex.growLetter = function (mask, w, h, cx, cy, score) {
+    const sc = ex.strokeChains(mask, w, h);
+    if (!sc) return null;
+    let sx = Math.round(cx), sy = Math.round(cy);
+    const at = nearestInk(mask, w, h, Math.max(0, Math.min(w - 1, sx)), Math.max(0, Math.min(h - 1, sy)), Math.round(sc.sw * 2) + 4);
+    if (at < 0) return null;
+    let start = sc.owner[at];
+    if (start < 0) { const arms = Array.from(sc.armsOf[-start - 1]); if (!arms.length) return null; start = arms[0]; }
+    if (!(start > 0)) return null;
+    let set = new Set([start]);
+    let cur = score(renderChains(sc, mask, set));
+    let best = { set: new Set(set), s: cur };
+    for (let step = 0; step < 14; step++) {
+      const next = new Set();
+      for (const c of set) for (const d of sc.adj[c]) if (!set.has(d)) next.add(d);
+      if (!next.size) break;
+      let pick = null, pickS = -1;
+      for (const d of next) {
+        const trial = new Set(set); trial.add(d);
+        const s = score(renderChains(sc, mask, trial));
+        if (s > pickS) { pickS = s; pick = d; }
+      }
+      set.add(pick); cur = pickS;
+      if (cur > best.s + 1e-4) best = { set: new Set(set), s: cur };
+    }
+    let out = renderChains(sc, mask, best.set);
+    const removed = new Uint8Array(mask.length);
+    let nRemoved = 0;
+    for (let i = 0; i < mask.length; i++) if (mask[i] && !out[i]) { removed[i] = 1; nRemoved++; }
+    if (!nRemoved) return null;
+    out = healCut(out, mask, removed, w, h, sc.sw);
+    return { mask: out, score: best.s, strokes: best.set.size, of: sc.n };
   };
 
   /**
@@ -916,10 +1125,7 @@
       });
       if (blob.count >= 60) {
         const dom = dominantAlongAxis(data, w, h, blob.mask, seed, bg);
-        ex.lastSeedDebug = { blob: blob.count, sample: seed, dom, wallAtClick: !!wall[y * w + x] };
         if (dom && R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b) >= 40) seed = dom;
-      } else {
-        ex.lastSeedDebug = { blob: blob.count, sample: seed, wallAtClick: !!wall[y * w + x] };
       }
     }
     // the field: distance along the wall→paint axis, so metallic and glossy
@@ -958,6 +1164,8 @@
     let P = 0, W2 = w, H2 = h, full = region, tubes = null, cls = null, completion = null;
     if (bg && wall && ST.complete && !o.noComplete) {
       cls = ST.complete.classify(data, w, h, { bg, seed, paint: paintT, wall, sw: sw0 });
+      // past the photo's edge (a straightened photo's filled-in corners)
+      if (canvas._inPhoto) for (let i = 0; i < cls.length; i++) if (!canvas._inPhoto[i]) cls[i] = ST.complete.FRAME;
       // a cut says the letter stops there: nothing is carried across it
       if (excl) for (let i = 0; i < cls.length; i++) if (excl[i]) cls[i] = ST.complete.WALL;
       const bb = R.maskBounds(region, w, h);
@@ -975,7 +1183,7 @@
     }
 
     // room round the letter for an outline hugging it
-    const cropP = bboxOf(full, W2, H2, 12 + Math.round(0.25 * sw0));
+    const cropP = bboxOf(full, W2, H2, 12 + (cls ? Math.round(0.25 * sw0) : 0));
     if (!cropP) return null;
     const crop = { x: cropP.x - P, y: cropP.y - P, w: cropP.w, h: cropP.h };
     let sub = cropMask(full, W2, cropP);

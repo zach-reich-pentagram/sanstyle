@@ -127,8 +127,47 @@
     ctx.translate(W / 2, H / 2);
     ctx.rotate(rad);
     ctx.drawImage(src, -src.width / 2, -src.height / 2);
+    // where the photo itself lies: the corners filled in are not wall, they
+    // are past the photo's edge, and a letter the photo cut off there is
+    // finished past it like at any frame edge
+    try {
+      const m = g.document.createElement('canvas');
+      m.width = W; m.height = H;
+      const mc = m.getContext('2d');
+      mc.translate(W / 2, H / 2);
+      mc.rotate(rad);
+      if (src._inPhoto) {
+        // turning a photo that was turned before: its own edge still counts
+        const pc = g.document.createElement('canvas');
+        pc.width = src.width; pc.height = src.height;
+        const px = pc.getContext('2d'), pd = px.createImageData(src.width, src.height);
+        for (let i = 0; i < src._inPhoto.length; i++) if (src._inPhoto[i]) pd.data[i * 4 + 3] = 255;
+        px.putImageData(pd, 0, 0);
+        mc.drawImage(pc, -src.width / 2, -src.height / 2);
+      } else {
+        mc.fillStyle = '#fff';
+        mc.fillRect(-src.width / 2 + 1, -src.height / 2 + 1, src.width - 2, src.height - 2);
+      }
+      const md = mc.getImageData(0, 0, W, H).data;
+      const valid = new Uint8Array(W * H);
+      for (let i = 0; i < valid.length; i++) valid[i] = md[i * 4 + 3] > 200 ? 1 : 0;
+      out._inPhoto = valid;
+    } catch (e) { /* no mask: the fill reads as wall, as before */ }
     return out;
   }
+  // `canvas._inPhoto` scaled along with the canvas
+  function scaleInPhoto(src, dst) {
+    const v = src._inPhoto;
+    if (!v) return;
+    const sw = src.width, sh = src.height, dw = dst.width, dh = dst.height;
+    const out = new Uint8Array(dw * dh);
+    for (let y = 0; y < dh; y++) {
+      const sy = Math.min(sh - 1, Math.floor(((y + 0.5) * sh) / dh));
+      for (let x = 0; x < dw; x++) out[y * dw + x] = v[sy * sw + Math.min(sw - 1, Math.floor(((x + 0.5) * sw) / dw))];
+    }
+    dst._inPhoto = out;
+  }
+  auto.scaleInPhoto = scaleInPhoto;
   auto.rotateCanvas = rotateCanvas; // also used by the manual rotate controls
 
   // ---------- candidate detection ----------
@@ -270,6 +309,7 @@
       c.width = Math.round(work.width * s);
       c.height = Math.round(work.height * s);
       c.getContext('2d').drawImage(work, 0, 0, c.width, c.height);
+      scaleInPhoto(work, c);
       work = c;
     }
 
@@ -330,6 +370,7 @@
       let P = 0, MW = W, MH = H, tubes = null;
       if (ST.complete && !o.noComplete) {
         cls = ST.complete.classify(img.data, W, H, { bg: pm.bg, seed: pm.seed, paint: pm.raw, wall: pm.wall, sw });
+        if (work._inPhoto) for (let i = 0; i < cls.length; i++) if (!work._inPhoto[i]) cls[i] = ST.complete.FRAME;
         const done = ST.complete.complete(m, W, H, {
           at: ST.complete.sampler(cls, W, H),
           letterWidth: sw,
@@ -411,6 +452,7 @@
         uc.imageSmoothingEnabled = true;
         uc.imageSmoothingQuality = 'high';
         uc.drawImage(work, 0, 0, up.width, up.height);
+        scaleInPhoto(work, up);
         const again = auto.processImage(up, Object.assign({}, o, { deskew: false, noUpscale: true, angle, maxEdge: 1e9 }));
         if (again.candidates.length) return again;
       }

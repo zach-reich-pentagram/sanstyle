@@ -358,24 +358,38 @@
       for (const c of cands) c.score = scoreOf(c.box, c.tpl);
       cands.sort((a, b) => b.score - a.score);
     }
-    let best = { box: cands[0].box, score: cands[0].score, ch: cands[0].tpl.ch, tpl: cands[0].tpl };
-    if (o.refine === false) return { box: best.box, score: best.score, ch: best.ch, coarse };
+    if (o.refine === false) return { box: cands[0].box, score: cands[0].score, ch: cands[0].tpl.ch, coarse };
     // tighten: hill-climb each box edge until the match stops improving,
     // so the box hugs the letter rather than the coarse search grid
     const moves = [[1, 0, 0, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, -1, 0],
       [0, 0, 0, 1], [0, 0, 0, -1], [-1, 0, 1, 0], [0, -1, 0, 1]];
-    let step = Math.max(2, Math.round(Math.max(best.box.w, best.box.h) * 0.04));
-    while (step >= 1) {
-      let improved = false;
-      for (const [mx, my, mw, mh] of moves) {
-        const b = { x: best.box.x + mx * step, y: best.box.y + my * step, w: best.box.w + mw * step, h: best.box.h + mh * step };
-        if (b.w < 8 || b.h < 8 || b.x < 0 || b.y < 0 || b.x + b.w > w || b.y + b.h > h || !holds(b)) continue;
-        const score = scoreOf(b, best.tpl);
-        if (score > best.score + 1e-4) { best = { box: b, score, ch: best.ch, tpl: best.tpl }; improved = true; break; }
+    const refine = (c) => {
+      let best = { box: c.box, score: c.score, ch: c.tpl.ch, tpl: c.tpl };
+      let step = Math.max(2, Math.round(Math.max(best.box.w, best.box.h) * 0.04));
+      while (step >= 1) {
+        let improved = false;
+        for (const [mx, my, mw, mh] of moves) {
+          const b = { x: best.box.x + mx * step, y: best.box.y + my * step, w: best.box.w + mw * step, h: best.box.h + mh * step };
+          if (b.w < 8 || b.h < 8 || b.x < 0 || b.y < 0 || b.x + b.w > w || b.y + b.h > h || !holds(b)) continue;
+          const score = scoreOf(b, best.tpl);
+          if (score > best.score + 1e-4) { best = { box: b, score, ch: best.ch, tpl: best.tpl }; improved = true; break; }
+        }
+        if (!improved) step = Math.floor(step / 2);
       }
-      if (!improved) step = Math.floor(step / 2);
+      return { box: best.box, score: best.score, ch: best.ch };
+    };
+    const best = refine(cands[0]);
+    // o.alternatives: the next-best distinct placements too (a box that
+    // matches a touch less may still cut the neighbor off better)
+    let alternatives;
+    if (o.alternatives) {
+      alternatives = [best];
+      for (const c of cands.slice(1, 1 + o.alternatives)) {
+        const r = refine(c);
+        if (alternatives.every((a) => boxIoU(a.box, r.box) < 0.85)) alternatives.push(r);
+      }
     }
-    return { box: best.box, score: best.score, ch: best.ch, coarse };
+    return { box: best.box, score: best.score, ch: best.ch, coarse, alternatives };
   };
 
   /**
@@ -384,8 +398,9 @@
    * box, margin: {x0,y0,x1,y1} (the box actually cut along)} or null when
    * no confident match.
    */
-  cls.isolate = function (mask, w, h, ch, cx, cy, minScore) {
-    const found = cls.locate(mask, w, h, ch, { cx, cy });
+  cls.isolate = function (mask, w, h, ch, cx, cy, minScore, opts) {
+    const o = opts || {};
+    const found = o.found || cls.locate(mask, w, h, ch, { cx, cy });
     // a handstyle rarely matches a font closely; the box only guides which
     // strokes count as neighbors, so a loose match is still useful
     if (!found || found.score < (minScore == null ? 0.3 : minScore)) return null;
@@ -409,6 +424,36 @@
     const comp = ST.raster.floodFrom(w, h, sx, sy, (i) => boxed[i] === 1);
     if (comp.count < 30) return null;
     return { mask: comp.mask, score: found.score, box: found.box, margin: { x0, y0, x1, y1 } };
+  };
+
+  /**
+   * How well does a raw mask match one specific character? (No tracing:
+   * cheap enough to compare many trims of one shape.)
+   */
+  cls.scoreMask = function (mask, w, h, ch) {
+    const gridded = cls.gridFromMask(mask, w, h);
+    if (!gridded) return 0;
+    const bb = ST.raster.maskBounds(mask, w, h);
+    // holes on a bounded crop of the ink
+    const bw = bb.w + 2, bh = bb.h + 2;
+    const sub = new Uint8Array(bw * bh);
+    for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) sub[(y + 1) * bw + (x + 1)] = mask[(y + bb.y0) * w + (x + bb.x0)];
+    const minHole = Math.max(9, Math.round(bb.w * bb.h * 0.002));
+    const inv = new Uint8Array(bw * bh);
+    for (let i = 0; i < inv.length; i++) inv[i] = sub[i] ? 0 : 1;
+    const { labels, sizes } = ST.raster.components(inv, bw, bh);
+    const outer = labels[0];
+    let holes = 0;
+    for (let i = 1; i < sizes.length; i++) if (i !== outer && sizes[i] >= minHole) holes++;
+    const probe = { grid: gridded.grid, aspect: gridded.aspect, holes };
+    const upper = (ch || '').toUpperCase();
+    let best = 0;
+    for (const t of cls.buildTemplates()) {
+      if (t.ch !== upper && t.ch !== ch) continue;
+      const s = cls.compare(probe, t);
+      if (s > best) best = s;
+    }
+    return best;
   };
 
   /**

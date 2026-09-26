@@ -56,9 +56,15 @@ the queue waits across tabs and reloads of Drive photos.
 click the letter in the photo: the click snaps to the densest paint nearby
 (a click in the halo or just off a thin stroke still seeds from the stroke),
 the paint color is sampled and refined, and the connected stroke region is
-grown at the tolerance whose edge is sharpest. Fused with a neighbor? Drag a
-short cut across the join and the region regrows without it — or type the
-character and **Isolate**: a stroke-weight-agnostic template search (two-way
+grown at the tolerance whose edge is sharpest. Fused with a neighbor of the
+same paint (touching it, crossing it, running into it)? **Type the
+character**: the shape is trimmed to it by itself when the trim matches the
+character clearly better than the whole did (⌘Z brings the whole back). Two
+readings compete: the shape grown stroke by stroke from the one you clicked
+(strokes rejoined through junctions by good continuation, so a bar that
+crosses a neighbor's O stays one bar and the O stays one ring), and a
+template search. Or drag a short cut across the join and the region regrows
+without it — or press **Isolate** to force the trim: a stroke-weight-agnostic template search (two-way
 chamfer match against system-font renders, scored on the ink connected to
 your click) finds where that character sits inside the fused shape. The
 shape is then read as strokes — skeletonized, cut into pieces at junctions
@@ -81,6 +87,35 @@ tracer then measures its corners and smoothing against the stroke width,
 so a round cap only half a stroke across is fitted as a curve, never
 sharpened into a corner.
 
+**Seeing past what hides the letter.** A stroke that stops at bare wall has
+ended: the pen lifted there. A stroke that stops at something else — a
+drainpipe or a sign in front of it, a crack, a sticker, another color
+painted over it, the edge of the photo — has only been hidden, and the
+letter goes on underneath. Every pixel is read as wall, this paint, the
+paint's own halo and shading, or hidden (anything else, and everything past
+the frame, including the corners a straightened photo fills in). A stroke
+end is cut short when the wall starts much further ahead of it than beside
+it (a halo surrounds a stroke on every side alike; an occluder only sits in
+front), and then:
+
+- two cut-short ends that face each other across hidden ground are the same
+  stroke, joined by the curve that continues both at their width — straight
+  across a pipe, a circular arc round a U's bottom or an O's side past the
+  frame — and never across visible wall; the pieces beyond join the letter;
+- an end with no partner runs on into another piece of the letter if one
+  lies straight ahead under the hidden ground (an N's stem hidden all the
+  way down to its corner), or else carries on a plausible way — past the
+  frame as far as the letter's other strokes reach that way, behind an
+  occluder part way across it — and gets the pen's round cap;
+- a stroke bitten along its side (a sticker over its edge, another color
+  along it) gets its width back, measured from the edge that shows, onto
+  hidden ground only;
+- holes that show no wall (a sticker on the stroke, a chip) are filled, and
+  a throw-up's outline — a band of another color hugging the whole letter —
+  is part of it, counters and all.
+
+A cut you draw is the one thing nothing is carried across.
+
 ![Isolate a fused 2](docs/shots/isolate-2.png)
 
 **Ligatures and two-part characters.** Type two to four letters ("ar",
@@ -94,7 +129,7 @@ shift-click puts back a bit that the extraction, a cut or Isolate left out
 (where no paint reads under the click at all — a glint, a worn patch — it
 brushes in a stroke-width spot), and the pieces are remembered when the
 shape is rebuilt by the Detail knob, a cut, an undo or an Isolate.
-**⌘Z / Ctrl-Z** undoes the most recent cut or added piece.
+**⌘Z / Ctrl-Z** undoes the most recent cut, added piece or trim.
 
 ## The optical fitting
 
@@ -137,6 +172,29 @@ the FontFace API in a few milliseconds.
   for mockups.
 - **Exports**: the specimen as **SVG** (true vector paths), **PNG**, or
   **JPG** — plus the installable **TTF** itself.
+
+## Getting the best results
+
+- **Shoot the whole letter with some wall around it.** The wall's color is
+  read from the photo's border; a letter that fills the frame edge to edge
+  is finished past the edge, but only as well as the rest of it suggests.
+- **Straight on beats the perfect angle.** Up to ±20° of roll is straightened
+  automatically; strong perspective (shooting a wall from the side) is not.
+- **Full-resolution photos.** Share the originals into the Drive inbox (the
+  Drive app keeps them; messaging apps shrink them). Letters are brought to
+  the same working size either way, but a sharper original means cleaner
+  edges.
+- **Avoid hard shadows and glare across the letter.** A shadow reads as a
+  different color and gets treated as something hiding the stroke.
+- **Sync as yourself.** Use the sign-in setup in [SETUP-SYNC.md](SETUP-SYNC.md)
+  (an OAuth refresh token) rather than a service account, unless both
+  folders live in a Shared Drive — otherwise Google refuses the writes.
+
+The extraction is measured against synthetic walls with known ground truth
+(`node tools/bench/run.mjs <tag>`: a drainpipe, a crack, stickers, an
+overpainted letter, frame cutoffs, drips, a chrome throw-up, silver on
+white, sharp valleys, fused same-color letters, fading marker ends), writing
+an overlay per scene to `tools/bench/out/`.
 
 ## Cloud sync (Google Drive + Vercel)
 
@@ -181,6 +239,7 @@ api/
 tools/
   get_refresh_token.mjs   one-time Google sign-in for the site
   validate_font.py        fontTools round-trip used by the tests
+  bench/                  extraction bench: synthetic walls with ground truth
 js/
   geometry.js    vectors, RDP, point-in-poly, homography, Bézier math
   fitcurves.js   Schneider least-squares cubic fitting
@@ -192,6 +251,9 @@ js/
   ttf.js         dependency-free TrueType compiler (+ GSUB ligatures)
   classify.js    template character classifier (local, human-confirmed)
   auto.js        deskew + letter detection for the automated lane
+  extract.js     click-to-trace, clean-up, stroke graph, stroke chains
+  complete.js    occlusion: hidden stroke ends, joins, frame completion,
+                 bitten strokes, outlines
   heic.js        HEIC/HEIF intake (vendored libheif, lazy-loaded)
   export.js      specimen layout → SVG / PNG / JPG, per-letterform SVGs
   store.js       library model, persistence, import/export
@@ -207,14 +269,19 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 49 unit tests: geometry, tracing, fitting, morphology,
+npm test        # 62 unit tests: geometry, tracing, fitting, morphology,
                 # deskew, seeded extraction, stroke-graph isolation,
+                # occlusion completion (hidden ends, joins across occluders
+                # and past the frame, bitten strokes, outlines), stroke
+                # chains splitting fused letters,
                 # classifier scoring, ligature keys + GSUB, weight targeting,
                 # TTF byte format, and the api routes (JWT signing verified
                 # against a real keypair, Drive calls stubbed)
 npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
-                # Isolate, Detail, variant cycling, ligature shaping, weight
+                # Isolate, trim on typing + ⌘Z, a letter behind a pipe, one
+                # cut off by the frame, a throw-up's outline,
+                # Detail, variant cycling, ligature shaping, weight
                 # slider, source popup, kerning, exports, TTF download
                 # (fontTools-validated) — plus the full sync flow (gate,
                 # inbox extraction, SVG mirroring, wiped-device restore,

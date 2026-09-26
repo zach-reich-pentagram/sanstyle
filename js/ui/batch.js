@@ -473,12 +473,34 @@
     const lc = item.lastClick
       ? { x: item.lastClick.x - cand.crop.x, y: item.lastClick.y - cand.crop.y }
       : { x: cand.w / 2, y: cand.h / 2 };
-    // a loose match still says which strokes are the neighbor's; only a
-    // hopeless one is refused
-    const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y, 0.18);
-    if (!res) return null;
-    const strokes = res.margin ? ST.extract.isolateStrokes(cand.mask, cand.w, cand.h, res.margin, lc.x, lc.y) : null;
-    const clean = ST.extract.cleanMask(strokes ? strokes.mask : res.mask, cand.w, cand.h, 4);
+    // where the character sits: the best few placements of its template;
+    // each trims the shape, and the trim that looks most like the character
+    // wins (the best-matching box can still take a bit of the neighbor)
+    const found = ST.classify.locate(cand.mask, cand.w, cand.h, ch, { cx: lc.x, cy: lc.y, alternatives: 3 });
+    let best = null;
+    const consider = (mask, res) => {
+      const got = trimTo(cand, mask, res);
+      if (!got) return;
+      got.fit = ST.classify.scoreFor(got.cand.paths, ch);
+      if (!best || got.fit > best.fit) best = got;
+    };
+    for (const place of (found && (found.alternatives || [found])) || []) {
+      // a loose match still says which strokes are the neighbor's; only a
+      // hopeless one is refused
+      const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y, 0.18, { found: place });
+      if (!res) continue;
+      const strokes = res.margin ? ST.extract.isolateStrokes(cand.mask, cand.w, cand.h, res.margin, lc.x, lc.y) : null;
+      consider(strokes ? strokes.mask : res.mask, res);
+    }
+    // and stroke by stroke: from the stroke clicked, the touching strokes
+    // that make the shape most like the character
+    const grown = ST.extract.growLetter(cand.mask, cand.w, cand.h, lc.x, lc.y, (m) => ST.classify.scoreMask(m, cand.w, cand.h, ch));
+    if (grown) consider(grown.mask, { score: grown.score });
+    return best;
+  }
+
+  function trimTo(cand, trimmed, res) {
+    const clean = ST.extract.cleanMask(trimmed, cand.w, cand.h, 4);
     // re-crop to the isolated letter so the photo pane boxes just it
     const bb = ST.raster.maskBounds(clean, cand.w, cand.h);
     if (!bb) return null;
@@ -548,7 +570,7 @@
     if (!got) return false;
     const before = ST.raster.count(cand.mask), after = ST.raster.count(got.cand.mask);
     if (after > 0.85 * before || after < 0.2 * before) return false;
-    const whole = ST.classify.scoreFor(cand.paths, ch), trimmed = ST.classify.scoreFor(got.cand.paths, ch);
+    const whole = ST.classify.scoreFor(cand.paths, ch), trimmed = got.fit;
     if (!(trimmed >= 0.3 && trimmed >= whole + 0.06)) return false;
     got.cand._autoTried = ch;
     showIsolated(item, got);

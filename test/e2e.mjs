@@ -546,6 +546,101 @@ check(cutSide.detail.detail === 8 && cutSide.detail.slider === '8' && cutSide.de
 check(cutSide.after < cutSide.before && cutSide.after > cutSide.before * 0.5 && cutSide.keptTop > cutSide.cutY - 5,
   `a cut with no click keeps the larger side (${cutSide.before} → ${cutSide.after} px; kept piece starts below the cut)`);
 
+// ---- seeing past what hides the letter ----------------------------------------
+console.log('\n— occlusion: pipe, frame edge, outline, fused neighbor');
+const occl = await page.evaluate(() => {
+  const mk = (W, H, bg) => {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const x = c.getContext('2d');
+    x.fillStyle = bg; x.fillRect(0, 0, W, H);
+    let s = 7;
+    const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+    const img = x.getImageData(0, 0, W, H);
+    for (let i = 0; i < img.data.length; i += 4) { const n = (rnd() - 0.5) * 16; img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n; }
+    x.putImageData(img, 0, 0);
+    return { c, x };
+  };
+  const stroke = (x, draw, lw, col) => { x.save(); x.lineCap = 'round'; x.lineJoin = 'round'; x.lineWidth = lw; x.strokeStyle = col; x.beginPath(); draw(x); x.stroke(); x.restore(); };
+  const out = {};
+  const run = (canvas, name) => { ST.batch.addCanvas(canvas, name); ST.batch.reopen(); return ST.batch.queue[ST.batch.idx]; };
+  // an H behind a drainpipe
+  {
+    const { c, x } = mk(900, 1000, '#d4c6ac');
+    stroke(x, (k) => { k.moveTo(250, 220); k.lineTo(250, 800); k.moveTo(630, 220); k.lineTo(630, 800); k.moveTo(250, 500); k.lineTo(630, 500); }, 62, 'rgb(38,54,124)');
+    const gr = x.createLinearGradient(405, 0, 480, 0);
+    gr.addColorStop(0, 'rgb(78,80,84)'); gr.addColorStop(0.45, 'rgb(172,174,176)'); gr.addColorStop(1, 'rgb(96,98,100)');
+    x.fillStyle = gr; x.fillRect(405, 0, 75, 1000);
+    const item = run(c, 'pipe');
+    const cand = item.candidates[0];
+    const bb = ST.raster.maskBounds(cand.mask, cand.w, cand.h);
+    // the crossbar under the pipe
+    const under = cand.mask[(500 - cand.crop.y) * cand.w + (442 - cand.crop.x)];
+    out.pipe = { n: item.candidates.length, left: cand.crop.x + bb.x0, right: cand.crop.x + bb.x1, outer: cand.paths.filter((p) => p.area > 0).length, under };
+    ST.batch.skip();
+  }
+  // a U whose bottom is past the frame
+  {
+    const { c, x } = mk(900, 820, '#c8c4be');
+    stroke(x, (k) => { k.moveTo(260, 150); k.lineTo(260, 700); k.arc(450, 700, 190, Math.PI, 0, true); k.lineTo(640, 150); }, 64, 'rgb(20,20,24)');
+    const item = run(c, 'frame-u');
+    const cand = item.candidates[0];
+    const bb = ST.raster.maskBounds(cand.mask, cand.w, cand.h);
+    out.frame = { n: item.candidates.length, bottom: cand.crop.y + bb.y1, outer: cand.paths.filter((p) => p.area > 0).length, holes: cand.paths.filter((p) => p.area < 0).length };
+    ST.batch.skip();
+  }
+  // a chrome throw-up B: silver fill, black outline
+  {
+    const { c, x } = mk(900, 1000, '#5f6978');
+    const shape = (k, g) => { k.beginPath(); k.ellipse(430, 355, 175 + g, 155 + g, 0, 0, Math.PI * 2); k.ellipse(455, 650, 195 + g, 175 + g, 0, 0, Math.PI * 2); k.rect(215 - g, 200 - g, 190 + 2 * g, 620 + 2 * g); k.fill('nonzero'); };
+    const counters = (k, g) => { k.beginPath(); k.ellipse(420, 355, 55 + g, 42 + g, 0, 0, Math.PI * 2); k.fill(); k.beginPath(); k.ellipse(440, 650, 62 + g, 50 + g, 0, 0, Math.PI * 2); k.fill(); };
+    x.fillStyle = 'rgb(18,18,20)'; shape(x, 16);
+    x.fillStyle = 'rgb(200,202,208)'; shape(x, 0);
+    x.fillStyle = 'rgb(18,18,20)'; counters(x, 14);
+    x.fillStyle = '#5f6978'; counters(x, 0);
+    const item = run(c, 'throwup');
+    ST.batch.clickTrace(300, 560);
+    const cand = item.candidates[0];
+    const bb = ST.raster.maskBounds(cand.mask, cand.w, cand.h);
+    out.throwup = { left: cand.crop.x + bb.x0, right: cand.crop.x + bb.x1, top: cand.crop.y + bb.y0, holes: cand.paths.filter((p) => p.area < 0).length };
+    ST.batch.skip();
+  }
+  return out;
+});
+check(occl.pipe.left < 225 && occl.pipe.right > 655 && occl.pipe.outer === 1 && occl.pipe.under === 1,
+  `an H behind a drainpipe comes out whole, crossbar carried on under the pipe (${occl.pipe.left}–${occl.pipe.right}, ${occl.pipe.outer} outline)`);
+check(occl.frame.bottom > 860 && occl.frame.outer === 1 && occl.frame.holes === 0,
+  `a U cut off by the frame is finished past it (ink down to y=${occl.frame.bottom} on an 820 px photo)`);
+check(occl.throwup.left < 205 && occl.throwup.top < 190 && occl.throwup.holes === 2,
+  `a throw-up's outline is part of the letter, counters kept (left ${occl.throwup.left}, top ${occl.throwup.top}, ${occl.throwup.holes} counters)`);
+
+// typing the character trims a same-colored neighbor off by itself
+await page.evaluate(() => {
+  const c = document.createElement('canvas'); c.width = 1000; c.height = 1000;
+  const x = c.getContext('2d');
+  x.fillStyle = '#dad6ce'; x.fillRect(0, 0, 1000, 1000);
+  x.lineCap = 'round'; x.lineJoin = 'round'; x.lineWidth = 56; x.strokeStyle = 'rgb(22,22,26)';
+  // the T's bar runs on through the O's side and ends inside its counter
+  x.beginPath(); x.moveTo(130, 220); x.lineTo(560, 220); x.moveTo(325, 220); x.lineTo(325, 820); x.stroke();
+  x.beginPath(); x.ellipse(620, 330, 150, 220, 0, 0, Math.PI * 2); x.stroke();
+  ST.batch.addCanvas(c, 'fused-to');
+  ST.batch.reopen();
+  ST.batch.clickTrace(325, 600);
+});
+const fusedBefore = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind }; });
+await page.fill('#reviewChar', 'T');
+// the trim runs once typing pauses
+await page.waitForFunction(() => { const it = ST.batch.queue[ST.batch.idx]; return it && it.candidates[0] && it.candidates[0].kind === 'isolated'; }, { timeout: 8000 }).catch(() => {});
+const fusedAfter = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; const bb = ST.raster.maskBounds(c.mask, c.w, c.h); return { w: bb.w, left: c.crop.x + bb.x0, right: c.crop.x + bb.x1, kind: c.kind, hist: (it.history || []).length }; });
+check(fusedAfter.kind === 'isolated' && fusedAfter.right < 610 && fusedAfter.right > 540 && fusedAfter.left < 110,
+  `typing “T” trimmed the fused O off by itself (${fusedBefore.w} → ${fusedAfter.w} px wide, bar kept to x=${fusedAfter.right})`);
+await page.focus('#reviewChar');
+await page.keyboard.press('Control+z');
+await page.waitForTimeout(200);
+const fusedUndo = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind, ch: document.getElementById('reviewChar').value }; });
+check(fusedUndo.kind !== 'isolated' && fusedUndo.w === fusedBefore.w && fusedUndo.ch === 'T',
+  `Ctrl-Z brings the whole shape back, the typed character stays (${fusedUndo.w} px wide)`);
+await page.evaluate(() => ST.batch.skip());
+
 // ---- live font + variant cycling ---------------------------------------------
 console.log('\n— live font, cycling, kerning');
 await page.waitForFunction(() => __st.state().glyphsMapped >= 14 && __st.fontB64(), { timeout: 15000 });

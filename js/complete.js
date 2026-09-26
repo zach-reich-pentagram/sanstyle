@@ -308,7 +308,6 @@
         if (len > 2.2 * D + 2 * sw) continue;
         // never across visible wall: if the stroke went there, it would show
         const cov = coverage(f, len, A.r, B.r, at);
-        if (C.debug) (C.rejects = C.rejects || []).push({ a: [Math.round(A.x), Math.round(A.y)], b: [Math.round(B.x), Math.round(B.y)], wall: +cov.wall.toFixed(3), center: +cov.center.toFixed(3) });
         // the centerline strictly; the tube's flanks may graze a little wall
         // where the guessed curve drifts off the real one
         if (cov.center > 0.06 || cov.wall > 0.15) continue;
@@ -643,7 +642,7 @@
     }
     for (let i = 0; i < out.length; i++) if (tubes[i]) out[i] = 1;
     const res = { mask: out, tubes, P, W2, H2, pairs: drawn, extensions, ends };
-    if (C.debug) C.last = res;
+    if (C.debug) C.last = res; // for inspection: ST.complete.debug = true
     return res;
   };
 
@@ -752,7 +751,6 @@
       const share = touch[L] / edge[L];
       const wraps = along[L] / Math.max(1, letterEdge);
       const band = 2 * thick[L];
-      if (C.debug && sizes[L] > 200) (C.outlineDbg = C.outlineDbg || []).push({ L, size: sizes[L], share: +share.toFixed(2), wraps: +wraps.toFixed(2), band, sw: +sw.toFixed(1), inHole: !!inHole[L] && !outside[L] });
       if (share < 0.3 || band > 0.5 * sw || band < 2) continue;
       const enclosed = inHole[L] && !outside[L];
       if (!enclosed && wraps < 0.45) continue;
