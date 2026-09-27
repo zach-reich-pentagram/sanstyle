@@ -49,11 +49,14 @@
   function setHint(msg) { if (hintEl) hintEl.textContent = msg || ''; }
   cap.setHint = setHint;
 
+  const HINT = 'Click a letter to trace it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans';
+
   // ---------- the current photo and its shape ----------
   // The review queue calls this whenever the photo or the shape changes.
   cap.showItem = function (item, cand, opts) {
     const o = opts || {};
-    const newPhoto = !!item && item !== cap.item;
+    // (a cropped photo is a new picture of the same item: fit it again)
+    const newPhoto = !!item && (item !== cap.item || item.canvas !== cap.img);
     cap.item = item || null;
     cap.cand = cand || null;
     cap.img = item ? item.canvas : null;
@@ -64,7 +67,7 @@
     if (tag) { tag.classList.toggle('active', !!cand); tag.classList.toggle('locked', !cand); }
     if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall.');
     else if (!cand) setHint('Nothing traced yet — click the letter in the photo, or skip it.');
-    else setHint('Click a letter to trace it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans');
+    else setHint(HINT);
     // a leaning letter stands up by its stems (the Rotate slider adjusts)
     if (cand && cand.turn == null) {
       if (item && item.manualTurn != null) cand.turn = item.manualTurn; // set by hand on this photo: kept
@@ -102,6 +105,10 @@
     r.value = turn;
     r.disabled = !cap.cand;
     if (v) v.textContent = `${turn > 0 ? '+' : turn < 0 ? '−' : ''}${Math.abs(turn)}°`;
+    const n = (cap.cand && cap.cand.nudge) || {};
+    const sc = $('#reviewScale'), dy = $('#reviewDy');
+    if (sc) { sc.value = n.scale || 0; sc.disabled = !cap.cand; $('#reviewScaleVal').textContent = `${100 + (n.scale || 0)}%`; }
+    if (dy) { dy.value = n.dy || 0; dy.disabled = !cap.cand; $('#reviewDyVal').textContent = `${(n.dy || 0) > 0 ? '+' : ''}${n.dy || 0}`; }
   }
 
   // ---------- what it reads as ----------
@@ -201,7 +208,7 @@
     const input = $('#reviewChar');
     const key = ST.metrics.charKey(input ? input.value : '');
     cap.record = null;
-    if (cap.cand && cap.cand.paths.length && key) cap.record = ST.metrics.buildRecord(key, cap.uprightPaths(cap.cand));
+    if (cap.cand && cap.cand.paths.length && key) cap.record = cap.recordFor(cap.cand, key);
     drawPreview(key || 'A');
     const btn = $('#reviewAccept');
     if (btn) btn.disabled = !cap.record;
@@ -219,6 +226,21 @@
     }
   }
   cap.updatePreview = updatePreview;
+
+  // The letterform as it will be added: upright, fitted, with the Height
+  // and Baseline set on the Shape step. Fitting is cached per turn and
+  // character, so a Height/Baseline drag only re-applies the nudge.
+  cap.recordFor = function (cand, key) {
+    const turn = cand.turn || 0;
+    let rec = cand._fit && cand._fit.turn === turn && cand._fit.key === key && cand._fit.paths === cand.paths ? cand._fit.rec : null;
+    if (!rec) {
+      rec = ST.metrics.buildRecord(key, cap.uprightPaths(cand));
+      cand._fit = { turn, key, paths: cand.paths, rec };
+    }
+    if (!rec) return null;
+    const n = cand.nudge || {};
+    return Object.assign({}, rec, { id: ST.uid(), nudge: Object.assign({}, rec.nudge, { scale: n.scale || 0, dy: n.dy || 0 }) });
+  };
 
   function drawPreview(ch) {
     if (!pctx) return;
@@ -395,6 +417,16 @@
     }
     ctx.restore();
 
+    // a crop box being drawn: the photo outside it dimmed
+    if (dragging && dragging.kind === 'crop' && dragging.moved) {
+      const a = toScreen(dragging.start), b = toScreen(dragging.last);
+      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.beginPath(); ctx.rect(0, 0, stage.width, stage.height); ctx.rect(x, y, w, h); ctx.fill('evenodd');
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+    }
     // a cut being drawn, in screen space
     if (dragging && dragging.kind === 'gesture' && dragging.moved) {
       const a = toScreen(dragging.start), b = toScreen(dragging.last);
@@ -423,6 +455,7 @@
       return;
     }
     if (ev.button !== 0) return;
+    if (cap.tool === 'crop') { dragging = { kind: 'crop', start: ip, last: ip, sStart: sp, moved: false }; return; }
     dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, moved: false, shift: ev.shiftKey, alt: ev.altKey };
   }
 
@@ -444,10 +477,17 @@
     const d = dragging;
     dragging = null;
     try { stage.releasePointerCapture(ev.pointerId); } catch (e) { /* released */ }
+    if (d && d.kind === 'crop') {
+      if (d.moved && cap.item) {
+        setTool('trace');
+        busy('Cropping and re-reading…', () => ST.batch.cropTo(d.start.x, d.start.y, d.last.x, d.last.y));
+      } else requestDraw();
+      return;
+    }
     if (!d || d.kind !== 'gesture' || !cap.item || !cap.img) { requestDraw(); return; }
     const inside = (p) => p.x >= 0 && p.y >= 0 && p.x < cap.img.width && p.y < cap.img.height;
     if (d.moved) {
-      if (inside(d.start) || inside(d.last)) busy('Cutting…', () => ST.batch.addCut(d.start.x, d.start.y, d.last.x, d.last.y));
+      if (inside(d.start) || inside(d.last)) busy('Cutting…', () => ST.batch.addCutAsync(d.start.x, d.start.y, d.last.x, d.last.y));
       else requestDraw();
     } else if (d.alt || ev.altKey) {
       // Option-click: take that piece off the shape (a piece completed past
@@ -455,7 +495,7 @@
       busy('Removing…', () => ST.batch.removeAt(d.start.x, d.start.y));
     } else if (inside(d.start)) {
       if (d.shift || ev.shiftKey) busy('Adding the piece…', () => ST.batch.addPart(d.start.x, d.start.y));
-      else busy('Tracing…', () => ST.batch.clickTrace(d.start.x, d.start.y));
+      else busy('Tracing…', () => ST.batch.clickTraceAsync(d.start.x, d.start.y));
     } else {
       requestDraw();
     }
@@ -491,10 +531,15 @@
   }
 
   function setTool(tool) {
+    const was = cap.tool;
     cap.tool = tool;
     const hand = $('#toolHand');
     if (hand) hand.classList.toggle('on', tool === 'hand');
+    const crop = $('#toolCrop');
+    if (crop) crop.classList.toggle('on', tool === 'crop');
     if (stage) stage.style.cursor = tool === 'hand' ? 'grab' : 'crosshair';
+    if (tool === 'crop') setHint('Drag a box round the letter to crop the photo to it · Esc cancels');
+    else if (was === 'crop' && cap.item) setHint(HINT);
   }
   cap.setTool = setTool;
 
@@ -542,16 +587,32 @@
 
     $('#toolFit').addEventListener('click', fitView);
     $('#toolHand').addEventListener('click', () => setTool(cap.tool === 'hand' ? 'trace' : 'hand'));
+    $('#toolCrop').addEventListener('click', () => { if (cap.item) setTool(cap.tool === 'crop' ? 'trace' : 'crop'); });
+    g.addEventListener('keydown', (e) => { if (e.key === 'Escape' && cap.tool === 'crop') setTool('trace'); });
     $('#reviewChar').addEventListener('input', updatePreview);
+    // Slider drags fire far faster than a redraw: the state changes at
+    // once, the drawing once per frame, the (slower) recognizer re-read only
+    // when the drag pauses.
+    let frame = 0, guessTimer = 0;
+    const redraw = (turned) => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawTrace(); updatePreview(); });
+      if (turned) { clearTimeout(guessTimer); guessTimer = setTimeout(showGuesses, 180); }
+    };
     $('#reviewRotate').addEventListener('input', (e) => {
       if (!cap.cand) return;
       cap.cand.turn = +e.target.value;
       if (cap.item) cap.item.manualTurn = cap.cand.turn;
       syncRotate();
-      drawTrace();
-      updatePreview();
-      showGuesses();
+      redraw(true);
     });
+    const nudgeInput = (key) => (e) => {
+      if (!cap.cand) return;
+      cap.cand.nudge = Object.assign({ scale: 0, dy: 0 }, cap.cand.nudge, { [key]: +e.target.value });
+      syncRotate();
+      redraw(false);
+    };
+    $('#reviewScale').addEventListener('input', nudgeInput('scale'));
+    $('#reviewDy').addEventListener('input', nudgeInput('dy'));
 
     setTool('trace');
     cap.showItem(null, null);

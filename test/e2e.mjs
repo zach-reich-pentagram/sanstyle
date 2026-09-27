@@ -185,7 +185,7 @@ const clickAt = await page.evaluate(() => {
   return { x: r.left + sp.x, y: r.top + sp.y, before: ST.capture.item.candidates.length };
 });
 await page.mouse.click(clickAt.x, clickAt.y);
-await page.waitForTimeout(400);
+await page.waitForFunction((n) => ST.capture.item.candidates.length > n, clickAt.before, { timeout: 8000 }).catch(() => {});
 const afterClick = await page.evaluate(() => ({
   n: ST.capture.item.candidates.length, kind: ST.capture.item.candidates[0].kind, paths: ST.capture.cand.paths.length,
 }));
@@ -266,9 +266,28 @@ check(clickInfo.n >= 1 && clickInfo.after > clickInfo.before,
   `clickTrace grew a traced letterform from one click (${clickInfo.n} candidate(s), kind ${clickInfo.kind})`);
 check(/Shape 1 of/.test(clickInfo.hint), 'clicked shape becomes the current one');
 await page.mouse.click(clickInfo.screen.x, clickInfo.screen.y);
-await page.waitForTimeout(400);
+// (traced in the background worker: wait for it to come back)
+await page.waitForFunction((n) => ST.batch.queue[ST.batch.idx].candidates.length > n, clickInfo.after, { timeout: 8000 }).catch(() => {});
 const afterRealClick = await page.evaluate(() => ST.batch.queue[ST.batch.idx].candidates.length);
-check(afterRealClick > clickInfo.after, 'a real click on the stage traces too');
+check(afterRealClick > clickInfo.after, 'a real click on the stage traces too (in the background worker)');
+// Crop: drag a box with the Crop tool; the photo is cut to it and read
+// again, and ⌘Z brings the whole photo back
+const cropBox = await page.evaluate(() => {
+  const it = ST.batch.queue[ST.batch.idx], c = it.candidates[0];
+  const r = document.getElementById('stage').getBoundingClientRect();
+  const a = ST.capture.toScreen({ x: c.crop.x - 40, y: c.crop.y - 40 }), b = ST.capture.toScreen({ x: c.crop.x + c.crop.w + 40, y: c.crop.y + c.crop.h + 40 });
+  return { a: { x: r.left + a.x, y: r.top + a.y }, b: { x: r.left + b.x, y: r.top + b.y }, W: it.canvas.width, H: it.canvas.height };
+});
+await page.click('#toolCrop');
+await page.mouse.move(cropBox.a.x, cropBox.a.y); await page.mouse.down();
+await page.mouse.move((cropBox.a.x + cropBox.b.x) / 2, (cropBox.a.y + cropBox.b.y) / 2, { steps: 4 });
+await page.mouse.move(cropBox.b.x, cropBox.b.y, { steps: 4 }); await page.mouse.up();
+await page.waitForFunction((W) => ST.batch.queue[ST.batch.idx].canvas.width !== W, cropBox.W, { timeout: 15000 }).catch(() => {});
+const cropped = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { W: it.canvas.width, H: it.canvas.height, n: it.candidates.length, tool: ST.capture.tool }; });
+check(cropped.W !== cropBox.W && cropped.n >= 1 && cropped.tool === 'trace', `Crop cuts the photo to the box and reads it again (${cropBox.W}×${cropBox.H} → ${cropped.W}×${cropped.H}, ${cropped.n} shape(s))`);
+await page.evaluate(() => ST.batch.undo());
+const uncropped = await page.evaluate(() => ST.batch.queue[ST.batch.idx].canvas.width);
+check(uncropped === cropBox.W, `⌘Z brings the uncropped photo back (${uncropped} px wide)`);
 // cut gesture through the N's middle: region shrinks, Undo restores
 const cutRes = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];
@@ -648,6 +667,18 @@ const rot = await page.evaluate(() => {
 });
 check(rot.enabled && rot.turn === 12 && rot.manual === 12 && rot.moved && /12°/.test(rot.label) && rot.guesses >= 1,
   `Rotate turns the letterform (${rot.label}, ${rot.guesses} guess button(s))`);
+const hd = await page.evaluate(async () => {
+  const it = ST.batch.queue[ST.batch.idx];
+  const r = document.getElementById('reviewRotate'); r.value = '170'; r.dispatchEvent(new Event('input'));
+  const turned = it.candidates[it.ci].turn;
+  const sc = document.getElementById('reviewScale'); sc.value = '20'; sc.dispatchEvent(new Event('input'));
+  const dy = document.getElementById('reviewDy'); dy.value = '-100'; dy.dispatchEvent(new Event('input'));
+  await new Promise((res) => requestAnimationFrame(() => setTimeout(res, 50)));
+  const n = ST.capture.record && ST.capture.record.nudge;
+  sc.value = '0'; sc.dispatchEvent(new Event('input')); dy.value = '0'; dy.dispatchEvent(new Event('input'));
+  return { turned, n, label: document.getElementById('reviewScaleVal').textContent };
+});
+check(hd.turned === 170 && hd.n && hd.n.scale === 20 && hd.n.dy === -100, `Rotate goes past ±30° (170°), Height and Baseline set the fitted glyph's nudges (${JSON.stringify(hd.n)})`);
 await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const r = document.getElementById('reviewRotate'); r.value = '0'; r.dispatchEvent(new Event('input')); it.manualTurn = null; });
 // the whole shape is one step away; typing the character trims it too
 await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; while (it.candidates[it.ci].kind !== 'whole') ST.batch.tryNext(); });

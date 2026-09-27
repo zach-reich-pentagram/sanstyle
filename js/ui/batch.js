@@ -263,7 +263,26 @@
     const item = batch.queue[batch.idx];
     if (!item) return 0;
     item.lastClick = { x, y };
-    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null, smoothing: smoothingFor(item) });
+    return applyClick(item, ST.extract.seeded(item.canvas, x, y, clickOpts(item)), opts);
+  };
+
+  // The same, traced in the background worker: a click on a big, busy
+  // photo takes a second or two of work, and the page stays live meanwhile.
+  // (Resolves with the shapes offered; a click made meanwhile wins.)
+  let clickSeq = 0;
+  batch.clickTraceAsync = async function (x, y, opts) {
+    const item = batch.queue[batch.idx];
+    if (!item) return 0;
+    item.lastClick = { x, y };
+    const seq = ++clickSeq;
+    const res = await seededAsync(item, x, y, clickOpts(item));
+    if (seq !== clickSeq || batch.queue[batch.idx] !== item) return 0; // superseded
+    return applyClick(item, res, opts);
+  };
+
+  const clickOpts = (item) => ({ cuts: item.cuts || null, smoothing: smoothingFor(item) });
+
+  function applyClick(item, res, opts) {
     if (!res) {
       ST.toast('Nothing paint-like under that click — try the middle of a stroke.', 'warn');
       return 0;
@@ -276,7 +295,42 @@
     item.ci = 0;
     renderCurrent();
     return res.candidates.length;
-  };
+  }
+
+  // extract.seeded in the worker, which keeps the photo between clicks
+  // (sent once per photo: a crop makes a new one). On the page without one.
+  const photoKeys = new WeakMap();
+  let photoKeyNext = 1, workerPhoto = null;
+  async function seededAsync(item, x, y, opts) {
+    const w = analysisWorker();
+    if (w) {
+      try {
+        const cv = item.canvas;
+        if (!photoKeys.has(cv)) photoKeys.set(cv, photoKeyNext++);
+        const key = photoKeys.get(cv);
+        const msg = { type: 'seeded', key, x, y, opts };
+        const transfer = [];
+        if (workerPhoto !== key) {
+          msg.bitmap = await g.createImageBitmap(cv);
+          transfer.push(msg.bitmap);
+          if (cv._inPhoto) msg.inPhoto = cv._inPhoto.slice();
+          workerPhoto = key;
+        }
+        const id = nextJob++;
+        const r = await new Promise((resolve) => {
+          workerJobs.set(id, resolve);
+          w.postMessage(Object.assign({ id }, msg), transfer);
+        });
+        if (r.ok) return r.none ? null : { candidates: r.candidates, click: r.click };
+        workerPhoto = null;
+        console.warn('click in the worker failed — tracing on the page instead:', r.error);
+      } catch (e) {
+        workerPhoto = null;
+        console.warn('click in the worker failed — tracing on the page instead:', e);
+      }
+    }
+    return ST.extract.seeded(item.canvas, x, y, opts);
+  }
 
   // Shift-click: merge the paint under the click into the current shape —
   // a detached piece (the dot of an i, the point of a !) or a bit that the
@@ -512,6 +566,22 @@
     return n > 0;
   };
 
+  // A cut drawn on the stage: regrown in the background worker.
+  batch.addCutAsync = async function (x0, y0, x1, y1) {
+    const item = batch.queue[batch.idx];
+    if (!item) return false;
+    item.cuts = item.cuts || [];
+    const cut = { x0, y0, x1, y1, width: cutWidthFor(item) };
+    item.cuts.push(cut);
+    item.history = (item.history || []).concat([{ type: 'cut' }]);
+    const seed = keepSideSeed(item, cut);
+    const was = item.lastClick;
+    let n = await batch.clickTraceAsync(seed.x, seed.y, { keepParts: true });
+    if (!n && was && batch.queue[batch.idx] === item) n = await batch.clickTraceAsync(was.x, was.y, { keepParts: true });
+    reapplyParts(item);
+    return n > 0;
+  };
+
   // Rebuild the shape from what's left: the last click (or the automatic
   // shapes), the remaining cuts, the remaining added pieces.
   async function rebuild(item) {
@@ -537,11 +607,53 @@
     ST.capture.updatePreview();
   }
 
+  // Crop the photo to a box (photo px) and read it again: a letter that is
+  // a small part of a busy photo gets the whole frame — its paint judged
+  // against its own wall, and enlarged for detail when small. The cuts,
+  // clicks and pieces were placed on the old frame, so they go; ⌘Z brings
+  // the uncropped photo back as it was.
+  batch.cropTo = async function (x0, y0, x1, y1) {
+    const item = batch.queue[batch.idx];
+    if (!item) return false;
+    const W = item.canvas.width, H = item.canvas.height;
+    const ax = Math.max(0, Math.round(Math.min(x0, x1))), ay = Math.max(0, Math.round(Math.min(y0, y1)));
+    const bx = Math.min(W, Math.round(Math.max(x0, x1))), by = Math.min(H, Math.round(Math.max(y0, y1)));
+    const w = bx - ax, h = by - ay;
+    if (w < 24 || h < 24) { ST.toast('Drag a bigger box to crop.', 'warn'); return false; }
+    const c = ST.makeCanvas(w, h);
+    c.getContext('2d').drawImage(item.canvas, ax, ay, w, h, 0, 0, w, h);
+    if (item.canvas._inPhoto) {
+      const src = item.canvas._inPhoto, v = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) v.set(src.subarray((y + ay) * W + ax, (y + ay) * W + ax + w), y * w);
+      c._inPhoto = v;
+    }
+    const prev = {
+      canvas: item.canvas, angle: item.angle, candidates: item.candidates, ci: item.ci,
+      cuts: item.cuts, parts: item.parts, removals: item.removals, lastClick: item.lastClick,
+      history: item.history, manualTurn: item.manualTurn,
+    };
+    const res = await batch.analyze(c, { deskew: false, smoothing: smoothingFor(item) });
+    if (batch.queue[batch.idx] !== item) return false; // moved on meanwhile
+    const keep = $('#reviewChar').value;
+    Object.assign(item, { canvas: res.canvas, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null });
+    item.history = [{ type: 'crop', prev }];
+    renderCurrent();
+    if (keep.trim() && !res.candidates.length) $('#reviewChar').value = keep;
+    ST.toast(res.candidates.length ? 'Cropped — ⌘Z brings the whole photo back.' : 'Cropped, but no letter found in the box — click it, or ⌘Z.');
+    return true;
+  };
+
   // ⌘Z: the last cut or added piece, most recent first.
   batch.undo = function () {
     const item = batch.queue[batch.idx];
     if (!item || !item.history || !item.history.length) return false;
     const last = item.history.pop();
+    if (last.type === 'crop') {
+      Object.assign(item, last.prev);
+      renderCurrent();
+      ST.toast('Crop undone.');
+      return true;
+    }
     if (last.type === 'isolate') {
       // back to the shape as it was before the trim
       const k = item.candidates.findIndex((c) => c.kind === 'isolated');
@@ -759,7 +871,7 @@
     if (!cand) return false;
     const ch = batch.charKey($('#reviewChar').value);
     if (!ch) { ST.toast('Type the character first.', 'warn'); return false; }
-    const record = ST.metrics.buildRecord(ch, ST.capture.uprightPaths(cand));
+    const record = ST.capture.recordFor(cand, ch);
     if (!record) { ST.toast('Could not fit that shape.', 'warn'); return false; }
     record.thumb = ST.capture.makeThumb(record);
     ST.store.addVariant(ch, record);

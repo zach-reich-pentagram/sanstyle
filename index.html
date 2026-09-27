@@ -56,7 +56,15 @@
         </label>
         <label class="slider-row" title="Stand the letter upright. A leaning letter is straightened by its stems automatically; drag to adjust.">
           <span>Rotate: <b id="reviewRotateVal">0°</b></span>
-          <input type="range" id="reviewRotate" min="-30" max="30" value="0" step="1" disabled>
+          <input type="range" id="reviewRotate" min="-180" max="180" value="0" step="1" disabled>
+        </label>
+        <label class="slider-row" title="Scale the letter against the cap/x-height it is fitted to (100% = fitted exactly).">
+          <span>Height: <b id="reviewScaleVal">100%</b></span>
+          <input type="range" id="reviewScale" min="-40" max="40" value="0" step="1" disabled>
+        </label>
+        <label class="slider-row" title="Move the letter up or down against the baseline (font units, 1000 per em).">
+          <span>Baseline: <b id="reviewDyVal">0</b></span>
+          <input type="range" id="reviewDy" min="-300" max="300" value="0" step="5" disabled>
         </label>
         <div class="btn-row">
           <button class="pill sm" id="reviewAlt" disabled>Try another shape</button>
@@ -81,6 +89,7 @@
     <div class="stage-tools seg">
       <button id="toolHand" class="seg-btn" title="Pan (or hold space)">Hand</button>
       <button id="toolFit" class="seg-btn" title="Fit the photo">Fit</button>
+      <button id="toolCrop" class="seg-btn" title="Crop the photo to a box round the letter, and read it again (⌘Z undoes)">Crop</button>
     </div>
     <div class="stage-status" id="reviewProgress"></div>
     <div class="stage-hint" id="stageHint">Drop photos of graffiti here — or load a demo wall.</div>

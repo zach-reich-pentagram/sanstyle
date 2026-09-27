@@ -80,8 +80,23 @@ from end to end through its crossings, tall and near upright (a k's stem
 counts even where it bends at the joint of its arm and leg). Stems that
 disagree (an A's legs) or none at all (an O, an S) leave the letter as it
 is. The glyph is built from the upright shape; the **Rotate** slider in the
-Shape panel adjusts it, and a rotation set by hand is kept for the rest of
-that photo.
+Shape panel turns it anywhere through 360° (a letter painted sideways or
+upside down), and a rotation set by hand is kept for the rest of that photo.
+**Height** scales the letter against the cap or x-height it is fitted to,
+and **Baseline** moves it up or down against the baseline; the fitted
+preview shows both live, and both stay adjustable later in Glyphs
+("Optical nudges"). Slider drags redraw once per frame and re-read the
+character only when the drag pauses, so they stay smooth.
+
+**Crop.** The **Crop** button over the stage turns a drag into a crop box:
+the photo is cut to it and read again — the letter gets the whole frame,
+its paint judged against its own patch of wall, and a small letter is
+enlarged for detail. Cuts and clicks made on the old frame go with it; ⌘Z
+brings the whole photo back as it was.
+
+Clicks and cuts on the stage are traced in the background worker (it keeps
+the photo between clicks), so the page never freezes while a busy photo is
+worked on.
 
 On the stage the detected shape is boxed and its trace drawn over the paint;
 the clean silhouette and the letterform fitted into the em sit beside it,
@@ -354,7 +369,7 @@ npm test        # 73 unit tests: geometry, tracing, fitting, morphology,
 npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
                 # Isolate, a click that hands back the letter alone, trim
-                # on typing + ⌘Z, Option-click removal, a letter behind a pipe, one
+                # on typing + ⌘Z, Option-click removal, crop + its undo, a letter behind a pipe, one
                 # cut off by the frame, a throw-up's outline,
                 # Detail, variant cycling, ligature shaping, weight
                 # slider, source popup, kerning, exports, TTF download
