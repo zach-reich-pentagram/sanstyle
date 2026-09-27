@@ -104,6 +104,15 @@ preview shows both live, and both stay adjustable later in Glyphs
 ("Optical nudges"). Slider drags redraw once per frame and re-read the
 character only when the drag pauses, so they stay smooth.
 
+**Pick color, Reset.** When the letter you want isn't in the paint that
+stands out most (a white tag beside a bright sticker, a pale stroke beside a
+bold one), press **Pick color** in the Shape step and click a stroke of it:
+the photo is read again for that paint alone, measured against the wall
+round the stroke you picked it from, and clicks trace that paint from then
+on (the swatch shows it; ⌘Z undoes the pick). **Reset** goes back to the
+shapes the automatic pass first found — no crop, picked paint, clicks,
+cuts or pieces.
+
 **Crop.** The **Crop** button over the stage turns a drag into a crop box:
 the photo is cut to it and read again — the letter gets the whole frame,
 its paint judged against its own patch of wall, and a small letter is
@@ -395,7 +404,7 @@ npm test        # 75 unit tests: geometry, tracing, fitting, morphology,
 npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
                 # Isolate, a click that hands back the letter alone, trim
-                # on typing + ⌘Z, Option-click removal, crop + its undo, a letter behind a pipe, one
+                # on typing + ⌘Z, Option-click removal, crop + its undo, Pick color, Reset, a letter behind a pipe, one
                 # cut off by the frame, a throw-up's outline,
                 # Detail, variant cycling, ligature shaping, weight
                 # slider, source popup, kerning, exports, TTF download

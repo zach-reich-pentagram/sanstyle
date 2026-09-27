@@ -115,6 +115,8 @@
       angle: result.angle,
       candidates: result.candidates,
       ci: 0,
+      // the selection as first made, for Reset
+      original: { canvas: result.canvas, angle: result.angle, candidates: result.candidates },
     });
     if (batch.idx === batch.queue.length - 1) renderCurrent();
     else setProgress();
@@ -231,6 +233,12 @@
     $('#reviewDetail').disabled = !item;
     $('#reviewAlt').disabled = !item || item.candidates.length < 2;
     $('#reviewIsolate').disabled = !cand;
+    $('#reviewReset').disabled = !item || !item.original;
+    $('#paintPick').disabled = !item;
+    const sw = $('#paintSwatch'), p = item && item.paint;
+    sw.classList.toggle('set', !!p);
+    sw.style.background = p ? `rgb(${Math.round(p.r)},${Math.round(p.g)},${Math.round(p.b)})` : '';
+    sw.textContent = p ? '' : 'auto';
     $('#reviewSkip').disabled = !item;
     if (!item) {
       $('#reviewHint').textContent = batch.intakeActive
@@ -280,7 +288,12 @@
     return applyClick(item, res, opts);
   };
 
-  const clickOpts = (item) => ({ cuts: item.cuts || null, smoothing: smoothingFor(item) });
+  const clickOpts = (item) => ({ cuts: item.cuts || null, smoothing: smoothingFor(item), paint: item.paint || null });
+  // a photo read again as it is (already straightened and scaled), in the
+  // paint picked for it, if any
+  function reread(item) {
+    return { deskew: false, noUpscale: true, maxEdge: 1e9, smoothing: smoothingFor(item), paint: item.paint || null };
+  }
 
   function applyClick(item, res, opts) {
     if (!res) {
@@ -504,7 +517,7 @@
     item.detail = v;
     const keep = $('#reviewChar').value;
     const wasIsolated = !!(item.candidates[item.ci] && item.candidates[item.ci].kind === 'isolated');
-    const res = await batch.analyze(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+    const res = await batch.analyze(item.canvas, reread(item));
     if (item.detail !== v || batch.queue[batch.idx] !== item) return; // moved on meanwhile
     item.candidates = res.candidates;
     item.ci = 0;
@@ -595,7 +608,7 @@
       const k = item.candidates.slice(0, n).findIndex((c) => c.kind === want);
       if (k > 0) { item.ci = k; renderCurrent(); }
     } else {
-      const res = await batch.analyze(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+      const res = await batch.analyze(item.canvas, reread(item));
       if (batch.queue[batch.idx] !== item) return;
       item.candidates = res.candidates;
       item.ci = 0;
@@ -606,6 +619,47 @@
     syncIsolateLabel();
     ST.capture.updatePreview();
   }
+
+  // Pick the paint: the color under (x, y) is the paint to extract, and the
+  // photo is read again for it alone (a white tag beside a pink sticker, a
+  // pale stroke next to a bright one). Clicks then trace that paint too.
+  batch.pickPaint = async function (x, y) {
+    const item = batch.queue[batch.idx];
+    if (!item) return false;
+    const c = item.canvas, W = c.width, H = c.height;
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || y < 0 || x >= W || y >= H) return false;
+    const d = c.getContext('2d').getImageData(Math.max(0, x - 3), Math.max(0, y - 3), 7, 7).data;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) { if (!d[i + 3]) continue; r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+    if (!n) return false;
+    const prev = { paint: item.paint || null, candidates: item.candidates, ci: item.ci, cuts: item.cuts, parts: item.parts, removals: item.removals, lastClick: item.lastClick };
+    item.paint = { r: r / n, g: g / n, b: b / n, x, y };
+    const res = await batch.analyze(item.canvas, reread(item));
+    if (batch.queue[batch.idx] !== item) return false;
+    Object.assign(item, { candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null });
+    item.history = (item.history || []).concat([{ type: 'paint', prev }]);
+    renderCurrent();
+    ST.toast(res.candidates.length ? 'Reading that paint color only — Reset goes back to the automatic choice.' : 'Nothing found in that color — ⌘Z or Reset.', res.candidates.length ? undefined : 'warn');
+    return true;
+  };
+
+  // Reset: the photo and its shapes as the automatic pass first read them —
+  // no crop, picked paint, clicks, cuts, pieces, turn or Detail.
+  batch.resetItem = function () {
+    const item = batch.queue[batch.idx];
+    if (!item || !item.original) return false;
+    const keep = $('#reviewChar').value;
+    Object.assign(item, {
+      canvas: item.original.canvas, angle: item.original.angle, candidates: item.original.candidates, ci: 0,
+      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null, paint: null, detail: undefined,
+    });
+    for (const c of item.candidates) { c.turn = c.lean ? -c.lean : 0; c.nudge = null; }
+    renderCurrent();
+    if (!item.candidates.length) $('#reviewChar').value = keep;
+    ST.toast('Back to the automatic selection.');
+    return true;
+  };
 
   // Crop the photo to a box (photo px) and read it again: a letter that is
   // a small part of a busy photo gets the whole frame — its paint judged
@@ -630,12 +684,22 @@
     const prev = {
       canvas: item.canvas, angle: item.angle, candidates: item.candidates, ci: item.ci,
       cuts: item.cuts, parts: item.parts, removals: item.removals, lastClick: item.lastClick,
-      history: item.history, manualTurn: item.manualTurn,
+      history: item.history, manualTurn: item.manualTurn, paint: item.paint || null,
     };
-    const res = await batch.analyze(c, { deskew: false, smoothing: smoothingFor(item) });
+    // (a picked paint stays picked; where it was picked from moves with the crop)
+    let paint = null;
+    if (item.paint) {
+      const px = item.paint.x - ax, py = item.paint.y - ay;
+      paint = px >= 0 && py >= 0 && px < w && py < h ? Object.assign({}, item.paint, { x: px, y: py }) : { r: item.paint.r, g: item.paint.g, b: item.paint.b };
+    }
+    const res = await batch.analyze(c, { deskew: false, smoothing: smoothingFor(item), paint });
     if (batch.queue[batch.idx] !== item) return false; // moved on meanwhile
     const keep = $('#reviewChar').value;
     Object.assign(item, { canvas: res.canvas, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null });
+    // (read with an upscale, the crop's coordinates change: a picked paint
+    // keeps its color, and is looked for round the letters from now on)
+    if (paint && res.canvas.width !== w) paint = { r: paint.r, g: paint.g, b: paint.b };
+    if (item.paint) item.paint = paint;
     item.history = [{ type: 'crop', prev }];
     renderCurrent();
     if (keep.trim() && !res.candidates.length) $('#reviewChar').value = keep;
@@ -648,6 +712,12 @@
     const item = batch.queue[batch.idx];
     if (!item || !item.history || !item.history.length) return false;
     const last = item.history.pop();
+    if (last.type === 'paint') {
+      Object.assign(item, last.prev);
+      renderCurrent();
+      ST.toast('Picked paint undone.');
+      return true;
+    }
     if (last.type === 'crop') {
       Object.assign(item, last.prev);
       renderCurrent();
@@ -904,6 +974,8 @@
   batch.init = function () {
     $('#reviewAccept').addEventListener('click', batch.accept);
     $('#reviewAlt').addEventListener('click', batch.tryNext);
+    $('#reviewReset').addEventListener('click', () => batch.resetItem());
+    $('#paintPick').addEventListener('click', () => ST.capture.setTool(ST.capture.tool === 'pick' ? 'trace' : 'pick'));
     $('#reviewSkip').addEventListener('click', batch.skip);
     $('#reviewIsolate').addEventListener('click', () => busy('Isolating…', () => batch.isolate()));
     const busy = (label, fn) => (ST.capture.busy ? ST.capture.busy(label, fn) : fn());

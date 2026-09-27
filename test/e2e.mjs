@@ -288,6 +288,31 @@ check(cropped.W !== cropBox.W && cropped.n >= 1 && cropped.tool === 'trace', `Cr
 await page.evaluate(() => ST.batch.undo());
 const uncropped = await page.evaluate(() => ST.batch.queue[ST.batch.idx].canvas.width);
 check(uncropped === cropBox.W, `⌘Z brings the uncropped photo back (${uncropped} px wide)`);
+// Pick color: the eyedropper reads the photo again for the paint under it;
+// Reset goes back to the automatic selection
+const picked = await page.evaluate(async () => {
+  const it = ST.batch.queue[ST.batch.idx], c = it.candidates[0];
+  // a pixel on the letter's ink
+  let at = null;
+  for (let y = 0; y < c.h && !at; y += 3) for (let x = 0; x < c.w; x += 3) if (c.mask[y * c.w + x] && c.mask[y * c.w + Math.min(c.w - 1, x + 6)] && c.mask[Math.min(c.h - 1, y + 6) * c.w + x]) { at = { x: c.crop.x + x + 3, y: c.crop.y + y + 3 }; break; }
+  document.getElementById('paintPick').click();
+  const tool = ST.capture.tool;
+  const r = document.getElementById('stage').getBoundingClientRect();
+  const sp = ST.capture.toScreen(at);
+  return { tool, screen: { x: r.left + sp.x, y: r.top + sp.y }, before: it.candidates.length };
+});
+await page.mouse.click(picked.screen.x, picked.screen.y);
+await page.waitForFunction(() => { const h = ST.batch.queue[ST.batch.idx].history || []; return h.length && h[h.length - 1].type === 'paint'; }, null, { timeout: 15000 }).catch(() => {});
+const afterPick = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { paint: it.paint, n: it.candidates.length, swatch: document.getElementById('paintSwatch').style.background }; });
+check(picked.tool === "pick" && afterPick.paint && afterPick.n >= 1 && /rgb/.test(afterPick.swatch), `Pick color reads the photo again for the picked paint (tool ${picked.tool}, swatch "${afterPick.swatch}", ${afterPick.paint && [afterPick.paint.r, afterPick.paint.g, afterPick.paint.b].map(Math.round)}, ${afterPick.n} shape(s))`);
+const reset = await page.evaluate(() => {
+  const it = ST.batch.queue[ST.batch.idx], lc = it.history.find((h) => h.type === 'paint').prev.lastClick;
+  document.getElementById('reviewReset').click();
+  const out = { paint: it.paint, same: it.candidates === it.original.candidates, hist: (it.history || []).length };
+  if (lc) ST.batch.clickTrace(lc.x, lc.y); // (the checks below work on the clicked letter)
+  return out;
+});
+check(!reset.paint && reset.same && reset.hist === 0, 'Reset goes back to the automatic selection (no picked paint, the first shapes, nothing to undo)');
 // cut gesture through the N's middle: region shrinks, Undo restores
 const cutRes = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];

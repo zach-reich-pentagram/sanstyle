@@ -258,16 +258,17 @@
   // at a leak; over the whole photo that would take in the sky and the
   // street round a dark pole along with the letter on it.)
   const PAINT_TOLERANCES = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230];
-  function paintMask(data, W, H) {
+  function paintMask(data, W, H, pick) {
     const R = ST.raster;
     if (!ST.extract) return null;
     let bg = ST.extract.backgroundColor(data, W, H);
     if (!bg) return null;
+    if (pick) return pickedPaint(data, W, H, pick, bg);
     // the photo's border can be another surface than the one the letter is
     // on (a gray wall and white paper round a dark post in the middle):
     // when the border's color is all but absent from the middle of the
     // photo, the wall is the one round its center
-    const local = ST.extract.localWall(data, W, H, W / 2, H / 2, bg, { look: 0.3, share: 0.1 });
+    const local = ST.extract.localWall(data, W, H, W / 2, H / 2, bg, { look: 0.3, share: 0.1, paint: false });
     if (local) bg = local.bg;
     const dbg = R.colorDistMap(data, W, H, [bg]);
     // (on a wall of its own in the middle, the paint is looked for there
@@ -338,6 +339,23 @@
     // measures every fill against
     return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H), bg, seed, wall, local: !!local, softened };
   }
+  // The paint you picked (opts.paint: {r, g, b, x, y}, sampled off a stroke
+  // at x, y): that color is the paint, whatever contrasts more; the wall is
+  // the one round the stroke you picked it from.
+  function pickedPaint(data, W, H, pick, bg) {
+    const R = ST.raster;
+    const local = pick.x != null ? ST.extract.localWall(data, W, H, pick.x, pick.y, bg) : null;
+    if (local) bg = local.bg;
+    const seed = { r: pick.r, g: pick.g, b: pick.b };
+    const sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
+    if (sep < 30) return null;
+    const wall = ST.extract.wallMask(data, W, H, bg, local ? local.tol : Math.min(ST.extract.wallTolerance(data, W, H, bg), 0.45 * sep));
+    const field = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, 2);
+    const cands = PAINT_TOLERANCES.filter((t) => t <= Math.max(20, sep * 0.55));
+    const best = R.edgeOptimalThreshold(field, W, H, cands, 0.0005, 0.6);
+    if (!best) return null;
+    return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H), bg, seed, wall, local: true, picked: true };
+  }
   auto._paintMask = paintMask; // for diagnostics
   auto._secondPaint = (data, W, H, pm) => {
     const seed = otherPaint(data, W, H, pm);
@@ -369,7 +387,7 @@
 
     // paint first, then straighten by the PAINT's own edges: the letter's
     // stems define upright, not the wall's bricks or the paper's edge
-    let pm = paintMask(img.data, work.width, work.height);
+    let pm = paintMask(img.data, work.width, work.height, o.paint);
     if (o.deskew) {
       const zone = pm ? edgeZone(pm.filled, work.width, work.height) : null;
       angle = auto.estimateSkewAngle(gray, work.width, work.height, zone);
@@ -378,7 +396,7 @@
         ctx = work.getContext('2d');
         img = ctx.getImageData(0, 0, work.width, work.height);
         gray = ST.raster.luma(img.data, work.width, work.height);
-        pm = paintMask(img.data, work.width, work.height);
+        pm = paintMask(img.data, work.width, work.height, o.paint);
       } else {
         angle = 0;
       }
@@ -526,7 +544,7 @@
         // a throw-up's outline is the letter's; so is a hole showing no wall
         const ol = ST.complete.absorbOutline(sub, cw, ch, cls, W, H, crop.x, crop.y);
         sub = ol.mask; counters = ol.counters;
-        sub = ST.complete.fillHiddenHoles(sub, cw, ch, ST.complete.sampler(cls, W, H), crop.x, crop.y);
+        sub = ST.complete.fillHiddenHoles(sub, cw, ch, ST.complete.sampler(cls, W, H), crop.x, crop.y, { data: env.img.data, W, H });
       }
       // same stroke-width-capped clean-up as click-to-trace and the studio
       const clean = ST.extract

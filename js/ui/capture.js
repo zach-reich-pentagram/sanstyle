@@ -456,6 +456,12 @@
     }
     if (ev.button !== 0) return;
     if (cap.tool === 'crop') { dragging = { kind: 'crop', start: ip, last: ip, sStart: sp, moved: false }; return; }
+    if (cap.tool === 'pick') {
+      // the eyedropper: the stroke under the click is the paint to extract
+      setTool('trace');
+      if (ip.x >= 0 && ip.y >= 0 && ip.x < cap.img.width && ip.y < cap.img.height) busy('Reading that paint…', () => ST.batch.pickPaint(ip.x, ip.y));
+      return;
+    }
     dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, moved: false, shift: ev.shiftKey, alt: ev.altKey };
   }
 
@@ -537,9 +543,12 @@
     if (hand) hand.classList.toggle('on', tool === 'hand');
     const crop = $('#toolCrop');
     if (crop) crop.classList.toggle('on', tool === 'crop');
+    const pick = $('#paintPick');
+    if (pick) pick.classList.toggle('on', tool === 'pick');
     if (stage) stage.style.cursor = tool === 'hand' ? 'grab' : 'crosshair';
     if (tool === 'crop') setHint('Drag a box round the letter to crop the photo to it · Esc cancels');
-    else if (was === 'crop' && cap.item) setHint(HINT);
+    else if (tool === 'pick') setHint('Click a stroke of the paint you want extracted · Esc cancels');
+    else if ((was === 'crop' || was === 'pick') && cap.item) setHint(HINT);
   }
   cap.setTool = setTool;
 
@@ -588,7 +597,7 @@
     $('#toolFit').addEventListener('click', fitView);
     $('#toolHand').addEventListener('click', () => setTool(cap.tool === 'hand' ? 'trace' : 'hand'));
     $('#toolCrop').addEventListener('click', () => { if (cap.item) setTool(cap.tool === 'crop' ? 'trace' : 'crop'); });
-    g.addEventListener('keydown', (e) => { if (e.key === 'Escape' && cap.tool === 'crop') setTool('trace'); });
+    g.addEventListener('keydown', (e) => { if (e.key === 'Escape' && (cap.tool === 'crop' || cap.tool === 'pick')) setTool('trace'); });
     $('#reviewChar').addEventListener('input', updatePreview);
     // Slider drags fire far faster than a redraw: the state changes at
     // once, the drawing once per frame, the (slower) recognizer re-read only

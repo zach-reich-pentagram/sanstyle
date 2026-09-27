@@ -132,7 +132,9 @@
   // color there. → { bg, tol } or null (the border's color will do)
   // opts.look: how far round the point to look for the border's color
   // (a fraction of the photo, default the ring's own reach), opts.share:
-  // how little of it there counts as absent (default 0.2).
+  // how little of it there counts as absent (default 0.2), opts.paint:
+  // false when the point is not known to be on the paint (the photo's
+  // middle, not a click).
   ex.localWall = function (data, w, h, x, y, bg, opts) {
     const o = opts || {};
     const reach = Math.round(Math.max(w, h) * 0.15);
@@ -151,10 +153,30 @@
     }
     if (!n || near / n >= (o.share != null ? o.share : 0.2)) return null;
     const band = Math.max(3, Math.round(reach * 0.15));
+    // what is under the point is the letter's paint (a click is on it), and
+    // never the wall — however much of the ring fat strokes of it fill
+    let pr = 0, pg = 0, pb = 0, pn = 0;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const qx = x + dx, qy = y + dy;
+        if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
+        const p = (qy * w + qx) * 4;
+        pr += data[p]; pg += data[p + 1]; pb += data[p + 2]; pn++;
+      }
+    }
+    const here = o.paint !== false && pn ? { r: pr / pn, g: pg / pn, b: pb / pn } : null;
+    const notHere = (xx, yy) => {
+      if (!here) return true;
+      const p = (yy * w + xx) * 4;
+      // (a denser coat of the same paint beside a thin, pale stroke of it
+      // counts as the paint too)
+      return R.colorDist(data[p], data[p + 1], data[p + 2], here.r, here.g, here.b) >= 100;
+    };
     const inRing = (xx, yy) => xx >= x0 && xx <= x1 && yy >= y0 && yy <= y1 &&
-      (xx < x0 + band || xx > x1 - band || yy < y0 + band || yy > y1 - band);
+      (xx < x0 + band || xx > x1 - band || yy < y0 + band || yy > y1 - band) && notHere(xx, yy);
     const dom = R.dominantColor(data, w, h, inRing);
     if (!dom || dom.frac < 0.25 || R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b) < 40) return null;
+    if (here && R.colorDist(dom.r, dom.g, dom.b, here.r, here.g, here.b) < 100) return null;
     const vals = [];
     for (let yy = y0; yy <= y1; yy += step) {
       for (let xx = x0; xx <= x1; xx += step) {
@@ -1516,7 +1538,15 @@
     // the letter's own wall, if the photo's border shows another surface
     const local = bg && ex.localWall(data, w, h, x, y, bg);
     if (local) { bg = local.bg; wallTol = local.tol; }
-    if (bg && !o.noSnap) {
+    // a paint picked for the photo (o.paint): the click goes to the nearest
+    // pixel of that color, and that color is the paint — not whatever
+    // contrasts most with the wall there
+    const picked = o.paint ? { r: o.paint.r, g: o.paint.g, b: o.paint.b } : null;
+    if (picked) {
+      const at = nearestWhere(w, h, x, y, Math.max(6, Math.round(Math.max(w, h) * 0.03)), (i) =>
+        R.colorDist(data[i * 4], data[i * 4 + 1], data[i * 4 + 2], picked.r, picked.g, picked.b) < 60);
+      if (at >= 0) { x = at % w; y = (at / w) | 0; }
+    } else if (bg && !o.noSnap) {
       const snap = snapToInk(data, w, h, x, y, Math.max(6, Math.round(Math.max(w, h) * 0.03)), bg);
       x = snap.x; y = snap.y;
     }
@@ -1524,11 +1554,11 @@
     // the core region it grows — a single k-means step. A 5×5 sample sits
     // wherever the pen happened to be densest; the stroke's mean is what
     // the rest of the stroke is actually near.
-    let seed = seedColorAt(data, w, h, x, y, bg);
+    let seed = picked || seedColorAt(data, w, h, x, y, bg);
     let field = R.colorDistMap(data, w, h, [seed]);
     if (o.blur > 0) field = R.blur(field, w, h, o.blur);
     const core = R.floodFrom(w, h, x, y, (i) => field[i] <= 60 && !(excl && excl[i]));
-    if (core.count >= 60 && core.count < w * h * 0.3) {
+    if (!picked && core.count >= 60 && core.count < w * h * 0.3) {
       let r = 0, g = 0, b = 0;
       for (let i = 0, p = 0; i < core.mask.length; i++, p += 4) {
         if (core.mask[i]) { r += data[p]; g += data[p + 1]; b += data[p + 2]; }
@@ -1550,7 +1580,7 @@
         const px = i % w, py = (i / w) | 0;
         return px >= x0 && px <= x1 && py >= y0 && py <= y1;
       });
-      if (blob.count >= 60) {
+      if (!picked && blob.count >= 60) {
         const dom = dominantAlongAxis(data, w, h, blob.mask, seed, bg);
         if (dom && R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b) >= 40) seed = dom;
       }
@@ -1646,7 +1676,7 @@
       // a throw-up's outline is the letter's; so is a hole that shows no wall
       const ol = ST.complete.absorbOutline(sub, crop.w, crop.h, cls, w, h, crop.x, crop.y);
       sub = ol.mask; counters = ol.counters;
-      sub = ST.complete.fillHiddenHoles(sub, crop.w, crop.h, at, crop.x, crop.y);
+      sub = ST.complete.fillHiddenHoles(sub, crop.w, crop.h, at, crop.x, crop.y, { data, W: w, H: h });
     }
     const lx = x - crop.x, ly = y - crop.y;
     let whole = ex.cleanMask(sub, crop.w, crop.h, o.smoothing, { noRound: o.noRound });

@@ -261,7 +261,7 @@
   // hidden ground, sampled along the centerline and 0.6 r to either side.
   function coverage(f, len, r0, r1, at) {
     const n = Math.max(4, Math.ceil(len));
-    let wall = 0, hidden = 0, total = 0, cw = 0, cn = 0;
+    let wall = 0, hidden = 0, frame = 0, total = 0, cw = 0, cn = 0;
     let prev = f(0);
     for (let i = 1; i <= n; i++) {
       const t = i / n, p = f(t);
@@ -274,11 +274,11 @@
         total++;
         if (off === 0) { cn++; if (c === WALL) cw++; }
         if (c === WALL) wall++;
-        else if (c === HIDDEN || c === FRAME) hidden++;
+        else if (c === HIDDEN || c === FRAME) { hidden++; if (c === FRAME) frame++; }
       }
       prev = p;
     }
-    return { wall: wall / total, hidden: hidden / total, center: cw / Math.max(1, cn) };
+    return { wall: wall / total, hidden: hidden / total, frame: frame / total, center: cw / Math.max(1, cn) };
   }
 
   // Pair cut-short ends. Each end joins at most one other; cheapest first.
@@ -311,6 +311,11 @@
         // the centerline strictly; the tube's flanks may graze a little wall
         // where the guessed curve drifts off the real one
         if (cov.center > 0.06 || cov.wall > 0.15) continue;
+        // nor mostly out past the photo's edge, unless both strokes run into
+        // that edge (a U whose bottom the frame cut off): two pieces ending
+        // in the photo, joined by a loop through what the camera never saw,
+        // are two letters
+        if (cov.frame > 0.3 && !(ends[i].status === 'frame' && ends[j].status === 'frame')) continue;
         const cost = len * (1 + 4 * cov.wall) * (1 + 0.5 * Math.log(ratio)) * (1 + (aA + aB) / Math.PI);
         cands.push({ i, j, cost, f, len });
       }
@@ -664,25 +669,72 @@
   // ---------- 5. holes and outlines ----------
   // Holes in `mask` (w×h, at photo offset ox, oy) that show no wall are not
   // counters: a sticker on the stroke, a chip, a second color inside it.
-  C.fillHiddenHoles = function (mask, w, h, at, ox, oy) {
+  // With `img` ({data, W, H}, the photo) a hole that looks like the wall
+  // just outside the letter is a counter whatever its class says: a wall
+  // shading across the photo is another tone at the counter than where its
+  // reference color was taken.
+  C.fillHiddenHoles = function (mask, w, h, at, ox, oy, img) {
     const inv = new Uint8Array(w * h);
     for (let i = 0; i < inv.length; i++) inv[i] = mask[i] ? 0 : 1;
     const { labels, sizes } = R.components(inv, w, h);
     const n = sizes.length;
     const border = new Uint8Array(n), wall = new Int32Array(n);
+    // (a pixel in the paint's halo tone well away from the paint is the wall
+    // a shade lighter or darker there — a halo hugs the stroke — so a
+    // counter on a wall with a gradient across it still shows wall)
+    const off = R.distanceTransform(inv, w, h, { borderInk: true });
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        const L = labels[y * w + x];
+        const i = y * w + x, L = labels[i];
         if (!L) continue;
         if (x === 0 || y === 0 || x === w - 1 || y === h - 1) border[L] = 1;
-        if (at(x + ox, y + oy) === WALL) wall[L]++;
+        const c = at(x + ox, y + oy);
+        if (c === WALL || (c === FAMILY && off[i] > 4)) wall[L]++;
+      }
+    }
+    const fill = new Uint8Array(n);
+    for (let L = 1; L < n; L++) fill[L] = !border[L] && wall[L] < 0.25 * sizes[L] ? 1 : 0;
+    if (img && fill.some((v) => v)) {
+      // each hole's mean color and box
+      const sr = new Float64Array(n), sg = new Float64Array(n), sb = new Float64Array(n);
+      const bx0 = new Int32Array(n).fill(w), by0 = new Int32Array(n).fill(h), bx1 = new Int32Array(n).fill(-1), by1 = new Int32Array(n).fill(-1);
+      const px = (x, y) => { const X = x + ox, Y = y + oy; return X < 0 || Y < 0 || X >= img.W || Y >= img.H ? -1 : (Y * img.W + X) * 4; };
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const L = labels[y * w + x];
+          if (!L || !fill[L]) continue;
+          const p = px(x, y);
+          if (p < 0) continue;
+          sr[L] += img.data[p]; sg[L] += img.data[p + 1]; sb[L] += img.data[p + 2];
+          if (x < bx0[L]) bx0[L] = x; if (x > bx1[L]) bx1[L] = x;
+          if (y < by0[L]) by0[L] = y; if (y > by1[L]) by1[L] = y;
+        }
+      }
+      // ...against the wall just outside the letter round it (a wall shades
+      // across a photo: the counter is compared with its own surroundings)
+      for (let L = 1; L < n; L++) {
+        if (!fill[L] || sizes[L] < 64) continue;
+        const mw = bx1[L] - bx0[L] + 1, mh = by1[L] - by0[L] + 1;
+        const x0 = Math.max(0, bx0[L] - mw), x1 = Math.min(w - 1, bx1[L] + mw);
+        const y0 = Math.max(0, by0[L] - mh), y1 = Math.min(h - 1, by1[L] + mh);
+        let er = 0, eg = 0, eb = 0, en = 0;
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const i = y * w + x, K = labels[i];
+            if (!K || !border[K] || off[i] <= 4 || off[i] >= 30) continue;
+            const p = px(x, y);
+            if (p < 0) continue;
+            er += img.data[p]; eg += img.data[p + 1]; eb += img.data[p + 2]; en++;
+          }
+        }
+        if (en > 50 && R.colorDist(sr[L] / sizes[L], sg[L] / sizes[L], sb[L] / sizes[L], er / en, eg / en, eb / en) < 50) fill[L] = 0;
       }
     }
     const out = new Uint8Array(mask);
     let filled = 0;
     for (let i = 0; i < out.length; i++) {
       const L = labels[i];
-      if (L && !border[L] && wall[L] < 0.25 * sizes[L]) { out[i] = 1; filled++; }
+      if (L && fill[L]) { out[i] = 1; filled++; }
     }
     return filled ? out : mask;
   };

@@ -66,9 +66,15 @@
           <span>Baseline: <b id="reviewDyVal">0</b></span>
           <input type="range" id="reviewDy" min="-300" max="300" value="0" step="5" disabled>
         </label>
+        <div class="btn-row paint-row" title="The paint color to extract. Pick it off a stroke when the letter you want is not the paint that stands out most (a white tag beside a bright sticker, a pale stroke beside a bold one).">
+          <span>Paint:</span>
+          <span class="swatch" id="paintSwatch" aria-label="automatic">auto</span>
+          <button class="pill sm" id="paintPick" disabled>Pick color</button>
+        </div>
         <div class="btn-row">
           <button class="pill sm" id="reviewAlt" disabled>Try another shape</button>
           <button class="pill sm" id="reviewIsolate" disabled title="Trim the shape to the typed character">Isolate</button>
+          <button class="pill sm" id="reviewReset" disabled title="Back to the shapes the automatic pass found: no crop, picked paint, clicks, cuts or pieces">Reset</button>
         </div>
       </div>
     </div>
