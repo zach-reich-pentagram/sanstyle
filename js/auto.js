@@ -239,7 +239,7 @@
   function meanWhere(data, field, pred) {
     let r = 0, g = 0, b = 0, n = 0;
     for (let i = 0, p = 0; i < field.length; i++, p += 4) {
-      if (pred(field[i])) { r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
+      if (pred(field[i], i)) { r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
     }
     return n >= 200 ? { r: r / n, g: g / n, b: b / n } : null;
   }
@@ -252,24 +252,49 @@
   // sharpest, never past the paint↔background midpoint. Works for dark on
   // light, light on dark, colored on gray, and red on pink paper alike.
   // Returns a mask, or null when nothing contrasts with the background.
+  // Thresholds for a paint mask over the whole photo. (A click grows further
+  // — up to the midpoint however strong the contrast, see extract.js's
+  // GROW_TOLERANCES — since it floods only what is joined to it and stops
+  // at a leak; over the whole photo that would take in the sky and the
+  // street round a dark pole along with the letter on it.)
+  const PAINT_TOLERANCES = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230];
   function paintMask(data, W, H) {
     const R = ST.raster;
     if (!ST.extract) return null;
-    const bg = ST.extract.backgroundColor(data, W, H);
+    let bg = ST.extract.backgroundColor(data, W, H);
     if (!bg) return null;
+    // the photo's border can be another surface than the one the letter is
+    // on (a gray wall and white paper round a dark post in the middle):
+    // when the border's color is all but absent from the middle of the
+    // photo, the wall is the one round its center
+    const local = ST.extract.localWall(data, W, H, W / 2, H / 2, bg, { look: 0.3, share: 0.1 });
+    if (local) bg = local.bg;
     const dbg = R.colorDistMap(data, W, H, [bg]);
+    // (on a wall of its own in the middle, the paint is looked for there
+    // too: the other surfaces at the edges contrast with it as well)
+    let mid = null;
+    if (local) {
+      mid = new Uint8Array(W * H);
+      const mx0 = Math.round(W * 0.2), mx1 = Math.round(W * 0.8), my0 = Math.round(H * 0.2), my1 = Math.round(H * 0.8);
+      for (let y = my0; y < my1; y++) mid.fill(1, y * W + mx0, y * W + mx1);
+    }
     // robust maximum contrast (99.9th percentile); the paint core is
     // everything within 75% of it
     const hist = new Uint32Array(1024);
-    for (let i = 0; i < dbg.length; i++) hist[Math.min(1023, dbg[i] | 0)]++;
+    let counted = 0;
+    for (let i = 0; i < dbg.length; i++) { if (mid && !mid[i]) continue; hist[Math.min(1023, dbg[i] | 0)]++; counted++; }
     let acc = 0, top = 0;
-    for (let v = 0; v < 1024; v++) { acc += hist[v]; if (acc >= dbg.length * 0.999) { top = v; break; } }
+    for (let v = 0; v < 1024; v++) { acc += hist[v]; if (acc >= counted * 0.999) { top = v; break; } }
     if (top < 70) return null;
-    let seed = meanWhere(data, dbg, (d) => d >= top * 0.75);
+    // (there, the commonest color that is not that wall: the most
+    // contrasting one can be a white strip at the edge of the middle)
+    let seed = local
+      ? R.dominantColor(data, W, H, (x, y) => mid[y * W + x] === 1 && dbg[y * W + x] > Math.max(60, local.tol))
+      : meanWhere(data, dbg, (d) => d >= top * 0.75);
     if (!seed) return null;
     let field = R.colorDistMap(data, W, H, [seed]);
     let sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
-    const refined = meanWhere(data, field, (d) => d < sep * 0.5);
+    const refined = meanWhere(data, field, (d, i) => d < sep * 0.5 && (!mid || mid[i]));
     if (refined) {
       seed = refined;
       field = R.colorDistMap(data, W, H, [seed]);
@@ -278,10 +303,10 @@
     if (sep < 60) return null;
     // shaded or metallic paint: the strongest contrast is its darkest
     // streak, the paint itself is the most common tone along that axis
-    const wallTol = ST.extract.wallTolerance(data, W, H, bg);
+    const wallTol = local ? local.tol : ST.extract.wallTolerance(data, W, H, bg);
     const wall = ST.extract.wallMask(data, W, H, bg, wallTol);
     const nonWall = new Uint8Array(W * H);
-    for (let i = 0; i < nonWall.length; i++) nonWall[i] = wall[i] ? 0 : 1;
+    for (let i = 0; i < nonWall.length; i++) nonWall[i] = wall[i] || (mid && !mid[i]) ? 0 : 1;
     const dom = ST.extract.dominantAlongAxis(data, W, H, nonWall, seed, bg);
     if (dom) {
       const dsep = R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b);
@@ -290,14 +315,28 @@
     // along the wall→paint axis: metallic/glossy paint shading past the
     // paint color still counts (see raster.axisDistMap)
     field = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, 2);
-    const cands = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230]
-      .filter((t) => t <= Math.max(40, sep * 0.55));
-    const best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
+    const cands = PAINT_TOLERANCES.filter((t) => t <= Math.max(40, sep * 0.55));
+    let best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
     if (!best) return null;
+    // metallic crinkle (see extract.seeded): at the pixel level the paint is
+    // all notches and pocks; read again with the texture averaged out
+    let softened = null;
+    const solid = ST.extract.solidWidth(best.mask, W, H);
+    if (solid > 16 && R.strokeWidth(best.mask, W, H) < 0.5 * solid) {
+      // — at the same level, and only to heal: what the texture pocked or
+      // notched is filled in, nothing the sharp reading had is lost (a
+      // stroke in shade, or silver lit cool beside a warm one, can average
+      // out below the level whole)
+      const soft = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, Math.round(solid / 8));
+      const mask = Uint8Array.from(best.mask);
+      for (let i = 0; i < mask.length; i++) if (soft[i] <= best.t) mask[i] = 1;
+      softened = { before: R.count(best.mask), after: R.count(mask) };
+      best = { t: best.t, mask };
+    }
     // pocks, cracks and dirt inside the paint read as paint (`filled`); the
     // classified paint itself (`raw`) is what the stroke-tube filter later
     // measures every fill against
-    return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H), bg, seed, wall };
+    return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H), bg, seed, wall, local: !!local, softened };
   }
   auto._paintMask = paintMask; // for diagnostics
   auto._secondPaint = (data, W, H, pm) => {
@@ -390,7 +429,9 @@
       // Nothing reads clearly as a letter in the paint that stands out most
       // (a sticker, a sign, a strip outshouting the tag)? Read the wall's
       // next paint too, and rank everything together.
-      if (pm && !o.noSecondPaint) {
+      // (not when the letter's own wall was found in the middle of the
+      // photo: the next "paint" is then one of the other surfaces round it)
+      if (pm && !pm.local && !o.noSecondPaint) {
         const seed2 = otherPaint(img.data, W, H, pm);
         let pm2 = seed2 ? paintFrom(img.data, W, H, seed2, pm.bg, pm.wall, ST.raster.dilate(pm.raw, W, H, 2)) : null;
         // a paint that hugs the first — its bleed halo, outline or shadow —
@@ -549,7 +590,7 @@
     const sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
     if (sep < 60) return null;
     const field = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, 2);
-    const cands = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230].filter((t) => t <= Math.max(40, sep * 0.55));
+    const cands = PAINT_TOLERANCES.filter((t) => t <= Math.max(40, sep * 0.55));
     const best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
     if (!best) return null;
     const raw = best.mask;
@@ -575,6 +616,7 @@
     return { crop: { x: cand.crop.x + x0, y: cand.crop.y + y0, w, h }, mask: sub, w, h };
   }
 
+  const INSIDE = 0.6; // see letters.find: a letter's rest this much inside its box is its own
   function findLetters(cands, W, H) {
     if (!cands.length || !ST.letters || !ST.recognize || !ST.recognize.ready()) return cands;
 
@@ -616,7 +658,9 @@
       // split only when the shape reads as several letters (or none), or a
       // letter inside it reads clearly better than the whole does
       const proper = found ? found.letters.filter((lt) => lt.set.size < found.sc.n) : [];
-      const split = proper.some((lt) => lt.explained && ST.letters.better(lt.read, wholeRead));
+      // (and not when what it would leave lies inside the letter's own
+      // bounds: that is the letter's, however well the rest reads alone)
+      const split = proper.some((lt) => lt.explained && lt.inside < INSIDE && ST.letters.better(lt.read, wholeRead));
       if (split) {
         const pad = 10 + Math.round(0.25 * found.sc.sw);
         const top = found.letters.length ? found.letters[0].score : 0;

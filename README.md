@@ -40,6 +40,22 @@ metallic and glossy paint whose highlights and shading run *past* the paint
 color (silver on dark red, chrome on brick) still reads as one shape, and
 compact patches inside the paint that are neither paint nor wall — pocks,
 cracks, dirt in a porous wall — are read as paint under it, not as holes.
+Metallic paint's crinkle — silver's
+bright ridges and dark valleys, far finer than its strokes — would leave the
+paint full of pocks and its edge all notches: when a shape comes out far
+more ragged than its stroke width warrants, the paint is read again with the
+texture averaged out (over an eighth of a stroke), which only ever heals —
+fills the pocks and notches, never drops a stroke in shade — and clean-up
+measures such a shape's stroke width with its pocks filled, so it mends them
+instead of taking them for counters. A click on a letter can take the
+threshold all the way to that midpoint however strongly the paint contrasts
+(white or silver on black is far from its wall, and its shaded side lies
+deep in between). When the frame's border is another
+surface than the one the letter is on — a gray wall and white paper round
+the dark wooden post the tag is on — the wall is taken from round the
+middle of the photo (or round your click), and the paint is looked for
+there: a light-blue letter on the post is then measured against the post,
+soft spray edges and all, not against the gray at the border.
 Streaky strokes are jumped across at up to half a stroke width. The photo is
 then straightened by the paint's own edges (its stems set upright, not the
 wall's bricks or the paper's edge), and its resolution is normalized: a
@@ -114,7 +130,15 @@ the paint color is sampled and refined, and the connected stroke region is
 grown at the tolerance whose edge is sharpest. Fused with a neighbor of the
 same paint (touching it, crossing it, running into it), the letter finder
 hands back the letter under the click alone — offered first when the whole
-shape reads as several letters, the whole one step behind. Still fused?
+shape reads as several letters, or the letter reads unmistakably and the
+whole as nothing (a silver A fused onto the ring and the stroke beneath
+it), the whole one step behind. What it would leave has to lie beside the
+letter, though: strokes inside its own bounds are its own (a stylized A's
+crossbar is not a neighbor fused onto a "7"). Where a neighbor crossed the
+letter, the letter's stroke is drawn on through the crossing at its own
+width — a smooth curve joining the stroke on either side, measured clear
+of the crossing — so a B's bowl stays smooth where an O ran through it,
+with no bump of the O's ink left on it. Still fused?
 **Type the character**: the shape is trimmed to it by itself when the trim matches the
 character clearly better than the whole did (⌘Z brings the whole back).
 Three readings compete, judged by the recognizer: the letter finder's
@@ -355,14 +379,16 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 73 unit tests: geometry, tracing, fitting, morphology,
+npm test        # 75 unit tests: geometry, tracing, fitting, morphology,
                 # deskew, seeded extraction, stroke-graph isolation,
                 # occlusion completion (hidden ends, joins across occluders
                 # and past the frame, bitten strokes, outlines), stroke
                 # chains splitting fused letters, the recognizer (input
                 # grid, clean letters), the letter finder, lean, one-sided
                 # cuts, necks that hold, no spikes at stroke ends, a halo
-                # vs. a second paint of its own, inbox de-duplication,
+                # vs. a second paint of its own, a stroke kept through a
+                # crossing at its own width, the letter's own wall,
+                # inbox de-duplication,
                 # classifier scoring, ligature keys + GSUB, weight targeting,
                 # TTF byte format, and the api routes (JWT signing verified
                 # against a real keypair, Drive calls stubbed)

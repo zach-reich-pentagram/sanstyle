@@ -156,6 +156,49 @@ test('trace: a slanted stroke end is not pulled out into a spike', () => {
   assert.ok(bb.x1 <= 197 + 3, `the trace stays within the paint (right edge ${bb.x1.toFixed(1)} of 196)`);
 });
 
+test('renderStrokes: a stroke kept where a neighbor crossed it keeps its own width through the crossing', () => {
+  const w = 200, h = 140;
+  // a bar crossed at 45° by a neighbor's stroke, both 19 px wide
+  const m = draw(w, h, [[20, 70, 180, 70], [40, 10, 160, 130]], 9);
+  const sc = ST.extract.strokeChains(m, w, h);
+  const bar = new Set();
+  for (let c = 1; c <= sc.n; c++) {
+    let y0 = h, y1 = -1;
+    for (const p of sc.skel[c]) { const y = (p / w) | 0; y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    if (y1 - y0 < 12) bar.add(c);
+  }
+  assert.ok(bar.size >= 1 && bar.size < sc.n, 'the bar is told apart from the diagonal');
+  const out = ST.extract.renderStrokes(sc, m, w, h, bar);
+  let off = 0, gap = 0;
+  for (let x = 30; x <= 170; x++) {
+    if (!out[70 * w + x]) gap++;
+    for (let y = 0; y < h; y++) if (out[y * w + x] && Math.abs(y - 70) > 10) off++;
+  }
+  assert.strictEqual(off, 0, `no bump of the neighbor's ink on the bar (${off} px off its band)`);
+  assert.strictEqual(gap, 0, 'the bar runs on unbroken through the crossing');
+});
+
+test('localWall: a letter on a surface other than the photo border\'s is judged against its own wall', () => {
+  const w = 300, h = 300;
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      // a gray wall at the border, a dark wooden post filling the middle,
+      // a light-blue stroke on the post
+      let c = [155, 154, 148];
+      if (x > 30 && x < 270 && y > 30 && y < 270) c = [72, 66, 56];
+      if (segDist(x, y, 110, 90, 190, 210) <= 10) c = [140, 205, 232];
+      const n = ((x * 7 + y * 13) % 9) - 4, p = (y * w + x) * 4;
+      data[p] = c[0] + n; data[p + 1] = c[1] + n; data[p + 2] = c[2] + n; data[p + 3] = 255;
+    }
+  }
+  const border = ST.extract.backgroundColor(data, w, h);
+  assert.ok(Math.abs(border.r - 155) < 12, 'the border reads as the gray wall');
+  const local = ST.extract.localWall(data, w, h, 150, 150, border);
+  assert.ok(local && Math.abs(local.bg.r - 72) < 12 && Math.abs(local.bg.b - 56) < 12, `the letter's wall is the post (${local && [local.bg.r, local.bg.g, local.bg.b].map(Math.round)})`);
+  assert.strictEqual(ST.extract.localWall(data, w, h, 10, 10, border), null, 'where the border shows, its color stands');
+});
+
 test('second paint: a halo hugging the letters is told apart from a shape of its own, which never takes the first paint in', () => {
   const A = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'auto.js']);
   const W = 240, H = 240;

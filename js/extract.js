@@ -63,7 +63,11 @@
   // keeps the region on the stroke instead of flooding the haze between
   // letters. Leak detection stays spatial, and opts.maxTol (the paint↔
   // background midpoint) bounds how far a textured boundary can tempt it.
-  const GROW_TOLERANCES = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230];
+  // (carried on past 230 for paint that contrasts strongly — white or
+  // silver on black is a separation of 500 and more, and its midpoint,
+  // which bounds every threshold, lies far beyond: the shaded side of a
+  // silver stroke sits out there)
+  const GROW_TOLERANCES = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230, 275, 325, 380, 440];
   function autoRegion(field, excl, w, h, x, y, opts) {
     const maxFrac = opts.maxFrac || 0.35;
     const minCount = opts.minCount || 150;
@@ -115,6 +119,54 @@
     const ring = R.dominantColor(data, w, h, (x, y) => x < m || y < m || x >= w - m || y >= h - m);
     if (ring && ring.frac >= 0.25) return ring;
     return R.dominantColor(data, w, h, null) || ring;
+  };
+
+  // The wall a click's letter is painted on, when it is not the photo's:
+  // the border of a photo can be one surface (a gray wall, white paper)
+  // while the letter sits on another (a dark wooden post between them).
+  // Judged against the border's color the post is "paint" as much as the
+  // letter is — a click lands on it, and the letter's soft edges fall
+  // between the two. When the border's color hardly shows round the click,
+  // the wall is the commonest color in a ring round it (the letter under
+  // the click is inside the ring), and its tolerance the spread of that
+  // color there. → { bg, tol } or null (the border's color will do)
+  // opts.look: how far round the point to look for the border's color
+  // (a fraction of the photo, default the ring's own reach), opts.share:
+  // how little of it there counts as absent (default 0.2).
+  ex.localWall = function (data, w, h, x, y, bg, opts) {
+    const o = opts || {};
+    const reach = Math.round(Math.max(w, h) * 0.15);
+    x = Math.round(x); y = Math.round(y);
+    const x0 = Math.max(0, x - reach), x1 = Math.min(w - 1, x + reach);
+    const y0 = Math.max(0, y - reach), y1 = Math.min(h - 1, y + reach);
+    const step = Math.max(1, Math.round(reach / 120));
+    const lx = o.look ? Math.round(w * o.look) : reach, ly = o.look ? Math.round(h * o.look) : reach;
+    let n = 0, near = 0;
+    for (let yy = Math.max(0, y - ly); yy <= Math.min(h - 1, y + ly); yy += step) {
+      for (let xx = Math.max(0, x - lx); xx <= Math.min(w - 1, x + lx); xx += step) {
+        const p = (yy * w + xx) * 4;
+        n++;
+        if (R.colorDist(data[p], data[p + 1], data[p + 2], bg.r, bg.g, bg.b) < 60) near++;
+      }
+    }
+    if (!n || near / n >= (o.share != null ? o.share : 0.2)) return null;
+    const band = Math.max(3, Math.round(reach * 0.15));
+    const inRing = (xx, yy) => xx >= x0 && xx <= x1 && yy >= y0 && yy <= y1 &&
+      (xx < x0 + band || xx > x1 - band || yy < y0 + band || yy > y1 - band);
+    const dom = R.dominantColor(data, w, h, inRing);
+    if (!dom || dom.frac < 0.25 || R.colorDist(dom.r, dom.g, dom.b, bg.r, bg.g, bg.b) < 40) return null;
+    const vals = [];
+    for (let yy = y0; yy <= y1; yy += step) {
+      for (let xx = x0; xx <= x1; xx += step) {
+        if (!inRing(xx, yy)) continue;
+        const p = (yy * w + xx) * 4;
+        const d = R.colorDist(data[p], data[p + 1], data[p + 2], dom.r, dom.g, dom.b);
+        if (d < 80) vals.push(d);
+      }
+    }
+    vals.sort((a, b) => a - b);
+    const tol = vals.length ? Math.max(25, vals[Math.floor(vals.length * 0.9)] * 1.3) : 40;
+    return { bg: { r: dom.r, g: dom.g, b: dom.b }, tol };
   };
 
   // Move an imprecise click onto the paint. In the window around the click,
@@ -301,6 +353,22 @@
   }
   ex.cropAny = cropAny;
 
+  // The stroke width of a pocked or ragged shape. Area/perimeter collapses
+  // there: silver's crinkle leaves hundreds of pocks in the paint, each
+  // adding its rim to the perimeter, and a 100 px stroke reads as 12 — so
+  // everything scaled by the width (the closing that heals, the pocks that
+  // may be filled) comes out too small to mend them. Read instead with the
+  // pocks filled, from the distance transform: a ribbon's mean distance to
+  // its edge is a quarter of its width.
+  function solidWidth(m, w, h) {
+    const solid = R.fillHoles(m, w, h, 0.02, Infinity);
+    const dt = R.distanceTransform(solid, w, h);
+    let s = 0, n = 0;
+    for (let i = 0; i < dt.length; i++) if (solid[i]) { s += dt[i]; n++; }
+    return n ? (4 * s) / n : 0;
+  }
+  ex.solidWidth = solidWidth;
+
   // Scale-aware clean-up shared with the studio: shave fingers, heal gaps,
   // never thinner than a third of the stroke — then round the stroke ends:
   // a marker can't draw anything sharper than its tip, so needle points
@@ -308,7 +376,11 @@
   ex.cleanMask = function (mask, w, h, smoothing, opts) {
     const sm = smoothing == null ? 4 : smoothing;
     let m = R.despeckle(mask, w, h, 0.04, 24);
-    const sw = R.strokeWidth(m, w, h);
+    // (read with the pocks filled only when the shape is riddled with them:
+    // a clean fat letter's own width must not grow, or its counters would
+    // pass for pocks)
+    const rib = R.strokeWidth(m, w, h), sol = solidWidth(m, w, h);
+    const sw = rib < 0.5 * sol ? 0.9 * sol : rib;
     if (sm > 0) {
       const scale = Math.max(w, h) / 700;
       // closing heals gaps, cracks and notches: the radius follows the knob
@@ -530,6 +602,47 @@
     return R.dominantColor(data, w, h, (x, y) => keep[y * w + x] === 1);
   }
   ex.dominantAlongAxis = dominantAlongAxis;
+
+  // Metallic paint's body. Silver or chrome glints far brighter than it
+  // mostly is: a reference taken at a glint puts the shaded side of a
+  // stroke right at the paint↔wall midpoint, and it drops out of the mask
+  // in flecks. The body is the median tone, along the wall→paint axis, of
+  // what is more paint than wall (within `include`, if given); the
+  // reference moves halfway there — anything brighter still counts as
+  // paint (see raster.axisDistMap). A paint of one flat tone keeps its
+  // reference.
+  ex.bodyTone = function (data, w, h, seed, bg, include) {
+    const sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
+    if (sep < 60) return seed;
+    const rm = (seed.r + bg.r) / 2;
+    const wr = Math.sqrt(2 + rm / 256), wg = 2, wb = Math.sqrt(2 + (255 - rm) / 256);
+    const ax = (seed.r - bg.r) * wr, ay = (seed.g - bg.g) * wg, az = (seed.b - bg.b) * wb;
+    const len2 = ax * ax + ay * ay + az * az, len = Math.sqrt(len2);
+    const step = Math.max(1, Math.round(Math.sqrt((w * h) / 250000)));
+    const us = [];
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        const i = y * w + x;
+        if (include && !include[i]) continue;
+        const p = i * 4;
+        const vx = (data[p] - bg.r) * wr, vy = (data[p + 1] - bg.g) * wg, vz = (data[p + 2] - bg.b) * wb;
+        let u = (vx * ax + vy * ay + vz * az) / len2;
+        const rx = vx - u * ax, ry = vy - u * ay, rz = vz - u * az;
+        if (u > 1) u = 1;
+        // more paint than wall, and this paint's (not another color's)
+        if (u < 0.45 || Math.sqrt(rx * rx + ry * ry + rz * rz) > Math.max(30, 0.25 * len)) continue;
+        us.push(u);
+      }
+    }
+    if (us.length < 200) return seed;
+    us.sort((a, b) => a - b);
+    const med = us[us.length >> 1];
+    if (med > 0.85) return seed; // the glint was the paint
+    // halfway to the median: its shaded side is in, a wall a shade lighter
+    // than itself in places (peeling paint, concrete) still out
+    const u = (1 + med) / 2;
+    return { r: bg.r + (seed.r - bg.r) * u, g: bg.g + (seed.g - bg.g) * u, b: bg.b + (seed.b - bg.b) * u };
+  };
 
   // Marker caps. A stroke that fades out — spray thinning, a marker lifting
   // — tapers to a point in the mask, and no pen leaves a point. Walk the
@@ -1025,7 +1138,7 @@
         const L = Math.hypot(dx, dy) || 1;
         const root = jfind(e);
         if (!arms.has(root)) arms.set(root, []);
-        arms.get(root).push({ k, dx: dx / L, dy: dy / L });
+        arms.get(root).push({ k, dx: dx / L, dy: dy / L, first: side === 0 });
       }
     });
     // good continuation: the arms that run straight on through a junction
@@ -1061,6 +1174,9 @@
     for (const p of jpix) { const r = jfind(p); if (!clusterIdx.has(r)) clusterIdx.set(r, nc++); }
     const armsOf = Array.from({ length: nc }, () => new Set());
     for (const [root, list] of arms) for (const a of list) armsOf[clusterIdx.get(root)].add(chainId[a.k]);
+    // each arm's skeleton, from the junction outward (see renderKept)
+    const armPx = Array.from({ length: nc }, () => []);
+    for (const [root, list] of arms) for (const a of list) armPx[clusterIdx.get(root)].push({ c: chainId[a.k], px: segs[a.k].pixels, first: a.first });
     const adj = Array.from({ length: n + 1 }, () => new Set());
     for (const set of armsOf) for (const a of set) for (const b of set) if (a !== b) adj[a].add(b);
     // every ink pixel to its nearest skeleton owner
@@ -1112,7 +1228,7 @@
       for (const i of idx) mark[i] = 0;
       tubes[c] = Int32Array.from(idx);
     }
-    return { n, owner, armsOf, adj, sw, tubes, skel, dt };
+    return { n, owner, armsOf, armPx, adj, sw, tubes, skel, dt };
   }
 
   // The shape made of some of the chains (a Set of ids), with the junctions
@@ -1129,10 +1245,153 @@
     return out;
   }
 
+  // The same, drawn clean where a kept stroke crossed or touched one that
+  // is not kept. There the ink is both strokes at once: the junction's
+  // blob, and a skeleton pulled toward the other stroke with discs as wide
+  // as the blob — kept as is, the letter wears a bump at every crossing (a
+  // B's bowl where its neighbor's O ran through it). Instead each kept
+  // stroke is followed up to about a stroke width from the junction, at
+  // the width it has clear of it, and carried on through: a smooth curve
+  // into the stroke that continues it on the far side, or, where nothing
+  // of the letter continues, on to the junction's middle, ending round.
+  function renderKept(sc, mask, w, h, set) {
+    const nc = sc.armsOf.length;
+    const state = new Uint8Array(nc); // 0 none kept, 1 all kept (the letter's own), 2 mixed
+    let mixed = 0;
+    for (let j = 0; j < nc; j++) {
+      let kept = 0, gone = 0;
+      for (const a of sc.armsOf[j]) { if (set.has(a)) kept++; else gone++; }
+      state[j] = kept ? (gone ? 2 : 1) : 0;
+      if (state[j] === 2) mixed++;
+    }
+    if (!mixed || !sc.armPx) return renderChains(sc, mask, set);
+    const sw = sc.sw, dt = sc.dt, X = (p) => p % w, Y = (p) => (p / w) | 0;
+    // where it is drawn by hand: within 1½ stroke widths of a mixed junction
+    const off = new Uint8Array(w * h);
+    const cx = new Float64Array(nc), cy = new Float64Array(nc), cn = new Float64Array(nc);
+    for (let i = 0; i < mask.length; i++) {
+      const o = sc.owner[i];
+      off[i] = 1;
+      if (o >= 0) continue;
+      const j = -o - 1;
+      if (state[j] !== 2) continue;
+      off[i] = 0;
+      cx[j] += X(i); cy[j] += Y(i); cn[j]++;
+    }
+    const near = R.distanceTransform(off, w, h, { borderInk: true }); // → nearest mixed-junction pixel
+    const zone = 1.5 * sw;
+    const out = new Uint8Array(mask.length);
+    for (let i = 0; i < mask.length; i++) {
+      const o = sc.owner[i];
+      if (!mask[i] || !o) continue;
+      if (o < 0) { if (state[-o - 1] === 1) out[i] = 1; continue; }
+      if (set.has(o) && near[i] > zone) out[i] = 1;
+    }
+    const disc = (px, py, r) => {
+      const rr = (r + 0.5) * (r + 0.5);
+      for (let yy = Math.max(0, Math.floor(py - r)); yy <= Math.min(h - 1, Math.ceil(py + r)); yy++) {
+        for (let xx = Math.max(0, Math.floor(px - r)); xx <= Math.min(w - 1, Math.ceil(px + r)); xx++) {
+          const i = yy * w + xx;
+          if (mask[i] && (xx - px) * (xx - px) + (yy - py) * (yy - py) <= rr) out[i] = 1;
+        }
+      }
+    };
+    // each kept arm at a mixed junction: its width clear of the junction,
+    // where its skeleton stops being trusted, and which way it runs. An arm
+    // no longer than the junction is wide is the junction's own inside (a
+    // crossing's skeleton can fork twice, with a short link between).
+    const cap = new Float32Array(w * h), skip = new Uint8Array(w * h);
+    const ends = [];
+    const inner = Math.round(zone);
+    for (let j = 0; j < nc; j++) {
+      if (state[j] !== 2) continue;
+      for (const a of sc.armPx[j]) {
+        if (!set.has(a.c)) continue;
+        const q = a.first ? a.px : a.px.slice().reverse();
+        const n = q.length;
+        if (!n) continue;
+        if (n <= inner) { for (const p of q) skip[p] = 1; continue; }
+        const T = Math.round(0.8 * sw), Z = Math.min(n - 1, inner);
+        const rs = [];
+        for (let k = Z; k <= Math.min(n - 1, Z + Math.round(sw)); k++) rs.push(dt[q[k]]);
+        rs.sort((p, q2) => p - q2);
+        const r = rs.length ? rs[rs.length >> 1] : sw / 2;
+        for (let k = 0; k < Z; k++) {
+          if (k < T) skip[q[k]] = 1;
+          cap[q[k]] = cap[q[k]] ? Math.min(cap[q[k]], 1.08 * r) : 1.08 * r;
+        }
+        const far = q[Math.min(n - 1, T + Math.max(2, Math.round(sw)))], at = q[T];
+        let ux = X(far) - X(at), uy = Y(far) - Y(at);
+        if (Math.hypot(ux, uy) < 1) { ux = X(at) - cx[j] / cn[j]; uy = Y(at) - cy[j] / cn[j]; }
+        const L2 = Math.hypot(ux, uy) || 1;
+        ends.push({ x: X(at), y: Y(at), ux: ux / L2, uy: uy / L2, r, j });
+      }
+    }
+    // the kept strokes' tubes, capped at their clear width near the junctions
+    for (const c of set) {
+      const px = sc.skel[c];
+      let lastK = -1e9;
+      for (let k = 0; k < px.length; k++) {
+        const p = px[k];
+        if (skip[p]) continue;
+        const r = cap[p] ? Math.min(dt[p], cap[p]) : dt[p];
+        if (k !== px.length - 1 && k - lastK < Math.max(1, r / 6)) continue;
+        lastK = k;
+        disc(X(p), Y(p), r);
+      }
+    }
+    // and carried through: the two ends that face each other across the
+    // junction (or across the pair of forks a crossing can make) are one
+    // stroke, joined by a smooth curve over ink
+    const sweep = (x0, y0, x1, y1, t0x, t0y, t1x, t1y, r0, r1) => {
+      const L = Math.hypot(x1 - x0, y1 - y0);
+      const steps = Math.max(2, Math.ceil(L / Math.max(1, Math.min(r0, r1) / 4)));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps, t2 = t * t, t3 = t2 * t;
+        const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+        disc(h00 * x0 + h10 * t0x + h01 * x1 + h11 * t1x, h00 * y0 + h10 * t0y + h01 * y1 + h11 * t1y, r0 + (r1 - r0) * t);
+      }
+    };
+    const onInk = (A, B) => {
+      const L = Math.hypot(B.x - A.x, B.y - A.y), n = Math.max(2, Math.ceil(L / 2));
+      let ink = 0;
+      for (let s = 0; s <= n; s++) {
+        const px = Math.round(A.x + ((B.x - A.x) * s) / n), py = Math.round(A.y + ((B.y - A.y) * s) / n);
+        if (mask[py * w + px]) ink++;
+      }
+      return ink >= 0.9 * (n + 1);
+    };
+    const pairs = [];
+    for (let a = 0; a < ends.length; a++) {
+      for (let b = a + 1; b < ends.length; b++) {
+        const A = ends[a], B = ends[b];
+        if (A.j !== B.j && Math.hypot(B.x - A.x, B.y - A.y) > 4 * sw) continue;
+        const dev = Math.acos(Math.max(-1, Math.min(1, -(A.ux * B.ux + A.uy * B.uy))));
+        if (dev < (70 * Math.PI) / 180 && onInk(A, B)) pairs.push({ a, b, dev });
+      }
+    }
+    pairs.sort((p, q) => p.dev - q.dev);
+    const used = new Uint8Array(ends.length);
+    for (const p of pairs) {
+      if (used[p.a] || used[p.b]) continue;
+      used[p.a] = used[p.b] = 1;
+      const A = ends[p.a], B = ends[p.b], L = Math.hypot(B.x - A.x, B.y - A.y);
+      sweep(A.x, A.y, B.x, B.y, -A.ux * L, -A.uy * L, B.ux * L, B.uy * L, A.r, B.r);
+    }
+    ends.forEach((A, k) => {
+      if (used[k]) return;
+      // nothing of the letter goes on: to the junction's middle, round
+      const mx = cx[A.j] / cn[A.j], my = cy[A.j] / cn[A.j];
+      const d = Math.max(0, (mx - A.x) * -A.ux + (my - A.y) * -A.uy);
+      sweep(A.x, A.y, A.x - A.ux * d, A.y - A.uy * d, -A.ux * d, -A.uy * d, -A.ux * d, -A.uy * d, A.r, A.r);
+    });
+    return out;
+  }
+
   // The shape made of some of its strokes (a Set of chain ids from
   // strokeChains), the faces where the rest came off healed and capped.
   ex.renderStrokes = function (sc, mask, w, h, set) {
-    let out = renderChains(sc, mask, set);
+    let out = renderKept(sc, mask, w, h, set);
     const removed = new Uint8Array(mask.length);
     let n = 0;
     for (let i = 0; i < mask.length; i++) if (mask[i] && !out[i]) { removed[i] = 1; n++; }
@@ -1176,7 +1435,7 @@
       if (!(chain > 0)) return null;
       const rest = new Set();
       for (let c = 1; c <= sc.n; c++) if (c !== chain) rest.add(c);
-      const kept = renderChains(sc, mask, rest);
+      const kept = renderKept(sc, mask, w, h, rest);
       // what still holds the letter: the part with the anchor if it
       // survived, else the biggest part
       const kc = R.components(kept, w, h);
@@ -1228,7 +1487,7 @@
       set.add(pick); cur = pickS;
       if (cur > best.s + 1e-4) best = { set: new Set(set), s: cur };
     }
-    let out = renderChains(sc, mask, best.set);
+    let out = renderKept(sc, mask, w, h, best.set);
     const removed = new Uint8Array(mask.length);
     let nRemoved = 0;
     for (let i = 0; i < mask.length; i++) if (mask[i] && !out[i]) { removed[i] = 1; nRemoved++; }
@@ -1253,7 +1512,10 @@
     const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
     // the click is on the letter: each cut takes only from its other side
     const excl = ex.cutMask(w, h, o.cuts, { x, y });
-    const bg = ex.backgroundColor(data, w, h);
+    let bg = ex.backgroundColor(data, w, h), wallTol = null;
+    // the letter's own wall, if the photo's border shows another surface
+    const local = bg && ex.localWall(data, w, h, x, y, bg);
+    if (local) { bg = local.bg; wallTol = local.tol; }
     if (bg && !o.noSnap) {
       const snap = snapToInk(data, w, h, x, y, Math.max(6, Math.round(Math.max(w, h) * 0.03)), bg);
       x = snap.x; y = snap.y;
@@ -1279,7 +1541,7 @@
     // shares the wall→sample axis (a neighbor of another color does not)
     let wall = null;
     if (bg) {
-      wall = ex.wallMask(data, w, h, bg, ex.wallTolerance(data, w, h, bg));
+      wall = ex.wallMask(data, w, h, bg, wallTol != null ? wallTol : ex.wallTolerance(data, w, h, bg));
       const reach = Math.round(Math.max(w, h) * 0.2);
       const x0 = Math.max(0, x - reach), x1 = Math.min(w - 1, x + reach);
       const y0 = Math.max(0, y - reach), y1 = Math.min(h - 1, y + reach);
@@ -1295,13 +1557,26 @@
     }
     // the field: distance along the wall→paint axis, so metallic and glossy
     // paint that shades and glints past the paint color still counts
-    field = bg ? R.axisDistMap(data, w, h, seed, bg) : R.colorDistMap(data, w, h, [seed]);
-    if (o.blur > 0) field = R.blur(field, w, h, o.blur);
+    const rawField = bg ? R.axisDistMap(data, w, h, seed, bg) : R.colorDistMap(data, w, h, [seed]);
+    field = o.blur > 0 ? R.blur(rawField, w, h, o.blur) : rawField;
     // never grow past the midpoint between paint and background: beyond it
     // a pixel is more paper than paint whatever the boundary looks like
     const sep = bg ? R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b) : Infinity;
-    const grown = autoRegion(field, excl, w, h, x, y, { maxTol: Math.max(40, sep * 0.55) });
+    let grown = autoRegion(field, excl, w, h, x, y, { maxTol: Math.max(40, sep * 0.55) });
     if (!grown || grown.count < 40) return null;
+    // Metallic crinkle (or paint on a rough wall): a texture far finer than
+    // the strokes, and at the pixel level the stroke is all notches and
+    // pocks — its edge-to-area reading makes a 100 px stroke look 12 px
+    // wide. Read it again with the texture averaged out, over an eighth of
+    // a stroke: the edge the eye sees.
+    {
+      const solid = solidWidth(grown.mask, w, h);
+      if (solid > 16 && R.strokeWidth(grown.mask, w, h) < 0.5 * solid) {
+        const soft = R.blur(rawField, w, h, Math.round(solid / 8));
+        const again = autoRegion(soft, excl, w, h, x, y, { maxTol: Math.max(40, sep * 0.55) });
+        if (again && again.count >= 40) { grown = again; field = soft; }
+      }
+    }
 
     // Gap jumping: dry-brush streaks and porous surfaces break a stroke
     // into fragments a plain flood stops at. Grow again on the paint closed
@@ -1389,23 +1664,32 @@
     // letters.js) — offered first when the whole shape reads as several
     // letters, or the letter reads clearly better than the whole. Without
     // a recognizer, a split at a thin neck (a touching neighbor) instead.
-    let separated = null, kind = 'separated', read = null;
+    let separated = null, kind = 'separated', read = null, plainSplit = false;
     // (after a cut the shape is what you made it: nothing is regrouped)
     const reads = ST.letters && ST.recognize && ST.recognize.ready() && !o.noLetters && !(o.cuts && o.cuts.length);
     if (reads) {
       const found = ST.letters.find(whole, crop.w, crop.h, { center: { x: lx, y: ly }, must: { x: lx, y: ly } });
       const lt = found && found.letters[0];
-      if (lt && lt.set.size < found.sc.n && lt.explained && ST.letters.better(lt.read, { ranked: found.whole.top, letterness: found.whole.letterness })) {
+      const wholeRead = found && { ranked: found.whole.top, letterness: found.whole.letterness };
+      // what it leaves should read as letters too (or be crumbs, or run off
+      // the photo) — unless the letter under the click reads unmistakably
+      // and the whole shape hardly reads at all (a silver A fused onto the
+      // ring and the stroke below it, which are no letters on their own)
+      const plain = lt && ST.letters.clarity(lt.read) >= 0.9 && ST.letters.clarity(wholeRead) < 0.5;
+      if (lt && lt.set.size < found.sc.n && (lt.explained || plain) && lt.inside < 0.6 && ST.letters.better(lt.read, wholeRead)) {
         separated = ST.letters.render(found, whole, crop.w, crop.h, lt);
         kind = 'letter';
         read = lt.read;
+        plainSplit = !lt.explained;
       }
     } else if (!(o.cuts && o.cuts.length)) {
       separated = ex.separateTouching(whole, crop.w, crop.h, lx, ly);
     }
     // what completion joined is the letter's by evidence: a split that
-    // drops part of it is not a neighbor coming off
-    if (separated && tubeSub) {
+    // drops part of it is not a neighbor coming off (unless the letter
+    // reads unmistakably and the whole shape as nothing: then what was
+    // joined on was the neighbor)
+    if (separated && tubeSub && !plainSplit) {
       let t = 0, kept = 0;
       for (let i = 0; i < tubeSub.length; i++) if (tubeSub[i] && whole[i]) { t++; if (separated[i]) kept++; }
       if (t && kept < 0.9 * t) separated = null;

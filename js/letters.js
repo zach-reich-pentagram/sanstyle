@@ -396,12 +396,32 @@
       }
     }
     if (o.debug) o.debug.sets = Array.from(cache.values()).map((r) => ({ ids: r.ids.join(','), L: +(r.letterness || 0).toFixed(2), top: (r.top || []).slice(0, 3).map((x) => x.ch + ':' + x.p.toFixed(2)).join(' '), score: r.score != null ? +r.score.toFixed(3) : null, explained: r.explained }));
+    // How much of the rest of the shape lies within a letter's own bounds.
+    // A neighbor sits beside a letter; strokes inside its box are its own —
+    // a stylized A's crossbar is not a neighbor fused onto a "7".
+    const pad = sc.sw / m.f / 2;
+    const insideOf = (r) => {
+      const rest = new Set();
+      for (let c = 1; c <= sc.n; c++) if (r.ids.indexOf(c) < 0) rest.add(c);
+      if (!rest.size) return 0;
+      const img = draw(m, rest);
+      let n = 0, inn = 0;
+      for (let y = 0; y < m.lh; y++) {
+        for (let x = 0; x < m.lw; x++) {
+          if (!img[y * m.lw + x]) continue;
+          n++;
+          if (x >= r.bb.x0 - pad && x <= r.bb.x1 + pad && y >= r.bb.y0 - pad && y <= r.bb.y1 + pad) inn++;
+        }
+      }
+      return n ? inn / n : 0;
+    };
     return {
       sc, model: m, evaluated: cache.size,
       whole: read(new Set(Array.from({ length: sc.n }, (_, i) => i + 1))),
       letters: (must ? picked.slice(0, 1) : picked).map((r) => ({
         set: new Set(r.ids), read: { ranked: r.top, junk: r.junk, letterness: r.letterness }, score: r.score,
         explained: r.explained !== false,
+        inside: insideOf(r),
         box: { x0: (r.bb.x0 - 1) * m.f, y0: (r.bb.y0 - 1) * m.f, x1: (r.bb.x1 - 1) * m.f, y1: (r.bb.y1 - 1) * m.f },
       })),
     };
