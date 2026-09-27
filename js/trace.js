@@ -313,8 +313,13 @@
     const span = cornerSpan || 3;
     const tspan = tanSpan || span;
     let corners = findCorners(pts, cornerRad, span, o.concaveRad, o.area);
-    if (o.sharpen && corners.length) {
-      const sharpened = sharpenCorners(pts, corners, o.sw);
+    // only inside corners are put back on their point: where two strokes
+    // meet the corner is sharp, but an outside corner is a stroke's end or
+    // the rim of a bend, and the paint rounds or flares it — extending its
+    // edges to where they would meet grows a spike the wall never had
+    const inside = o.area ? corners.filter((i) => turnAt(pts, i, span).cross * o.area < 0) : [];
+    if (o.sharpen && inside.length) {
+      const sharpened = sharpenCorners(pts, inside, o.sw);
       if (sharpened !== pts) {
         pts = sharpened;
         corners = findCorners(pts, cornerRad, span, o.concaveRad, o.area);
@@ -436,6 +441,15 @@
   // Flatten a set of contours for measuring (bounds, profiles).
   trace.flattenAll = function (contours, maxSeg) {
     return contours.map((c) => V.flattenContour(c.cubics || c, maxSeg || 5));
+  };
+
+  // Contours turned by `deg` degrees about (cx, cy) — clockwise on screen
+  // (y down) for positive angles.
+  trace.rotatePaths = function (paths, deg, cx, cy) {
+    if (!deg) return paths;
+    const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+    const rot = (p) => ({ x: cx + (p.x - cx) * c - (p.y - cy) * s, y: cy + (p.x - cx) * s + (p.y - cy) * c });
+    return paths.map((p) => Object.assign({}, p, { cubics: p.cubics.map((cu) => cu.map(rot)) }));
   };
 
   trace.boundsOf = function (contours) {

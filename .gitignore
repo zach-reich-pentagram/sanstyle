@@ -3,3 +3,14 @@ node_modules/
 *.log
 .DS_Store
 tools/bench/out/
+
+# recognizer training data
+tools/recognizer/venv/
+tools/recognizer/emnist/
+tools/recognizer/fonts/
+tools/recognizer/gf-meta.json
+tools/recognizer/*.npz
+tools/recognizer/*.pt
+tools/recognizer/*.png
+tools/recognizer/ref.json
+tools/recognizer/letters-model.js

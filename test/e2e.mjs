@@ -488,8 +488,8 @@ const hashRes = await page.evaluate(() => {
   out.tip = { tall };
   return out;
 });
-check(hashRes.angle !== 0 && hashRes.n === 1 && hashRes.autoFill < 0.3,
-  `leaning # auto-straightened (${hashRes.angle}°) into one thin-stroked shape (fill ${hashRes.autoFill.toFixed(2)})`);
+check(hashRes.angle !== 0 && hashRes.n >= 1 && hashRes.autoFill < 0.3,
+  `leaning # auto-straightened (${hashRes.angle}°) into a thin-stroked shape (fill ${hashRes.autoFill.toFixed(2)}, ${hashRes.n} shape(s) offered)`);
 check(hashRes.ok === true && hashRes.kind === 'isolated', 'Isolate “#” accepted the fused shape');
 check(hashRes.bounds.w > 400 && hashRes.bounds.w < 560 && hashRes.bounds.x + hashRes.bounds.w < hashRes.canvasW * 0.8,
   `Isolate cut the neighbor's diagonal off and kept the whole # (${hashRes.bounds.w}×${hashRes.bounds.h})`);
@@ -523,12 +523,12 @@ const queued = await page.evaluate(() => __st.state().queue);
 check(queued === 0, 'Skip removes the photo from the queue');
 
 // Detail knob re-extracts; a cut with no click keeps the bigger side
-const cutSide = await page.evaluate(() => {
+const cutSide = await page.evaluate(async () => {
   const wall = ST.demo.makeWall('L', 321);
   ST.batch.addCanvas(wall.canvas, 'cut-l');
   ST.batch.reopen();
   const item = ST.batch.queue[ST.batch.idx];
-  ST.batch.setDetail(8);
+  await ST.batch.setDetail(8); // re-read in the background worker
   const detail = { detail: item.detail, slider: document.getElementById('reviewDetail').value, n: item.candidates.length };
   const cand = item.candidates[0];
   const bb = ST.raster.maskBounds(cand.mask, cand.w, cand.h);
@@ -626,17 +626,44 @@ await page.evaluate(() => {
   ST.batch.reopen();
   ST.batch.clickTrace(325, 600);
 });
-const fusedBefore = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind }; });
+// the click already hands back the T alone: its strokes grouped the way the
+// recognizer reads one letter, the O's taken off
+const fusedClick = await page.evaluate(() => {
+  const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; const bb = ST.raster.maskBounds(c.mask, c.w, c.h);
+  return { kind: c.kind, left: c.crop.x + bb.x0, right: c.crop.x + bb.x1, guess: document.getElementById('reviewChar').value };
+});
+check(fusedClick.kind === 'letter' && fusedClick.right < 615 && fusedClick.left < 110,
+  `a click on the fused T gives the T alone (${fusedClick.left}–${fusedClick.right}, “${fusedClick.guess}” filled in)`);
+check(fusedClick.guess.toUpperCase() === 'T', `the recognizer fills in what it reads (“${fusedClick.guess}”), with the next best as buttons`);
+// the Rotate slider turns the glyph (not the photo overlay), and a turn set
+// by hand stays with the photo
+const rot = await page.evaluate(() => {
+  const it = ST.batch.queue[ST.batch.idx];
+  const r = document.getElementById('reviewRotate');
+  const before = JSON.stringify(ST.capture.uprightPaths(it.candidates[it.ci])[0].cubics[0][0]);
+  r.value = '12'; r.dispatchEvent(new Event('input'));
+  const c = it.candidates[it.ci];
+  return { enabled: !r.disabled, turn: c.turn, manual: it.manualTurn, label: document.getElementById('reviewRotateVal').textContent,
+    moved: JSON.stringify(ST.capture.uprightPaths(c)[0].cubics[0][0]) !== before, guesses: document.querySelectorAll('#guessRow button').length };
+});
+check(rot.enabled && rot.turn === 12 && rot.manual === 12 && rot.moved && /12°/.test(rot.label) && rot.guesses >= 1,
+  `Rotate turns the letterform (${rot.label}, ${rot.guesses} guess button(s))`);
+await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const r = document.getElementById('reviewRotate'); r.value = '0'; r.dispatchEvent(new Event('input')); it.manualTurn = null; });
+// the whole shape is one step away; typing the character trims it too
+await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; while (it.candidates[it.ci].kind !== 'whole') ST.batch.tryNext(); });
+const fusedBefore = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[it.ci]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind }; });
 await page.fill('#reviewChar', 'T');
 // the trim runs once typing pauses
 await page.waitForFunction(() => { const it = ST.batch.queue[ST.batch.idx]; return it && it.candidates[0] && it.candidates[0].kind === 'isolated'; }, { timeout: 8000 }).catch(() => {});
 const fusedAfter = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; const bb = ST.raster.maskBounds(c.mask, c.w, c.h); return { w: bb.w, left: c.crop.x + bb.x0, right: c.crop.x + bb.x1, kind: c.kind, hist: (it.history || []).length }; });
-check(fusedAfter.kind === 'isolated' && fusedAfter.right < 610 && fusedAfter.right > 540 && fusedAfter.left < 110,
+// (the last stroke-width of the bar, inside the O's counter, is too short a
+// spur to be a stroke of its own: the bar is kept up to the O)
+check(fusedAfter.kind === 'isolated' && fusedAfter.right < 610 && fusedAfter.right > 480 && fusedAfter.left < 110,
   `typing “T” trimmed the fused O off by itself (${fusedBefore.w} → ${fusedAfter.w} px wide, bar kept to x=${fusedAfter.right})`);
 await page.focus('#reviewChar');
 await page.keyboard.press('Control+z');
 await page.waitForTimeout(200);
-const fusedUndo = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[0]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind, ch: document.getElementById('reviewChar').value }; });
+const fusedUndo = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it.candidates[it.ci]; return { w: ST.raster.maskBounds(c.mask, c.w, c.h).w, kind: c.kind, ch: document.getElementById('reviewChar').value }; });
 check(fusedUndo.kind !== 'isolated' && fusedUndo.w === fusedBefore.w && fusedUndo.ch === 'T',
   `Ctrl-Z brings the whole shape back, the typed character stays (${fusedUndo.w} px wide)`);
 // Option-click takes a piece off: click the O's far side

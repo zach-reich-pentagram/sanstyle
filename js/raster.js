@@ -362,10 +362,14 @@
   // that hold the shape together. Needle-sharp stroke ends become round
   // caps (nothing a marker draws is sharper than its tip), side burrs go,
   // a thin section in the middle of a stroke stays. `region` limits where
-  // pruning may happen.
-  raster.pruneThin = function (mask, w, h, r, region) {
+  // pruning may happen. opts.bridgeMin: a stretch holds nothing together
+  // where it is thinner than twice this (a strand of wall texture joining
+  // two strokes is not a stroke).
+  raster.pruneThin = function (mask, w, h, r, region, opts) {
     if (!(r >= 1)) return mask;
     const opened = raster.open(mask, w, h, r);
+    const bridgeMin = opts && opts.bridgeMin >= 1 && opts.bridgeMin < r ? opts.bridgeMin : 0;
+    const sturdy = bridgeMin ? raster.open(mask, w, h, bridgeMin) : null;
     const removed = new Uint8Array(w * h);
     let any = false;
     for (let i = 0; i < removed.length; i++) {
@@ -391,6 +395,18 @@
     // touched piece by its whole size against the letter
     const go = raster.components(opened, w, h);
     const minSide = Math.max(12 * r * r, raster.count(mask) * 0.025);
+    // A thin stretch can be thin in several places in a row (speckled paint
+    // along a worn stroke): the opening leaves crumbs between the necks, and
+    // each neck alone joins a real side to a crumb. Necks and the crumbs
+    // between them are judged together — a run of them joining two real
+    // sides holds the shape together as surely as a single neck does.
+    const nGo = go.sizes.length;
+    const par = new Int32Array(n + nGo);
+    for (let i = 0; i < par.length; i++) par[i] = i;
+    const find = (a) => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+    const bigOf = Array.from({ length: n }, () => null); // sliver → big sides it touches (global labels)
+    const loose = new Uint8Array(n); // slivers not kept on their own
+    const bridge = new Uint8Array(n); // slivers kept as bridges
     for (let L = 1; L < n; L++) {
       const x0 = Math.max(0, bx0[L] - m), y0 = Math.max(0, by0[L] - m);
       const x1 = Math.min(w - 1, bx1[L] + m), y1 = Math.min(h - 1, by1[L] + m);
@@ -402,7 +418,12 @@
       // two distinct local pieces can be one global stroke (a ring), and
       // that still counts as two sides
       const touched = new Map(); // local label → global size
-      const touch = (li, gi) => { if (local[li]) touched.set(lc.labels[li], go.sizes[go.labels[gi]]); };
+      const globals = new Set();
+      const touch = (li, gi) => {
+        if (!local[li]) return;
+        touched.set(lc.labels[li], go.sizes[go.labels[gi]]);
+        globals.add(go.labels[gi]);
+      };
       for (let y = 0; y < wh; y++) {
         for (let x = 0; x < ww; x++) {
           const gi = (y + y0) * w + (x + x0);
@@ -416,11 +437,32 @@
       }
       let sides = 0;
       for (const size of touched.values()) if (size >= minSide) sides++;
-      if (sides >= 2) continue; // a bridge between two strokes: keep it
+      if (sides >= 2) { bridge[L] = 1; continue; } // a bridge between two strokes: keep it
+      loose[L] = 1;
+      const big = new Set();
+      for (const G of globals) {
+        if (go.sizes[G] >= minSide) big.add(G);
+        else { const a = find(L), b = find(n + G); if (a !== b) par[a] = b; } // a crumb: same run
+      }
+      bigOf[L] = big;
+    }
+    // runs of necks and crumbs: the big sides each run touches
+    const runSides = new Map();
+    for (let L = 1; L < n; L++) {
+      if (!loose[L]) continue;
+      const root = find(L);
+      if (!runSides.has(root)) runSides.set(root, new Set());
+      for (const G of bigOf[L]) runSides.get(root).add(G);
+    }
+    for (let L = 1; L < n; L++) {
+      if (loose[L] && runSides.get(find(L)).size >= 2) bridge[L] = 1; // part of a run joining two strokes
+      const keep = bridge[L];
+      if (keep && !sturdy) continue;
       for (let y = by0[L]; y <= by1[L]; y++) {
         for (let x = bx0[L]; x <= bx1[L]; x++) {
           const i = y * w + x;
-          if (labels[i] === L) out[i] = 0;
+          // a bridge keeps only what is at least 2·bridgeMin thick
+          if (labels[i] === L && (!keep || !sturdy[i])) out[i] = 0;
         }
       }
     }

@@ -65,9 +65,103 @@
     if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall.');
     else if (!cand) setHint('Nothing traced yet — click the letter in the photo, or skip it.');
     else setHint('Click a letter to trace it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans');
+    // a leaning letter stands up by its stems (the Rotate slider adjusts)
+    if (cand && cand.turn == null) {
+      if (item && item.manualTurn != null) cand.turn = item.manualTurn; // set by hand on this photo: kept
+      else {
+        const lean = cand.lean != null ? cand.lean : (ST.letters ? ST.letters.lean(cand.mask, cand.w, cand.h) : 0);
+        cand.turn = lean ? -lean : 0;
+      }
+    }
+    syncRotate();
     drawTrace();
     updatePreview();
+    showGuesses();
     requestDraw();
+  };
+
+  // ---------- upright ----------
+  // The shape's contours turned by its `turn` (degrees, clockwise +) about
+  // its middle: what the glyph is built from. The photo overlay keeps the
+  // contours as found.
+  cap.uprightPaths = function (cand) {
+    if (!cand) return [];
+    const turn = cand.turn || 0;
+    if (!turn) return cand.paths;
+    if (cand._upright && cand._upright.turn === turn) return cand._upright.paths;
+    const bb = ST.trace.boundsOf(cand.paths);
+    const paths = bb ? ST.trace.rotatePaths(cand.paths, turn, (bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2) : cand.paths;
+    cand._upright = { turn, paths };
+    return paths;
+  };
+
+  function syncRotate() {
+    const r = $('#reviewRotate'), v = $('#reviewRotateVal');
+    if (!r) return;
+    const turn = cap.cand ? Math.round(cap.cand.turn || 0) : 0;
+    r.value = turn;
+    r.disabled = !cap.cand;
+    if (v) v.textContent = `${turn > 0 ? '+' : turn < 0 ? '−' : ''}${Math.abs(turn)}°`;
+  }
+
+  // ---------- what it reads as ----------
+  // The upright shape as the recognizer sees it (cached per rotation).
+  cap.readOf = function (cand) {
+    if (!cand || !cand.paths.length || !ST.recognize || !ST.recognize.ready()) return null;
+    const turn = cand.turn || 0;
+    if (cand._read && cand._read.turn === turn) return cand._read.read;
+    const paths = cap.uprightPaths(cand);
+    const bb = ST.trace.boundsOf(paths);
+    let read = null;
+    if (bb && bb.w > 1 && bb.h > 1) {
+      const s = 96 / Math.max(bb.w, bb.h);
+      const w = Math.max(2, Math.ceil(bb.w * s) + 4), h = Math.max(2, Math.ceil(bb.h * s) + 4);
+      const c = ST.makeCanvas(w, h), x = c.getContext('2d');
+      x.fillStyle = '#000';
+      x.fill(pathOf(paths, (px, py) => [(px - bb.x0) * s + 2, (py - bb.y0) * s + 2]), 'nonzero');
+      const d = x.getImageData(0, 0, w, h).data;
+      const m = new Uint8Array(w * h);
+      for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 127 ? 1 : 0;
+      read = ST.recognize.classify(m, w, h);
+    }
+    cand._read = { turn, read };
+    return read;
+  };
+
+  // The best guesses as buttons: one click types the character.
+  function showGuesses() {
+    const row = $('#guessRow');
+    if (!row) return;
+    row.textContent = '';
+    const read = cap.readOf(cap.cand);
+    if (!read || read.letterness < 0.3) return;
+    const label = g.document.createElement('span');
+    label.className = 'dim';
+    label.textContent = 'Reads as:';
+    row.appendChild(label);
+    for (const r of read.ranked.slice(0, 3)) {
+      if (r.p < 0.04) break;
+      const b = g.document.createElement('button');
+      b.className = 'pill sm';
+      b.textContent = r.ch;
+      b.title = `${Math.round(r.p * 100)}% sure`;
+      b.addEventListener('click', () => {
+        const input = $('#reviewChar');
+        input.value = r.ch;
+        input.dispatchEvent(new Event('input'));
+        input.focus();
+      });
+      row.appendChild(b);
+    }
+  }
+  cap.showGuesses = showGuesses;
+
+  // The character the recognizer is sure enough of, for the box to start
+  // with (typing over it replaces it) — or ''.
+  cap.guess = function (cand) {
+    const read = cap.readOf(cand);
+    if (!read || read.letterness < 0.5 || !read.ranked.length || read.ranked[0].p < 0.35) return '';
+    return read.ranked[0].ch;
   };
 
   function pathOf(paths, map) {
@@ -92,13 +186,14 @@
     tctx.clearRect(0, 0, W, H);
     const cand = cap.cand;
     if (!cand || !cand.paths.length) return;
-    const bb = ST.trace.boundsOf(cand.paths);
+    const paths = cap.uprightPaths(cand);
+    const bb = ST.trace.boundsOf(paths);
     if (!bb) return;
     const ts = Math.min((W - 24) / Math.max(1, bb.w), (H - 24) / Math.max(1, bb.h));
     const tox = (W - bb.w * ts) / 2 - bb.x0 * ts;
     const toy = (H - bb.h * ts) / 2 - bb.y0 * ts;
     tctx.fillStyle = '#000';
-    tctx.fill(pathOf(cand.paths, (x, y) => [tox + x * ts, toy + y * ts]), 'nonzero');
+    tctx.fill(pathOf(paths, (x, y) => [tox + x * ts, toy + y * ts]), 'nonzero');
   }
 
   // ---------- fitted preview ----------
@@ -106,7 +201,7 @@
     const input = $('#reviewChar');
     const key = ST.metrics.charKey(input ? input.value : '');
     cap.record = null;
-    if (cap.cand && cap.cand.paths.length && key) cap.record = ST.metrics.buildRecord(key, cap.cand.paths);
+    if (cap.cand && cap.cand.paths.length && key) cap.record = ST.metrics.buildRecord(key, cap.uprightPaths(cap.cand));
     drawPreview(key || 'A');
     const btn = $('#reviewAccept');
     if (btn) btn.disabled = !cap.record;
@@ -371,8 +466,13 @@
   function busy(label, fn) {
     setHint(label);
     if (stage) stage.style.cursor = 'progress';
+    const done = () => { setTool(cap.tool); requestDraw(); };
     g.requestAnimationFrame(() => g.setTimeout(() => {
-      try { fn(); } finally { setTool(cap.tool); requestDraw(); }
+      let r;
+      try { r = fn(); } catch (e) { done(); throw e; }
+      // work handed to the background worker: busy until it is back
+      if (r && typeof r.then === 'function') r.then(done, (e) => { done(); console.warn(e); });
+      else done();
     }, 0));
   }
   cap.busy = busy;
@@ -443,6 +543,15 @@
     $('#toolFit').addEventListener('click', fitView);
     $('#toolHand').addEventListener('click', () => setTool(cap.tool === 'hand' ? 'trace' : 'hand'));
     $('#reviewChar').addEventListener('input', updatePreview);
+    $('#reviewRotate').addEventListener('input', (e) => {
+      if (!cap.cand) return;
+      cap.cand.turn = +e.target.value;
+      if (cap.item) cap.item.manualTurn = cap.cand.turn;
+      syncRotate();
+      drawTrace();
+      updatePreview();
+      showGuesses();
+    });
 
     setTool('trace');
     cap.showItem(null, null);

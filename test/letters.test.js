@@ -1,0 +1,201 @@
+'use strict';
+// Reading letters (recognize.js), finding the letters in a fused shape and
+// standing them up (letters.js), and the clean-up rules they rely on.
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { loadST } = require('./loader');
+
+const ST = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js',
+  'letters-model.js', 'recognize.js', 'letters.js']);
+const R = ST.raster;
+
+const segDist = (px, py, ax, ay, bx, by) => {
+  const vx = bx - ax, vy = by - ay;
+  const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy || 1)));
+  return Math.hypot(px - ax - t * vx, py - ay - t * vy);
+};
+// a mask of round-capped strokes [[ax, ay, bx, by], ...] of half-width r,
+// plus rings [[cx, cy, rx, ry], ...]
+function draw(w, h, list, r, rings) {
+  const m = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let on = false;
+      for (const s of list) if (segDist(x, y, ...s) <= r) { on = true; break; }
+      if (!on && rings) {
+        for (const [cx, cy, rx, ry] of rings) {
+          const d = Math.hypot((x - cx) / rx, (y - cy) / ry);
+          if (Math.abs(d - 1) * Math.min(rx, ry) <= r) { on = true; break; }
+        }
+      }
+      if (on) m[y * w + x] = 1;
+    }
+  }
+  return m;
+}
+const top = (read, n) => read.ranked.slice(0, n).map((r) => r.ch.toUpperCase());
+
+test('recognize.input: the ink box fills 28 px of 32, aspect kept, coverage exact', () => {
+  const w = 60, h = 120;
+  const m = new Uint8Array(w * h);
+  for (let y = 10; y < 110; y++) for (let x = 20; x < 45; x++) m[y * w + x] = 1; // a 25×100 bar
+  const inp = ST.recognize.input(m, w, h);
+  let sum = 0, rows = new Set(), cols = new Set();
+  for (let i = 0; i < inp.length; i++) {
+    sum += inp[i];
+    if (inp[i] > 1e-6) { rows.add((i / 32) | 0); cols.add(i % 32); }
+  }
+  // 28 tall, 7 wide: 196 cells of ink in all
+  assert.ok(Math.abs(sum - 196) < 0.01, `coverage adds up to the box (${sum.toFixed(3)})`);
+  assert.strictEqual(rows.size, 28);
+  assert.ok(cols.size >= 7 && cols.size <= 8, `${cols.size} columns`);
+});
+
+test('recognize: clean letters read as themselves', () => {
+  assert.ok(ST.recognize.ready(), 'the model loads');
+  const w = 140, h = 180, r = 9;
+  const L = draw(w, h, [[40, 20, 40, 160], [40, 160, 110, 160]], r);
+  const T = draw(w, h, [[20, 25, 120, 25], [70, 25, 70, 160]], r);
+  const O = draw(w, h, [], r, [[70, 90, 45, 65]]);
+  const X = draw(w, h, [[25, 20, 115, 160], [115, 20, 25, 160]], r);
+  for (const [ch, m] of [['L', L], ['T', T], ['O', O], ['X', X]]) {
+    const read = ST.recognize.classify(m, w, h);
+    assert.ok(top(read, 3).includes(ch), `${ch} reads as ${top(read, 3).join('/')}`);
+    assert.ok(read.letterness > 0.5, `${ch} reads as one letter (${read.letterness.toFixed(2)})`);
+  }
+});
+
+test('letters.find: a T fused with an O comes apart into the two letters', () => {
+  const w = 320, h = 220, r = 10;
+  // the T's bar runs into the O's side
+  const m = draw(w, h, [[20, 30, 190, 30], [90, 30, 90, 190]], r, [[230, 110, 60, 85]]);
+  const found = ST.letters.find(m, w, h, { center: { x: 90, y: 120 } });
+  assert.ok(found && found.letters.length >= 1, 'letters found');
+  const first = found.letters[0];
+  const mask = ST.letters.render(found, m, w, h, first);
+  const bb = R.maskBounds(mask, w, h);
+  // the bar ran on into the O's side: it may keep that end, not the O
+  assert.ok(bb.x1 < 215, `the letter under the middle stops at the O (right edge ${bb.x1})`);
+  assert.ok(top(first.read, 3).includes('T'), `it reads as a T (${top(first.read, 3).join('/')})`);
+  // with a click on the O, the O
+  const onO = ST.letters.find(m, w, h, { center: { x: 285, y: 110 }, must: { x: 289, y: 110 } });
+  const oMask = ST.letters.render(onO, m, w, h, onO.letters[0]);
+  const ob = R.maskBounds(oMask, w, h);
+  assert.ok(ob.x0 > 150 && ob.x1 > 280, `a click on the O gives the O (${ob.x0}–${ob.x1})`);
+});
+
+test('letters.lean: a leaning stem stands up; symmetric legs and rounds say nothing', () => {
+  const w = 200, h = 240, r = 9;
+  const lean = (deg) => {
+    const a = (deg * Math.PI) / 180, L = 180;
+    const bx = 70, by = 210, tx = bx + Math.sin(a) * L, ty = by - Math.cos(a) * L;
+    // a stem with an arm off it (a k-like letter leaning `deg`)
+    const mx = (bx + tx) / 2, my = (by + ty) / 2;
+    return draw(w, h, [[bx, by, tx, ty], [mx, my, mx + 80, my - 50], [mx, my, mx + 80, my + 60]], r);
+  };
+  const k14 = ST.letters.lean(lean(14), w, h);
+  assert.ok(Math.abs(k14 - 14) < 3, `a stem leaning 14° reads ${k14}°`);
+  const kBack = ST.letters.lean(lean(-10), w, h);
+  assert.ok(Math.abs(kBack + 10) < 3, `a stem leaning −10° reads ${kBack}°`);
+  const A = draw(w, h, [[100, 20, 40, 220], [100, 20, 160, 220], [65, 140, 135, 140]], r);
+  assert.strictEqual(ST.letters.lean(A, w, h), 0, 'an A stands as it is');
+  const O = draw(w, h, [], r, [[100, 120, 70, 95]]);
+  assert.strictEqual(ST.letters.lean(O, w, h), 0, 'an O stands as it is');
+});
+
+test('trace.rotatePaths: contours turn about a point, area kept', () => {
+  const sq = [{ cubics: [[{ x: 0, y: 0 }, { x: 3, y: 0 }, { x: 7, y: 0 }, { x: 10, y: 0 }], [{ x: 10, y: 0 }, { x: 10, y: 3 }, { x: 10, y: 7 }, { x: 10, y: 10 }],
+    [{ x: 10, y: 10 }, { x: 7, y: 10 }, { x: 3, y: 10 }, { x: 0, y: 10 }], [{ x: 0, y: 10 }, { x: 0, y: 7 }, { x: 0, y: 3 }, { x: 0, y: 0 }]], area: 100 }];
+  const rot = ST.trace.rotatePaths(sq, 90, 5, 5);
+  const p = rot[0].cubics[0][0];
+  assert.ok(Math.abs(p.x - 10) < 1e-9 && Math.abs(p.y - 0) < 1e-9, `(0,0) turns to (10,0) clockwise (${p.x.toFixed(3)}, ${p.y.toFixed(3)})`);
+  assert.strictEqual(rot[0].area, 100);
+  assert.strictEqual(ST.trace.rotatePaths(sq, 0, 5, 5), sq, 'no turn, same contours');
+});
+
+test('pruneThin: a worn run of necks between two strokes holds; a drip goes', () => {
+  const w = 200, h = 80;
+  const m = new Uint8Array(w * h);
+  const box = (x0, y0, x1, y1) => { for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) m[y * w + x] = 1; };
+  box(10, 20, 70, 60);   // a stroke
+  box(130, 20, 190, 60); // another
+  // between them a worn stretch: thin necks with small crumbs of paint between
+  box(70, 37, 85, 43); box(85, 32, 95, 48); box(95, 37, 105, 43); box(105, 32, 115, 48); box(115, 37, 130, 43);
+  // a drip hanging off the first stroke
+  box(30, 60, 34, 78);
+  const out = R.pruneThin(m, w, h, 6);
+  const comps = R.components(out, w, h).sizes.filter((s, i) => i > 0 && s > 0).length;
+  assert.strictEqual(comps, 1, 'the worn stretch still joins the two strokes');
+  assert.strictEqual(out[70 * w + 32], 0, 'the drip is gone');
+  // a strand thinner than bridgeMin joins nothing
+  const thin = new Uint8Array(w * h);
+  for (let y = 20; y < 60; y++) for (let x = 10; x < 70; x++) thin[y * w + x] = 1;
+  for (let y = 20; y < 60; y++) for (let x = 130; x < 190; x++) thin[y * w + x] = 1;
+  for (let y = 39; y < 41; y++) for (let x = 70; x < 130; x++) thin[y * w + x] = 1;
+  const cutStrand = R.pruneThin(thin, w, h, 6, null, { bridgeMin: 3 });
+  assert.strictEqual(cutStrand[40 * w + 100], 0, 'a hair-thin strand is not a stroke');
+});
+
+test('cutMask: a cut takes only from the far side of its line', () => {
+  const w = 60, h = 40;
+  const excl = ST.extract.cutMask(w, h, [{ x0: 30, y0: 0, x1: 30, y1: 39, width: 12 }], { x: 10, y: 20 });
+  assert.strictEqual(excl[20 * w + 26], 0, 'the letter keeps its side up to the line');
+  assert.strictEqual(excl[20 * w + 30], 1, 'the line itself is cut');
+  assert.strictEqual(excl[20 * w + 35], 1, 'the far side loses a band');
+  const both = ST.extract.cutMask(w, h, [{ x0: 30, y0: 0, x1: 30, y1: 39, width: 12 }]);
+  assert.strictEqual(both[20 * w + 26], 1, 'without a letter to keep, both sides go');
+});
+
+test('trace: a slanted stroke end is not pulled out into a spike', () => {
+  const w = 220, h = 160;
+  // a fat stroke cut off at a slant: its end has an acute outside corner
+  const m = new Uint8Array(w * h);
+  for (let y = 40; y < 110; y++) for (let x = 10; x < 200; x++) if (x < 140 + (y - 40) * 0.8) m[y * w + x] = 1;
+  const paths = ST.trace.vectorize(m, w, h, { autoScale: true });
+  const bb = ST.trace.boundsOf(paths);
+  assert.ok(bb.x1 <= 197 + 3, `the trace stays within the paint (right edge ${bb.x1.toFixed(1)} of 196)`);
+});
+
+test('second paint: a halo hugging the letters is told apart from a shape of its own, which never takes the first paint in', () => {
+  const A = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'auto.js']);
+  const W = 240, H = 240;
+  const L = [[60, 40, 60, 200], [60, 200, 130, 200]]; // a red marker L
+  const photo = (extra) => {
+    const data = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const d = Math.min(...L.map((s) => segDist(x, y, ...s)));
+        let c = [222, 214, 198];
+        if (extra === 'halo' && d <= 24) c = [240, 170, 175]; // its pink bleed
+        if (extra === 'pipe' && segDist(x, y, 200, 30, 200, 210) <= 8) c = [120, 120, 125]; // a gray bar beside it
+        if (d <= 8) c = [185, 30, 45];
+        const n = ((x * 7 + y * 13) % 9) - 4, p = (y * W + x) * 4;
+        data[p] = c[0] + n; data[p + 1] = c[1] + n; data[p + 2] = c[2] + n; data[p + 3] = 255;
+      }
+    }
+    const pm = A.auto._paintMask(data, W, H);
+    return { pm, second: A.auto._secondPaint(data, W, H, pm) };
+  };
+  const halo = photo('halo');
+  assert.ok(halo.second && halo.second.hug >= 0.85, `the halo hugs the L (${halo.second && halo.second.hug.toFixed(2)})`);
+  const pipe = photo('pipe');
+  assert.ok(pipe.second && pipe.second.hug < 0.3, `the bar stands on its own (${pipe.second && pipe.second.hug.toFixed(2)})`);
+  let shared = 0;
+  for (let i = 0; i < W * H; i++) if (pipe.second.pm.raw[i] && pipe.pm.raw[i]) shared++;
+  assert.strictEqual(shared, 0, 'the red L is not read again as part of the gray paint');
+});
+
+test('sync.dedupe: the same photo shared twice is one entry that knows its copies', () => {
+  const S = loadST(['util.js', 'sync.js']);
+  const photos = [
+    { id: 'a1', name: 'IMG_1.HEIC', size: '100' },
+    { id: 'b1', name: 'IMG_2.HEIC', size: '200' },
+    { id: 'a2', name: 'IMG_1.HEIC', size: '100' },
+    { id: 'c1', name: 'IMG_2.HEIC', size: '201' }, // same name, another photo
+  ];
+  const out = S.sync.dedupe(photos);
+  // (arrays from the app's realm: compared as text)
+  assert.strictEqual(out.map((p) => p.id).join(), 'a1,b1,c1');
+  assert.strictEqual(out[0].copies.join(), 'a1,a2');
+  assert.strictEqual(out[1].copies.join(), 'b1');
+});

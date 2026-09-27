@@ -46,29 +46,75 @@ wall's bricks or the paper's edge), and its resolution is normalized: a
 letter shot from across the street is brought up to the same pixel height as
 one shot up close before smoothing, so both get the same treatment.
 
+**Which letter, and what it says.** A photo of graffiti is rarely one clean
+letter: the letter you shot touches its neighbors, a sticker, a sign, drips
+and flakes of paint. Every shape found is read by a small neural network
+that runs in the browser (`js/recognize.js`, weights in
+`js/letters-model.js`): it was trained on ~800,000 handwritten characters and
+glyphs from ~700 fonts (hand-lettering, marker and display faces among
+them), all distorted to look like extracted graffiti — stroke weight, slant,
+wobble, drips, ragged edges, specks — and on "junk": two or three letters
+fused, a letter with a neighbor's fragment or a cut-off neighbor on it,
+debris, scribbles, blobs, stickers. So it says both which character a shape
+is (A–Z, a–z, 0–9, `! ? # @ & $ % * + = / \ < > ( ) [ ]`) and whether it is
+one character at all. The letter finder (`js/letters.js`) then takes each
+shape apart stroke by stroke (skeleton pieces that stop wherever they meet
+another) and grows groupings of them, keeping the ones that read most
+clearly as a single character; a piece that continues one of a letter's
+strokes straight through a crossing, or an arm or flourish that hangs on
+one letter only, stays with that letter. Every letter found is ranked — it
+reads clearly as one character, it is big, it sits near the middle of the
+photo, the frame didn't cut it off — and the best comes first: in a photo
+of "ck" the **k** comes up alone, the c, the stickers and the paint flakes
+left behind, with **k** already typed in the character box and the next
+best readings (**h**, **K**) one click away. A word gives one shape per
+letter ("Try another shape"); the whole fused shape stays on offer behind
+them. When nothing in the paint that stands out most reads clearly as a
+letter (a sign, a sticker or a strip outshouting the tag), or a second
+color covers a good part of the wall too, the wall's next paint color is
+read as well, apart from the first — unless it only hugs the first paint
+(a bleed halo, an outline, a 3D shadow: those belong to the same letters).
+
+**Upright.** A leaning letter is stood up by its stems — a stroke followed
+from end to end through its crossings, tall and near upright (a k's stem
+counts even where it bends at the joint of its arm and leg). Stems that
+disagree (an A's legs) or none at all (an O, an S) leave the letter as it
+is. The glyph is built from the upright shape; the **Rotate** slider in the
+Shape panel adjusts it, and a rotation set by hand is kept for the rest of
+that photo.
+
 On the stage the detected shape is boxed and its trace drawn over the paint;
-the clean silhouette and the letterform fitted into the em sit beside it. A
-**Detail** knob re-reads the photo (low heals gaps and smooths hard, high
-keeps every nuance). Type the character, **Add** — the next photo comes up.
-A photo leaves the queue only when its letterform was added or skipped, and
-the queue waits across tabs and reloads of Drive photos.
+the clean silhouette and the letterform fitted into the em sit beside it,
+upright. A **Detail** knob re-reads the photo (low heals gaps and smooths
+hard, high keeps every nuance). Check the character (or type another),
+**Add** — the next photo comes up. A photo leaves the queue only when its
+letterform was added or skipped, and the queue waits across tabs and
+reloads of Drive photos. The same photo shared into the inbox twice (same
+name, same size) is offered once.
 
 **Click the letter you see.** If the detected shape isn't the one you want,
 click the letter in the photo: the click snaps to the densest paint nearby
 (a click in the halo or just off a thin stroke still seeds from the stroke),
 the paint color is sampled and refined, and the connected stroke region is
 grown at the tolerance whose edge is sharpest. Fused with a neighbor of the
-same paint (touching it, crossing it, running into it)? **Type the
-character**: the shape is trimmed to it by itself when the trim matches the
-character clearly better than the whole did (⌘Z brings the whole back). Two
-readings compete: the shape grown stroke by stroke from the one you clicked
-(strokes rejoined through junctions by good continuation, so a bar that
-crosses a neighbor's O stays one bar and the O stays one ring), and a
-template search. Or **Option-click** the neighbor: the stroke under the
+same paint (touching it, crossing it, running into it), the letter finder
+hands back the letter under the click alone — offered first when the whole
+shape reads as several letters, the whole one step behind. Still fused?
+**Type the character**: the shape is trimmed to it by itself when the trim matches the
+character clearly better than the whole did (⌘Z brings the whole back).
+Three readings compete, judged by the recognizer: the letter finder's
+strokes grouped as that character, the shape grown stroke by stroke from
+the one you clicked (strokes rejoined through junctions by good
+continuation, so a bar that crosses a neighbor's O stays one bar and the O
+stays one ring), and a template search. When they read about as well,
+whole strokes win — they end the way the paint does, where a template's
+box can slice a stroke on a slant and leave a point. Or **Option-click** the neighbor: the stroke under the
 click goes, with whatever hangs on the letter only through it (a fused
 neighbor, a drip, a stray blob), and the faces where it came off are healed
 and capped. Or drag a short cut across the join and the region regrows
-without it — or press **Isolate** to force the trim: a stroke-weight-agnostic template search (two-way
+without it: the cut takes only from the far side of its line, so the letter
+keeps every pixel up to the line — a cut drawn along or into the letter's
+own stroke leaves no notch in it — or press **Isolate** to force the trim: a stroke-weight-agnostic template search (two-way
 chamfer match against system-font renders, scored on the ink connected to
 your click) finds where that character sits inside the fused shape. The
 shape is then read as strokes — skeletonized, cut into pieces at junctions
@@ -87,9 +133,15 @@ where the stroke has most of its width back, the taper beyond is dropped,
 and the stroke ends there with a disc of that width. Anything *wider* than
 the stroke near its end (an arrowhead) is drawn that way and kept. Where a
 cut sliced a stroke flat, the sliced face is capped the same way. The
-tracer then measures its corners and smoothing against the stroke width,
-so a round cap only half a stroke across is fitted as a curve, never
-sharpened into a corner.
+clean-up that shaves fibers, burrs and drips never takes what holds the
+letter together: a thin neck where an arm meets its stem, or a worn,
+speckled stretch of a curl — even one thin in several places in a row —
+stays (a hair-thin strand of wall texture joins nothing). The tracer then
+measures its corners and smoothing against the stroke width, so a round cap
+only half a stroke across is fitted as a curve, never sharpened into a
+corner; only inside corners, where two strokes meet, are put back on their
+point — an outside corner is a stroke's end or the rim of a bend, and
+extending its edges would grow a spike the wall never had.
 
 **Seeing past what hides the letter.** A stroke that stops at bare wall has
 ended: the pen lifted there. A stroke that stops at something else — a
@@ -191,6 +243,8 @@ the FontFace API in a few milliseconds.
   edges.
 - **Avoid hard shadows and glare across the letter.** A shadow reads as a
   different color and gets treated as something hiding the stroke.
+- **Center the letter you want.** The letter nearest the middle of the
+  frame, whole and big, is offered first; its neighbors come after it.
 - **Sync as yourself.** Use the sign-in setup in [SETUP-SYNC.md](SETUP-SYNC.md)
   (an OAuth refresh token) rather than a service account, unless both
   folders live in a Shared Drive — otherwise Google refuses the writes.
@@ -199,7 +253,14 @@ The extraction is measured against synthetic walls with known ground truth
 (`node tools/bench/run.mjs <tag>`: a drainpipe, a crack, stickers, an
 overpainted letter, frame cutoffs, drips, a chrome throw-up, silver on
 white, sharp valleys, fused same-color letters, fading marker ends), writing
-an overlay per scene to `tools/bench/out/`.
+an overlay per scene to `tools/bench/out/`, and against the photos in the
+Drive inbox, each labeled with the character it shows.
+
+The recognizer is rebuilt with `tools/recognizer/` (Python, PyTorch on the
+CPU): `getfonts.py` and `fontcheck.py` fetch the fonts and check what each
+covers, `gen.py` renders the distorted training set (EMNIST by-class from
+Hugging Face + the fonts + junk), `train.py` trains the network and writes
+`js/letters-model.js` (int8 weights, ~380 KB).
 
 ## Cloud sync (Google Drive + Vercel)
 
@@ -245,6 +306,7 @@ tools/
   get_refresh_token.mjs   one-time Google sign-in for the site
   validate_font.py        fontTools round-trip used by the tests
   bench/                  extraction bench: synthetic walls with ground truth
+  recognizer/             training data + training for the letter recognizer
 js/
   geometry.js    vectors, RDP, point-in-poly, homography, Bézier math
   fitcurves.js   Schneider least-squares cubic fitting
@@ -254,7 +316,10 @@ js/
   fitting.js     char classes, overshoot, auto-spacing, variant sets,
                  ligature keys, weight targeting
   ttf.js         dependency-free TrueType compiler (+ GSUB ligatures)
-  classify.js    template character classifier (local, human-confirmed)
+  classify.js    template character matching (Isolate, trim on typing)
+  recognize.js   the letter recognizer: a small conv net, run in plain JS
+  letters-model.js  its trained weights (generated by tools/recognizer)
+  letters.js     letters in a fused shape, stroke by stroke; upright lean
   auto.js        deskew + letter detection for the automated lane
   worker.js      runs the automated lane off the page's thread
   extract.js     click-to-trace, clean-up, stroke graph, stroke chains
@@ -275,17 +340,21 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 63 unit tests: geometry, tracing, fitting, morphology,
+npm test        # 73 unit tests: geometry, tracing, fitting, morphology,
                 # deskew, seeded extraction, stroke-graph isolation,
                 # occlusion completion (hidden ends, joins across occluders
                 # and past the frame, bitten strokes, outlines), stroke
-                # chains splitting fused letters,
+                # chains splitting fused letters, the recognizer (input
+                # grid, clean letters), the letter finder, lean, one-sided
+                # cuts, necks that hold, no spikes at stroke ends, a halo
+                # vs. a second paint of its own, inbox de-duplication,
                 # classifier scoring, ligature keys + GSUB, weight targeting,
                 # TTF byte format, and the api routes (JWT signing verified
                 # against a real keypair, Drive calls stubbed)
 npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
-                # Isolate, trim on typing + ⌘Z, Option-click removal, a letter behind a pipe, one
+                # Isolate, a click that hands back the letter alone, trim
+                # on typing + ⌘Z, Option-click removal, a letter behind a pipe, one
                 # cut off by the frame, a throw-up's outline,
                 # Detail, variant cycling, ligature shaping, weight
                 # slider, source popup, kerning, exports, TTF download

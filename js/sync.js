@@ -180,14 +180,32 @@
   sync.schedulePush = schedulePush;
 
   // ---------- inbox ----------
+  // The same photo uploaded twice (same name, same size) is one photo: one
+  // entry stands for all its copies, and it counts as reviewed once any
+  // copy was.
+  function dedupe(photos) {
+    const byKey = new Map();
+    const out = [];
+    for (const p of photos || []) {
+      const key = (p.name || '') + '|' + (p.size || '');
+      const first = byKey.get(key);
+      if (first) { first.copies.push(p.id); continue; }
+      const one = Object.assign({}, p, { copies: [p.id] });
+      byKey.set(key, one);
+      out.push(one);
+    }
+    return out;
+  }
+  sync.dedupe = dedupe;
+
   sync.checkInbox = async function (manual, rescanAll) {
     if (!sync.unlocked) return;
     try {
       const res = await sync.api('GET', 'api/inbox');
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      const { photos } = await res.json();
+      const photos = dedupe((await res.json()).photos);
       const processed = new Set(ST.store.state.processedPhotos);
-      const fresh = rescanAll ? photos : photos.filter((p) => !processed.has(p.id));
+      const fresh = rescanAll ? photos : photos.filter((p) => !p.copies.some((id) => processed.has(id)));
       if (!fresh.length) {
         if (manual) ST.toast('Drive inbox is clear — nothing new to extract.');
         return;
@@ -218,7 +236,7 @@
     if (!sync.unlocked) return [];
     const res = await sync.api('GET', 'api/inbox');
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    return (await res.json()).photos || [];
+    return dedupe((await res.json()).photos);
   };
 
   const thumbCache = new Map(); // photo id → Promise<object URL>

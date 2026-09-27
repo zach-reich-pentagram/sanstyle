@@ -54,6 +54,10 @@
           <span>Detail:</span>
           <input type="range" id="reviewDetail" min="1" max="9" value="5" step="1" disabled>
         </label>
+        <label class="slider-row" title="Stand the letter upright. A leaning letter is straightened by its stems automatically; drag to adjust.">
+          <span>Rotate: <b id="reviewRotateVal">0°</b></span>
+          <input type="range" id="reviewRotate" min="-30" max="30" value="0" step="1" disabled>
+        </label>
         <div class="btn-row">
           <button class="pill sm" id="reviewAlt" disabled>Try another shape</button>
           <button class="pill sm" id="reviewIsolate" disabled title="Trim the shape to the typed character">Isolate</button>
@@ -64,7 +68,7 @@
     <div class="step locked" id="step-tag">
       <div class="step-head"><span class="step-num">3</span> Tag &amp; add</div>
       <div class="step-body">
-        <p>Type the character on the right — two letters make a ligature. Enter adds it and brings up the next photo.</p>
+        <p>The character it reads as is filled in on the right, with the next best guesses beside it — check it, or type another (two letters make a ligature). Enter adds it and brings up the next photo.</p>
         <div class="btn-row">
           <button class="pill sm" id="reviewSkip" disabled>Skip this photo</button>
         </div>
@@ -88,6 +92,7 @@
     <div class="panel-label">Fitted</div>
     <canvas id="previewCanvas" width="300" height="300"></canvas>
     <div class="fit-info" id="fitInfo"></div>
+    <div class="guess-row" id="guessRow"></div>
     <div class="tag-row">
       <input id="reviewChar" class="char-input" placeholder="A" autocomplete="off" spellcheck="false" maxlength="4" aria-label="Which character is this letterform? Two or more letters make a ligature.">
       <button id="reviewAccept" class="pill primary" disabled>Add to typeface</button>
@@ -299,6 +304,9 @@
 <script src="js/classify.js"></script>
 <script src="js/extract.js"></script>
 <script src="js/complete.js"></script>
+<script src="js/letters-model.js"></script>
+<script src="js/recognize.js"></script>
+<script src="js/letters.js"></script>
 <script src="js/heic.js"></script>
 <script src="js/store.js"></script>
 <script src="js/demo.js"></script>

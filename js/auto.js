@@ -196,17 +196,26 @@
       if (bw * bh > imgArea * 0.96) return false;              // the whole wall
       if (c.area / (bw * bh) < 0.02) return false;             // pure wisp
       const touchL = c.x0 <= fr.x0 + 1, touchR = c.x1 >= fr.x1 - 1, touchT = c.y0 <= fr.y0 + 1, touchB = c.y1 >= fr.y1 - 1;
-      if ((touchL + touchR + touchT + touchB) >= 3) return false; // frame-edge junk
+      const touches = touchL + touchR + touchT + touchB;
+      if (touches >= 4) return false; // spans the frame: the wall itself, a band across it
+      // three edges: frame-edge junk (a pole, a doorframe) — or a letter
+      // photographed close; the recognizer can tell them apart, so with it
+      // they stay (ranked by how letter-like they read)
+      if (touches === 3 && !(ST.recognize && ST.recognize.ready())) return false;
       return true;
     });
     kept.sort((a, b) => b.area - a.area);
     kept = kept.slice(0, 10);
 
     // merge detached satellites (i-dots, split strokes) into their main body
+    // — a satellite is small beside its host: two letter-sized shapes one
+    // above the other (a sign's strip over the tag, a letter over another)
+    // stay two shapes
     const groups = [];
     for (const c of kept) {
       let host = null;
       for (const gr of groups) {
+        if (c.area > 0.35 * gr.area) continue;
         const ovl = Math.min(c.x1, gr.x1) - Math.max(c.x0, gr.x0);
         const minW = Math.min(c.x1 - c.x0, gr.x1 - gr.x0) + 1;
         const gap = Math.max(0, Math.max(c.y0, gr.y0) - Math.min(c.y1, gr.y1));
@@ -290,6 +299,12 @@
     // measures every fill against
     return { raw: best.mask, filled: ST.extract.absorbDefects(best.mask, wall, W, H), bg, seed, wall };
   }
+  auto._paintMask = paintMask; // for diagnostics
+  auto._secondPaint = (data, W, H, pm) => {
+    const seed = otherPaint(data, W, H, pm);
+    const pm2 = seed ? paintFrom(data, W, H, seed, pm.bg, pm.wall, ST.raster.dilate(pm.raw, W, H, 2)) : null;
+    return pm2 && { seed, pm: pm2, hug: hugShare(pm2.raw, pm, W, H) };
+  };
 
   /**
    * Run the automatic pipeline on a canvas.
@@ -329,113 +344,26 @@
         angle = 0;
       }
     }
-    const paint = pm ? pm.filled : null, paintRaw = pm ? pm.raw : null;
-
     const W = work.width, H = work.height, area = W * H;
-    // the luminance fallback, prepared only if the color route finds nothing:
-    // pre-blur the field so broken/chalky paint textures threshold cleanly
-    let t = 0, mean = 0, lumaReady = false;
-    const prepLuma = () => {
-      if (lumaReady) return;
-      lumaReady = true;
-      const blurred = ST.raster.blur(gray, W, H, 2);
-      gray = new Uint8Array(W * H);
-      for (let i = 0; i < gray.length; i++) gray[i] = Math.max(0, Math.min(255, Math.round(blurred[i])));
-      t = ST.raster.otsu(gray, null);
-      for (let i = 0; i < gray.length; i++) mean += gray[i];
-      mean /= gray.length;
-    };
-
-    const tryPolarity = (invert) => {
-      prepLuma();
-      let mask = ST.raster.maskFromLuma(gray, null, t, invert);
-      mask = ST.raster.open(mask, W, H, 1);
-      const det = detectCandidates(mask, W, H, area);
-      return { mask, det, n: det.groups ? det.groups.length : 0 };
-    };
+    const env = { img, W, H, area, work, o };
 
     // paint vs. background by color contrast first; luminance polarity
     // guesses only as the fallback when nothing contrasts with the border
-    let first = null, cls = null;
-    if (paint) {
-      // gap jumping (see extract.seeded): streaky strokes read as one
-      const sm = o.smoothing != null ? o.smoothing : 4;
-      const sw = ST.raster.strokeWidth(paint, W, H);
-      const g = Math.round(Math.min(sw * 0.45, Math.max(W, H) * 0.02) * (sm / 4));
-      let m = ST.raster.open(g >= 2 ? ST.raster.close(paint, W, H, g) : paint, W, H, 1);
-      // Occlusion: strokes carried on under what hides them — a pipe, a
-      // crack, another color, the frame edge — so a letter split by a
-      // drainpipe is one letter again, and one cut off by the photo's edge
-      // is finished past it (see complete.js). The mask gains a margin
-      // round the photo for that.
-      let P = 0, MW = W, MH = H, tubes = null;
-      if (ST.complete && !o.noComplete) {
-        cls = ST.complete.classify(img.data, W, H, { bg: pm.bg, seed: pm.seed, paint: pm.raw, wall: pm.wall, sw });
-        if (work._inPhoto) for (let i = 0; i < cls.length; i++) if (!work._inPhoto[i]) cls[i] = ST.complete.FRAME;
-        const done = ST.complete.complete(m, W, H, {
-          at: ST.complete.sampler(cls, W, H),
-          letterWidth: sw,
-          minArea: Math.round(Math.max(420, area * 0.0018) / 3),
-        });
-        m = done.mask; tubes = done.tubes; P = done.P; MW = done.W2; MH = done.H2;
-      }
-      const det = detectCandidates(m, MW, MH, area, { x0: P, y0: P, x1: P + W - 1, y1: P + H - 1 });
-      if (det.groups && det.groups.length) first = { mask: m, det, n: det.groups.length, P, MW, MH, tubes, sw };
-    }
-    if (!first) { prepLuma(); first = tryPolarity(mean <= 128); }
-    if (!first.n) {
-      const second = tryPolarity(mean > 128);
-      if (second.n) first = second;
-    }
-    const { mask, det } = first;
-    const P = first.P || 0, MW = first.MW || W, MH = first.MH || H, tubes = first.tubes || null;
-    const candidates = [];
-    if (det.groups) {
-      const pad = 10 + Math.round(0.25 * (first.sw || 0));
-      for (const grp of det.groups) {
-        // in the (padded) mask's coordinates; the crop is the photo's
-        const cx0 = Math.max(0, grp.x0 - pad), cy0 = Math.max(0, grp.y0 - pad);
-        const cx1 = Math.min(MW, grp.x1 + 1 + pad), cy1 = Math.min(MH, grp.y1 + 1 + pad);
-        const cw = cx1 - cx0, ch = cy1 - cy0;
-        const crop = { x: cx0 - P, y: cy0 - P, w: cw, h: ch };
-        let sub = new Uint8Array(cw * ch);
-        const want = new Set(grp.labels);
-        const tubeSub = tubes ? new Uint8Array(cw * ch) : null;
-        for (let y = 0; y < ch; y++) {
-          for (let x = 0; x < cw; x++) {
-            const gi = (y + cy0) * MW + (x + cx0);
-            if (mask[gi] && want.has(det.labels[gi])) {
-              sub[y * cw + x] = 1;
-              if (tubeSub && tubes[gi]) tubeSub[y * cw + x] = 1;
-            }
-          }
-        }
-        const rawSub = paintRaw ? ST.extract.cropAny(paintRaw, W, H, crop, 0) : null;
-        if (rawSub) for (let i = 0; i < rawSub.length; i++) if (!sub[i]) rawSub[i] = 0;
-        // the gap-jump closing's and the defect fill's bridges and pocks
-        // stay; their webs over inside corners go (what completion drew is
-        // set aside meanwhile)
-        if (rawSub && ST.extract) {
-          if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i] && !rawSub[i]) sub[i] = 0;
-          sub = ST.extract.keepBridges(rawSub, sub, cw, ch);
-          if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i]) sub[i] = 1;
-        }
-        let counters = null;
-        if (cls) {
-          // a throw-up's outline is the letter's; so is a hole showing no wall
-          const ol = ST.complete.absorbOutline(sub, cw, ch, cls, W, H, crop.x, crop.y);
-          sub = ol.mask; counters = ol.counters;
-          sub = ST.complete.fillHiddenHoles(sub, cw, ch, ST.complete.sampler(cls, W, H), crop.x, crop.y);
-        }
-        // same stroke-width-capped clean-up as click-to-trace and the studio
-        const clean = ST.extract
-          ? ST.extract.cleanMask(sub, cw, ch, o.smoothing != null ? o.smoothing : 4)
-          : ST.raster.fillHoles(ST.raster.close(sub, cw, ch, 1), cw, ch, o.fillHoles);
-        if (counters) for (let i = 0; i < clean.length; i++) if (counters[i]) clean[i] = 0;
-        const paths = ST.trace.vectorize(clean, cw, ch, {});
-        if (!paths.length) continue;
-        candidates.push({ crop, mask: clean, w: cw, h: ch, paths });
-      }
+    let candidates = pm ? shapesOf(pm, env) : [];
+    if (!candidates.length) {
+      // pre-blur the field so broken/chalky paint textures threshold cleanly
+      const blurred = ST.raster.blur(gray, W, H, 2);
+      const g8 = new Uint8Array(W * H);
+      let mean = 0;
+      for (let i = 0; i < g8.length; i++) { g8[i] = Math.max(0, Math.min(255, Math.round(blurred[i]))); mean += g8[i]; }
+      mean /= g8.length;
+      const t = ST.raster.otsu(g8, null);
+      const tryPolarity = (invert) => {
+        const mask = ST.raster.open(ST.raster.maskFromLuma(g8, null, t, invert), W, H, 1);
+        return build({ mask, det: detectCandidates(mask, W, H, area) }, env);
+      };
+      candidates = tryPolarity(mean <= 128);
+      if (!candidates.length) candidates = tryPolarity(mean > 128);
     }
     // Standardize detail: a letter photographed from far away is small in
     // pixels, and every smoothing radius, cap and tolerance scales with
@@ -457,6 +385,261 @@
         if (again.candidates.length) return again;
       }
     }
+    if (!o.noLetters) {
+      let ranked = findLetters(candidates, W, H);
+      // Nothing reads clearly as a letter in the paint that stands out most
+      // (a sticker, a sign, a strip outshouting the tag)? Read the wall's
+      // next paint too, and rank everything together.
+      if (pm && !o.noSecondPaint) {
+        const seed2 = otherPaint(img.data, W, H, pm);
+        let pm2 = seed2 ? paintFrom(img.data, W, H, seed2, pm.bg, pm.wall, ST.raster.dilate(pm.raw, W, H, 2)) : null;
+        // a paint that hugs the first — its bleed halo, outline or shadow —
+        // belongs to the same letters, and read alone it is only their ghost
+        if (pm2 && hugShare(pm2.raw, pm, W, H) >= HUG) pm2 = null;
+        // read when the first paint gave no clear, central letter — or the
+        // second covers a good part of what the first does (a big letter in
+        // a second color is worth a look even beside a clear small one)
+        const weak = !(ranked[0] && ranked[0].score >= 0.5);
+        const sizable = pm2 && ST.raster.count(pm2.raw) >= 0.3 * ST.raster.count(pm.raw);
+        const more = pm2 && (weak || sizable) ? shapesOf(pm2, env) : [];
+        if (more.length) ranked = findLetters(candidates.concat(more), W, H);
+      }
+      candidates = ranked;
+      for (const c of candidates) delete c._found; // stroke models are big: not kept with the queue
+    }
     return { canvas: work, angle, candidates };
   };
+
+  // The shapes one paint makes: gap-jumped, carried on under what hides it,
+  // grouped, cleaned and traced.
+  function shapesOf(pm, env) {
+    const { img, W, H, area, work, o } = env;
+    const paint = pm.filled;
+    // gap jumping (see extract.seeded): streaky strokes read as one
+    const sm = o.smoothing != null ? o.smoothing : 4;
+    const sw = ST.raster.strokeWidth(paint, W, H);
+    const g = Math.round(Math.min(sw * 0.45, Math.max(W, H) * 0.02) * (sm / 4));
+    let m = ST.raster.open(g >= 2 ? ST.raster.close(paint, W, H, g) : paint, W, H, 1);
+    // Occlusion: strokes carried on under what hides them — a pipe, a
+    // crack, another color, the frame edge — so a letter split by a
+    // drainpipe is one letter again, and one cut off by the photo's edge
+    // is finished past it (see complete.js). The mask gains a margin
+    // round the photo for that.
+    let P = 0, MW = W, MH = H, tubes = null, cls = null;
+    if (ST.complete && !o.noComplete) {
+      cls = ST.complete.classify(img.data, W, H, { bg: pm.bg, seed: pm.seed, paint: pm.raw, wall: pm.wall, sw });
+      if (work._inPhoto) for (let i = 0; i < cls.length; i++) if (!work._inPhoto[i]) cls[i] = ST.complete.FRAME;
+      const done = ST.complete.complete(m, W, H, {
+        at: ST.complete.sampler(cls, W, H),
+        letterWidth: sw,
+        minArea: Math.round(Math.max(420, area * 0.0018) / 3),
+      });
+      m = done.mask; tubes = done.tubes; P = done.P; MW = done.W2; MH = done.H2;
+    }
+    const det = detectCandidates(m, MW, MH, area, { x0: P, y0: P, x1: P + W - 1, y1: P + H - 1 });
+    if (!det.groups || !det.groups.length) return [];
+    return build({ mask: m, det, P, MW, MH, tubes, sw, paintRaw: pm.raw, cls }, env);
+  }
+
+  // Each group of a mask → a cleaned, traced candidate.
+  function build(first, env) {
+    const { W, H, o } = env;
+    const { mask, det } = first;
+    const P = first.P || 0, MW = first.MW || W, MH = first.MH || H, tubes = first.tubes || null;
+    const paintRaw = first.paintRaw || null, cls = first.cls || null;
+    const candidates = [];
+    if (!det.groups) return candidates;
+    const pad = 10 + Math.round(0.25 * (first.sw || 0));
+    for (const grp of det.groups) {
+      // in the (padded) mask's coordinates; the crop is the photo's
+      const cx0 = Math.max(0, grp.x0 - pad), cy0 = Math.max(0, grp.y0 - pad);
+      const cx1 = Math.min(MW, grp.x1 + 1 + pad), cy1 = Math.min(MH, grp.y1 + 1 + pad);
+      const cw = cx1 - cx0, ch = cy1 - cy0;
+      const crop = { x: cx0 - P, y: cy0 - P, w: cw, h: ch };
+      let sub = new Uint8Array(cw * ch);
+      const want = new Set(grp.labels);
+      const tubeSub = tubes ? new Uint8Array(cw * ch) : null;
+      for (let y = 0; y < ch; y++) {
+        for (let x = 0; x < cw; x++) {
+          const gi = (y + cy0) * MW + (x + cx0);
+          if (mask[gi] && want.has(det.labels[gi])) {
+            sub[y * cw + x] = 1;
+            if (tubeSub && tubes[gi]) tubeSub[y * cw + x] = 1;
+          }
+        }
+      }
+      const dbg = o.debug ? { crop, w: cw, h: ch, grouped: sub.slice() } : null;
+      const rawSub = paintRaw ? ST.extract.cropAny(paintRaw, W, H, crop, 0) : null;
+      if (rawSub) for (let i = 0; i < rawSub.length; i++) if (!sub[i]) rawSub[i] = 0;
+      // the gap-jump closing's and the defect fill's bridges and pocks
+      // stay; their webs over inside corners go (what completion drew is
+      // set aside meanwhile)
+      if (rawSub && ST.extract) {
+        if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i] && !rawSub[i]) sub[i] = 0;
+        sub = ST.extract.keepBridges(rawSub, sub, cw, ch);
+        if (tubeSub) for (let i = 0; i < sub.length; i++) if (tubeSub[i]) sub[i] = 1;
+      }
+      if (dbg) dbg.bridged = sub.slice();
+      let counters = null;
+      if (cls) {
+        // a throw-up's outline is the letter's; so is a hole showing no wall
+        const ol = ST.complete.absorbOutline(sub, cw, ch, cls, W, H, crop.x, crop.y);
+        sub = ol.mask; counters = ol.counters;
+        sub = ST.complete.fillHiddenHoles(sub, cw, ch, ST.complete.sampler(cls, W, H), crop.x, crop.y);
+      }
+      // same stroke-width-capped clean-up as click-to-trace and the studio
+      const clean = ST.extract
+        ? ST.extract.cleanMask(sub, cw, ch, o.smoothing != null ? o.smoothing : 4)
+        : ST.raster.fillHoles(ST.raster.close(sub, cw, ch, 1), cw, ch, o.fillHoles);
+      if (counters) for (let i = 0; i < clean.length; i++) if (counters[i]) clean[i] = 0;
+      if (dbg) { dbg.filled = sub.slice(); dbg.clean = clean; (o.debug.stages || (o.debug.stages = [])).push(dbg); }
+      const paths = ST.trace.vectorize(clean, cw, ch, {});
+      if (!paths.length) continue;
+      candidates.push({ crop, mask: clean, w: cw, h: ch, paths });
+    }
+    return candidates;
+  }
+
+  // The wall's next paint: the most common color that is neither wall nor
+  // the paint already read (a white tag beside a red one, a letter in a
+  // second color). → its color, or null
+  function otherPaint(data, W, H, pm) {
+    const R = ST.raster;
+    const near = R.dilate(pm.raw, W, H, 3); // the first paint and its rim
+    const Q = 12, n = Q * Q * Q;
+    const cnt = new Float64Array(n), sr = new Float64Array(n), sg = new Float64Array(n), sb = new Float64Array(n);
+    for (let i = 0, p = 0; i < near.length; i++, p += 4) {
+      if (pm.wall[i] || near[i]) continue;
+      const r = data[p], g = data[p + 1], b = data[p + 2];
+      const k = ((r * Q) >> 8) * Q * Q + ((g * Q) >> 8) * Q + ((b * Q) >> 8);
+      cnt[k]++; sr[k] += r; sg[k] += g; sb[k] += b;
+    }
+    const minCount = W * H * 0.003;
+    let best = null, bestN = 0;
+    for (let k = 0; k < n; k++) {
+      if (cnt[k] < minCount || cnt[k] <= bestN) continue;
+      const c = { r: sr[k] / cnt[k], g: sg[k] / cnt[k], b: sb[k] / cnt[k] };
+      if (R.colorDist(c.r, c.g, c.b, pm.bg.r, pm.bg.g, pm.bg.b) < 70) continue;
+      if (R.colorDist(c.r, c.g, c.b, pm.seed.r, pm.seed.g, pm.seed.b) < 70) continue;
+      best = c; bestN = cnt[k];
+    }
+    return best;
+  }
+
+  // How much of a second paint lies right along the first (within one and a
+  // half of its stroke widths): ~1 for its halo, outline or 3D shadow, far
+  // less for a letter of its own beside or across it.
+  const HUG = 0.85;
+  function hugShare(second, pm, W, H) {
+    const R = ST.raster;
+    const reach = Math.max(6, 1.5 * R.strokeWidth(pm.filled, W, H));
+    const off = new Uint8Array(W * H);
+    for (let i = 0; i < off.length; i++) off[i] = pm.raw[i] ? 0 : 1;
+    const dist = R.distanceTransform(off, W, H, { borderInk: true }); // → nearest first-paint pixel
+    let n = 0, near = 0;
+    for (let i = 0; i < second.length; i++) if (second[i]) { n++; if (dist[i] <= reach) near++; }
+    return n ? near / n : 0;
+  }
+
+  // A paint mask for a given paint color (see paintMask), leaving out `not`
+  // (the paint already read: a blue letter also stands out from a beige
+  // wall along a gray pipe's color axis, and must not come back fused to it).
+  function paintFrom(data, W, H, seed, bg, wall, not) {
+    const R = ST.raster;
+    const sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
+    if (sep < 60) return null;
+    const field = R.blur(R.axisDistMap(data, W, H, seed, bg), W, H, 2);
+    const cands = [14, 20, 28, 38, 50, 65, 82, 100, 125, 155, 190, 230].filter((t) => t <= Math.max(40, sep * 0.55));
+    const best = R.edgeOptimalThreshold(field, W, H, cands, 0.002, 0.5);
+    if (!best) return null;
+    const raw = best.mask;
+    if (not) for (let i = 0; i < raw.length; i++) if (not[i]) raw[i] = 0;
+    return { raw, filled: ST.extract.absorbDefects(raw, wall, W, H), bg, seed, wall };
+  }
+
+  // ---------- which letter is the photo about ----------
+  // Each shape is split into its letters (letters.js: its strokes grouped
+  // the way the recognizer reads them as single characters), and every
+  // letter found is ranked: one that reads clearly as one character, is
+  // big, sits near the middle of the photo and wasn't cut off by the frame
+  // comes first. A fused word gives each of its letters; the whole shape
+  // stays on offer behind them ("Try another shape").
+  function recrop(mask, cand, pad) {
+    const bb = ST.raster.maskBounds(mask, cand.w, cand.h);
+    if (!bb) return null;
+    const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
+    const x1 = Math.min(cand.w, bb.x1 + 1 + pad), y1 = Math.min(cand.h, bb.y1 + 1 + pad);
+    const w = x1 - x0, h = y1 - y0;
+    const sub = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) sub[y * w + x] = mask[(y + y0) * cand.w + (x + x0)];
+    return { crop: { x: cand.crop.x + x0, y: cand.crop.y + y0, w, h }, mask: sub, w, h };
+  }
+
+  function findLetters(cands, W, H) {
+    if (!cands.length || !ST.letters || !ST.recognize || !ST.recognize.ready()) return cands;
+
+    const diag = Math.hypot(W, H);
+    let maxArea = 1, maxTall = 1;
+    for (const c of cands) {
+      maxArea = Math.max(maxArea, ST.raster.count(c.mask));
+      const bb = ST.raster.maskBounds(c.mask, c.w, c.h);
+      if (bb) maxTall = Math.max(maxTall, bb.w, bb.h);
+    }
+    // one score across every shape in the photo (crop px → photo px)
+    const rank = (read, mask, w, h, crop) => {
+      const bb = ST.raster.maskBounds(mask, w, h);
+      if (!bb || !read || !read.ranked.length) return 0;
+      const clear = ST.letters.clarity(read);
+      // big: ink beside the biggest shape's, and height beside the tallest
+      const tall = Math.max(bb.w, bb.h);
+      const size = Math.pow(ST.raster.count(mask) / maxArea, 0.3) * Math.pow(Math.min(1, tall / maxTall), 0.5);
+      const cx = crop.x + (bb.x0 + bb.x1) / 2, cy = crop.y + (bb.y0 + bb.y1) / 2;
+      const d = Math.hypot(cx - W / 2, cy - H / 2) / diag;
+      const central = Math.exp(-(d * d) / (2 * 0.22 * 0.22));
+      const touches = (crop.x + bb.x0 <= 1) + (crop.y + bb.y0 <= 1) + (crop.x + bb.x1 >= W - 2) + (crop.y + bb.y1 >= H - 2);
+      return clear * size * central * (touches ? 0.75 : 1);
+    };
+    const out = [];
+    // the four biggest shapes are read (a shape read before keeps its reading)
+    const byArea = cands.map((c) => ({ c, n: ST.raster.count(c.mask) })).sort((a, b) => b.n - a.n);
+    byArea.forEach(({ c: cand }, k) => {
+      if (k >= 4) { cand.score = 0; out.push(cand); return; }
+      if (cand._found === undefined) {
+        cand._found = ST.letters.find(cand.mask, cand.w, cand.h, {
+          center: { x: W / 2 - cand.crop.x, y: H / 2 - cand.crop.y },
+          frame: { x0: -cand.crop.x, y0: -cand.crop.y, x1: W - 1 - cand.crop.x, y1: H - 1 - cand.crop.y },
+        });
+      }
+      const found = cand._found;
+      const whole = found ? found.whole : ST.recognize.classify(cand.mask, cand.w, cand.h);
+      const wholeRead = whole && { ranked: whole.ranked || whole.top, junk: whole.junk, letterness: whole.letterness };
+      // split only when the shape reads as several letters (or none), or a
+      // letter inside it reads clearly better than the whole does
+      const proper = found ? found.letters.filter((lt) => lt.set.size < found.sc.n) : [];
+      const split = proper.some((lt) => lt.explained && ST.letters.better(lt.read, wholeRead));
+      if (split) {
+        const pad = 10 + Math.round(0.25 * found.sc.sw);
+        const top = found.letters.length ? found.letters[0].score : 0;
+        for (const lt of found.letters) {
+          if (lt.score < 0.12 * top) continue; // too far behind ever to be offered
+          const sub = recrop(ST.letters.render(found, cand.mask, cand.w, cand.h, lt), cand, pad);
+          if (!sub) continue;
+          const paths = ST.trace.vectorize(sub.mask, sub.w, sub.h, {});
+          if (!paths.length) continue;
+          sub.paths = paths;
+          sub.kind = 'letter';
+          sub.read = lt.read;
+          sub.score = rank(lt.read, sub.mask, sub.w, sub.h, sub.crop);
+          out.push(sub);
+        }
+      }
+      cand.read = wholeRead;
+      cand.score = rank(wholeRead, cand.mask, cand.w, cand.h, cand.crop) * (split ? 0.5 : 1);
+      out.push(cand);
+    });
+    out.sort((a, b) => b.score - a.score);
+    // how far each front runner leans, to stand it up
+    for (const c of out.slice(0, 4)) if (c.lean == null) c.lean = ST.letters.lean(c.mask, c.w, c.h);
+    return out;
+  }
 })(typeof window !== 'undefined' ? window : globalThis);

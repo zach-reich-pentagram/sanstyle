@@ -238,8 +238,12 @@
     return out;
   };
 
-  // Rasterize cut strokes (canvas coords) into an exclusion mask.
-  ex.cutMask = function (w, h, cuts) {
+  // Rasterize cut strokes (canvas coords) into an exclusion mask. With
+  // `keep` (the point on the letter the cut is made for), each cut only
+  // takes from the far side of its line: the letter keeps every pixel up to
+  // the line — a cut drawn along or into the letter's own stroke leaves no
+  // notch — while the neighbor loses a whole band, so nothing re-bridges it.
+  ex.cutMask = function (w, h, cuts, keep) {
     if (!cuts || !cuts.length) return null;
     const excl = new Uint8Array(w * h);
     for (const c of cuts) {
@@ -249,8 +253,16 @@
       const y0 = Math.max(0, Math.floor(Math.min(c.y0, c.y1) - half));
       const y1 = Math.min(h - 1, Math.ceil(Math.max(c.y0, c.y1) + half));
       const a = { x: c.x0, y: c.y0 }, b = { x: c.x1, y: c.y1 };
+      const dx = c.x1 - c.x0, dy = c.y1 - c.y0, len = Math.hypot(dx, dy);
+      // signed distance to the cut's line, positive on the letter's side
+      let side = null;
+      if (keep && len > 1) {
+        const s = Math.sign(dx * (keep.y - c.y0) - dy * (keep.x - c.x0));
+        if (s) side = (x, y) => (s * (dx * (y - c.y0) - dy * (x - c.x0))) / len;
+      }
       for (let y = y0; y <= y1; y++) {
         for (let x = x0; x <= x1; x++) {
+          if (side && side(x, y) > 1.5) continue;
           if (ST.geom.segDist({ x, y }, a, b) <= half) excl[y * w + x] = 1;
         }
       }
@@ -302,9 +314,12 @@
       // closing heals gaps, cracks and notches: the radius follows the knob
       // and the photo's size, up to nearly half a stroke
       const rc = Math.max(0, Math.min(Math.round(sm * 1.6 * scale), Math.floor(sw * 0.45)));
-      // opening shaves fibers and burrs, but never thins the THINNEST
-      // strokes (a chisel marker's thin side is far thinner than the
-      // average stroke): fibers are thin, so a modest disk still removes them
+      // opening shaves fibers, burrs and drips, but never thins the
+      // THINNEST strokes (a chisel marker's thin side is far thinner than
+      // the average stroke): fibers are thin, so a modest disk still
+      // removes them — and nothing it would take may hold the shape
+      // together (a thin neck where an arm meets its stem, a worn stretch
+      // of a curl, is the letter's; a drip hangs free)
       const rt = R.thinRadius(m, w, h);
       const ro = Math.max(0, Math.min(rc, rt > 0 ? Math.floor(rt * 0.7) : rc));
       if (rc > 0) {
@@ -312,7 +327,7 @@
         const closed = R.close(m, w, h, rc);
         m = rc > 2 ? ex.keepBridges(m, closed, w, h) : closed;
       }
-      if (ro > 0) m = R.open(m, w, h, ro);
+      if (ro > 0) m = R.pruneThin(m, w, h, ro, null, { bridgeMin: Math.round(rt * 0.35) });
       if (!(opts && opts.noRound)) {
         m = ex.roundEnds(m, w, h, null);
         m = ex.capEnds(m, w, h);
@@ -336,7 +351,18 @@
     const dt = R.distanceTransform(mask, w, h);
     const rt = R.thinRadius(mask, w, h, dt, region);
     const r = Math.round(rt * 0.7);
-    return r >= 2 ? R.pruneThin(mask, w, h, r, region) : mask;
+    if (r < 2) return mask;
+    // what gets pruned is judged without the pocks in the strokes: the rim
+    // between a glint (or a fleck of bare wall) and the stroke's edge is no
+    // thin stretch of it (the pocks themselves are left for the hole
+    // filling to decide)
+    const sw = R.strokeWidth(mask, w, h);
+    const solid = sw > 0 ? R.fillHoles(mask, w, h, 0.05, Math.pow(0.8 * sw, 2)) : mask;
+    const pruned = R.pruneThin(solid, w, h, r, region);
+    if (solid === mask) return pruned;
+    const out = new Uint8Array(mask.length);
+    for (let i = 0; i < out.length; i++) out[i] = pruned[i] && mask[i] ? 1 : 0;
+    return out;
   };
 
   // Keep only the BRIDGES of a closing. `closed` is `paint` closed by some
@@ -369,6 +395,19 @@
     };
     const X = (p) => p % w, Y = (p) => (p / w) | 0;
     const dtC = R.distanceTransform(closed, w, h);
+    // how much of a box around a pixel is paint: a worn, speckled stretch
+    // of a stroke is mostly paint; wall texture with a few flecks is not
+    const S = new Float64Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let run = 0;
+      for (let x = 0; x < w; x++) { run += paint[y * w + x] ? 1 : 0; S[(y + 1) * (w + 1) + x + 1] = S[y * (w + 1) + x + 1] + run; }
+    }
+    const density = (p, r) => {
+      const x = p % w, y = (p / w) | 0;
+      const x0 = Math.max(0, x - r), y0 = Math.max(0, y - r), x1 = Math.min(w, x + r + 1), y1 = Math.min(h, y + r + 1);
+      const a = (x1 - x0) * (y1 - y0);
+      return a ? (S[y1 * (w + 1) + x1] - S[y0 * (w + 1) + x1] - S[y1 * (w + 1) + x0] + S[y0 * (w + 1) + x0]) / a : 0;
+    };
     for (const s of graph.segments) {
       const px = s.pixels, n = px.length;
       // the stroke's usual half-width: the median of the closed shape's
@@ -381,10 +420,13 @@
       const med = vals.length ? vals[vals.length >> 1] : 0;
       const guard = Math.ceil(2.5 * Math.max(med, 2));
       const joinAt = s.ends.map((e) => e >= 0 && !graph.endpoint[e]);
+      // a bend in one stroke webs over only its own inside corner, right at
+      // the vertex; where strokes meet, the webs spread further along them
+      const guardAt = s.ends.map((e) => (e >= 0 && graph.junction[e] ? guard : Math.ceil(1.0 * Math.max(med, 2))));
       // a short piece from one junction to another is the web's own link
       // between two strokes, not a stroke with a gap in it
       const link = joinAt[0] && joinAt[1] && n < 2.5 * sw;
-      const strict = (k) => link || (joinAt[0] && k < guard) || (joinAt[1] && n - 1 - k < guard);
+      const strict = (k) => link || (joinAt[0] && k < guardAt[0]) || (joinAt[1] && n - 1 - k < guardAt[1]);
       // Where the closed shape has the stroke's usual width, its skeleton IS
       // the stroke's centerline and its disc there is the stroke's own
       // (a slit, a streak gap, a notch are healed at the stroke's width).
@@ -398,7 +440,12 @@
       let i = 0;
       while (i < n) {
         if (reliable(i)) {
-          own(px[i], Math.max(1, strict(i) ? dtP[px[i]] : dtC[px[i]]));
+          // near a join only the paint's own disc — unless the paint there
+          // is a speckled stroke: then the stroke's width (a disc no wider
+          // than the stroke, on its centerline, never reaches a web beside it)
+          let r = strict(i) ? dtP[px[i]] : dtC[px[i]];
+          if (strict(i) && density(px[i], Math.max(2, Math.round(med))) >= 0.6) r = Math.max(r, Math.min(dtC[px[i]], med));
+          own(px[i], Math.max(1, r));
           i++;
           continue;
         }
@@ -853,6 +900,23 @@
   // closing refills the notch (a concavity) without rebuilding the removed
   // stroke (convex); then shave the nub and cap the faces.
   function healCut(result, mask, removed, w, h, sw) {
+    // the work is all around what came off: done in a window round it
+    const bb = R.maskBounds(removed, w, h);
+    if (!bb) return result;
+    const pad = 4 * Math.max(1, Math.ceil(sw / 2)) + 6;
+    const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
+    const x1 = Math.min(w, bb.x1 + 1 + pad), y1 = Math.min(h, bb.y1 + 1 + pad);
+    if ((x1 - x0) * (y1 - y0) < 0.8 * w * h) {
+      const cw = x1 - x0, ch = y1 - y0;
+      const cut = (m) => { const o = new Uint8Array(cw * ch); for (let y = 0; y < ch; y++) o.set(m.subarray((y + y0) * w + x0, (y + y0) * w + x1), y * cw); return o; };
+      const healed = healCutIn(cut(result), cut(mask), cut(removed), cw, ch, sw);
+      const out = new Uint8Array(result);
+      for (let y = 0; y < ch; y++) out.set(healed.subarray(y * cw, (y + 1) * cw), (y + y0) * w + x0);
+      return out;
+    }
+    return healCutIn(result, mask, removed, w, h, sw);
+  }
+  function healCutIn(result, mask, removed, w, h, sw) {
     const r = Math.max(1, Math.ceil(sw / 2));
     const near = R.dilate(removed, w, h, r + 1);
     const closed = R.close(result, w, h, r);
@@ -879,7 +943,20 @@
   // stays one bar). Every ink pixel belongs to a stroke, or to a junction.
   // Returns { n, owner (Int32: chain id ≥ 1, −(cluster+1) at junctions),
   //   armsOf (cluster → chain ids), adj (chain → Set of chains), sw } or null.
-  ex.strokeChains = function (mask, w, h) {
+  // opts.continuation === false: no joining across junctions — every stroke
+  // stops where it meets another (finer pieces, for grouping into letters).
+  const chainCache = new WeakMap(); // a shape that is only read is split once
+  ex.strokeChains = function (mask, w, h, opts) {
+    const continuation = !(opts && opts.continuation === false);
+    let byOpt = chainCache.get(mask);
+    const key = (continuation ? 'c' : 'n') + w + 'x' + h;
+    if (byOpt && byOpt.has(key)) return byOpt.get(key);
+    const res = strokeChainsOf(mask, w, h, continuation);
+    if (!byOpt) { byOpt = new Map(); chainCache.set(mask, byOpt); }
+    byOpt.set(key, res);
+    return res;
+  };
+  function strokeChainsOf(mask, w, h, continuation) {
     const { sw, graph } = cachedGraph(mask, w, h);
     if (!(sw > 2) || !graph) return null;
     const segs = graph.segments;
@@ -952,7 +1029,7 @@
       }
     });
     // good continuation: the arms that run straight on through a junction
-    for (const list of arms.values()) {
+    for (const list of continuation ? arms.values() : []) {
       const pairs = [];
       for (let i = 0; i < list.length; i++) {
         for (let j = i + 1; j < list.length; j++) {
@@ -1006,12 +1083,22 @@
     // kept stays whole where it crosses one taken away
     const dt = R.distanceTransform(mask, w, h);
     const tubes = Array.from({ length: n + 1 }, () => null);
+    const skel = Array.from({ length: n + 1 }, () => []); // each chain's skeleton pixels
     const mark = new Uint8Array(w * h);
     for (let c = 1; c <= n; c++) {
       const idx = [];
       segs.forEach((sg, k) => {
         if (link[k] || chainId[k] !== c) return;
-        for (const p of sg.pixels) {
+        for (const p of sg.pixels) skel[c].push(p);
+        // a disc every few pixels along the skeleton: they overlap so much
+        // that stamping every one only costs time (a fat stroke's discs are
+        // big) — spaced a sixth of the radius apart the tube is the same
+        let lastK = -1e9;
+        const px0 = sg.pixels;
+        for (let k = 0; k < px0.length; k++) {
+          const p = px0[k];
+          if (k !== px0.length - 1 && k - lastK < Math.max(1, dt[p] / 6)) continue;
+          lastK = k;
           const r = dt[p], px = X(p), py = Y(p), rr = (r + 0.5) * (r + 0.5);
           for (let yy = Math.max(0, Math.floor(py - r)); yy <= Math.min(h - 1, Math.ceil(py + r)); yy++) {
             for (let xx = Math.max(0, Math.floor(px - r)); xx <= Math.min(w - 1, Math.ceil(px + r)); xx++) {
@@ -1025,8 +1112,8 @@
       for (const i of idx) mark[i] = 0;
       tubes[c] = Int32Array.from(idx);
     }
-    return { n, owner, armsOf, adj, sw, tubes };
-  };
+    return { n, owner, armsOf, adj, sw, tubes, skel, dt };
+  }
 
   // The shape made of some of the chains (a Set of ids), with the junctions
   // any of them runs into.
@@ -1041,6 +1128,17 @@
     for (const c of set) for (const i of sc.tubes[c]) out[i] = 1;
     return out;
   }
+
+  // The shape made of some of its strokes (a Set of chain ids from
+  // strokeChains), the faces where the rest came off healed and capped.
+  ex.renderStrokes = function (sc, mask, w, h, set) {
+    let out = renderChains(sc, mask, set);
+    const removed = new Uint8Array(mask.length);
+    let n = 0;
+    for (let i = 0; i < mask.length; i++) if (mask[i] && !out[i]) { removed[i] = 1; n++; }
+    if (n) out = healCut(out, mask, removed, w, h, sc.sw);
+    return out;
+  };
 
   /**
    * Take a piece off a shape: the stroke under (px, py) and whatever hangs
@@ -1153,7 +1251,8 @@
     x = Math.round(x); y = Math.round(y);
     if (x < 0 || y < 0 || x >= w || y >= h) return null;
     const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
-    const excl = ex.cutMask(w, h, o.cuts);
+    // the click is on the letter: each cut takes only from its other side
+    const excl = ex.cutMask(w, h, o.cuts, { x, y });
     const bg = ex.backgroundColor(data, w, h);
     if (bg && !o.noSnap) {
       const snap = snapToInk(data, w, h, x, y, Math.max(6, Math.round(Math.max(w, h) * 0.03)), bg);
@@ -1285,7 +1384,25 @@
       const paths = ST.trace.vectorize(mask, crop.w, crop.h, {});
       if (paths.length) candidates.push({ crop, mask, w: crop.w, h: crop.h, paths, kind });
     };
-    let separated = ex.separateTouching(whole, crop.w, crop.h, lx, ly);
+    // The letter under the click without the neighbors fused onto it: its
+    // strokes grouped the way the recognizer reads one character (see
+    // letters.js) — offered first when the whole shape reads as several
+    // letters, or the letter reads clearly better than the whole. Without
+    // a recognizer, a split at a thin neck (a touching neighbor) instead.
+    let separated = null, kind = 'separated', read = null;
+    // (after a cut the shape is what you made it: nothing is regrouped)
+    const reads = ST.letters && ST.recognize && ST.recognize.ready() && !o.noLetters && !(o.cuts && o.cuts.length);
+    if (reads) {
+      const found = ST.letters.find(whole, crop.w, crop.h, { center: { x: lx, y: ly }, must: { x: lx, y: ly } });
+      const lt = found && found.letters[0];
+      if (lt && lt.set.size < found.sc.n && lt.explained && ST.letters.better(lt.read, { ranked: found.whole.top, letterness: found.whole.letterness })) {
+        separated = ST.letters.render(found, whole, crop.w, crop.h, lt);
+        kind = 'letter';
+        read = lt.read;
+      }
+    } else if (!(o.cuts && o.cuts.length)) {
+      separated = ex.separateTouching(whole, crop.w, crop.h, lx, ly);
+    }
     // what completion joined is the letter's by evidence: a split that
     // drops part of it is not a neighbor coming off
     if (separated && tubeSub) {
@@ -1293,7 +1410,19 @@
       for (let i = 0; i < tubeSub.length; i++) if (tubeSub[i] && whole[i]) { t++; if (separated[i]) kept++; }
       if (t && kept < 0.9 * t) separated = null;
     }
-    if (separated) push(separated, 'separated');
+    if (separated && kind === 'letter') {
+      // boxed to the letter itself
+      const bb = R.maskBounds(separated, crop.w, crop.h);
+      if (bb) {
+        const pad = 12;
+        const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
+        const x1 = Math.min(crop.w, bb.x1 + 1 + pad), y1 = Math.min(crop.h, bb.y1 + 1 + pad);
+        const lw = x1 - x0, lh = y1 - y0, sub = new Uint8Array(lw * lh);
+        for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) sub[y * lw + x] = separated[(y + y0) * crop.w + (x + x0)];
+        const paths = ST.trace.vectorize(sub, lw, lh, {});
+        if (paths.length) candidates.push({ crop: { x: crop.x + x0, y: crop.y + y0, w: lw, h: lh }, mask: sub, w: lw, h: lh, paths, kind, read });
+      }
+    } else if (separated) push(separated, kind);
     push(whole, 'whole');
     if (!candidates.length) return null;
     return {

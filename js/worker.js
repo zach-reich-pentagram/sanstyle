@@ -5,7 +5,7 @@
  * while the page stays responsive. See batch.analyze.
  */
 'use strict';
-importScripts('util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'auto.js');
+importScripts('util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'letters-model.js', 'recognize.js', 'letters.js', 'auto.js');
 
 self.onmessage = (e) => {
   const { id, bitmap, opts } = e.data;
@@ -22,7 +22,7 @@ self.onmessage = (e) => {
     const give = (arr) => { if (arr && !seen.has(arr.buffer)) { seen.add(arr.buffer); transfer.push(arr.buffer); } };
     const candidates = res.candidates.map((cd) => {
       give(cd.mask);
-      return { crop: cd.crop, mask: cd.mask, w: cd.w, h: cd.h, paths: cd.paths };
+      return { crop: cd.crop, mask: cd.mask, w: cd.w, h: cd.h, paths: cd.paths, kind: cd.kind, read: cd.read, lean: cd.lean, score: cd.score };
     });
     give(inPhoto);
     self.postMessage({ id, ok: true, angle: res.angle, width: image.width, height: image.height, image, inPhoto, candidates }, transfer);

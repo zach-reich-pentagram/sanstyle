@@ -221,6 +221,9 @@
     const input = $('#reviewChar');
     input.value = '';
     ST.capture.showItem(item, cand, { intake: batch.intakeActive });
+    // what the shape reads as, filled in (typing replaces it)
+    const guess = cand ? ST.capture.guess(cand) : '';
+    if (guess) { input.value = guess; ST.capture.updatePreview(); }
     setProgress();
     updateQueuePill();
     syncIsolateLabel();
@@ -238,14 +241,14 @@
     if (!cand) {
       $('#reviewHint').textContent = 'Nothing traced yet — click the letter in the photo to trace it, or skip the photo.';
     } else {
-      const kindNote = { separated: ' (separated from a touching neighbor)', isolated: ' (isolated)', parts: ' (with added pieces)', trimmed: ' (pieces removed)' }[cand.kind] || '';
+      const kindNote = { separated: ' (separated from a touching neighbor)', letter: ' (the letter alone — what was fused onto it taken off)', isolated: ' (isolated)', parts: ' (with added pieces)', trimmed: ' (pieces removed)' }[cand.kind] || '';
       $('#reviewHint').textContent =
         `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote}. ` +
         'Wrong shape? Click the letter in the photo. Fused with a neighbor? Type the character, Option-click the neighbor to take it off, or drag a cut across the join. ' +
         'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it. ⌘Z undoes the last change.';
     }
     const tab = $('#tab-capture');
-    if (tab && tab.classList.contains('active')) setTimeout(() => input.focus(), 60);
+    if (tab && tab.classList.contains('active')) setTimeout(() => { input.focus(); input.select(); }, 60);
   }
   batch.renderCurrent = renderCurrent;
 
@@ -375,6 +378,8 @@
       if (!o.quiet) ST.toast('That spot is already part of the shape.');
       return 0;
     }
+    merged.base = cur.base || cur.kind;
+    merged.turn = cur.turn;
     item.candidates[item.ci] = merged;
     if (!o.replay) {
       item.parts = (item.parts || []).concat([{ x, y }]);
@@ -405,7 +410,7 @@
     }
     const paths = ST.trace.vectorize(res.mask, cur.w, cur.h, {});
     if (!paths.length) return 0;
-    item.candidates[item.ci] = { crop: cur.crop, mask: res.mask, w: cur.w, h: cur.h, paths, kind: 'trimmed', _autoTried: cur._autoTried };
+    item.candidates[item.ci] = { crop: cur.crop, mask: res.mask, w: cur.w, h: cur.h, paths, kind: 'trimmed', base: cur.base || cur.kind, turn: cur.turn, _autoTried: cur._autoTried };
     if (!o.replay) {
       item.removals = (item.removals || []).concat([{ x, y }]);
       item.history = (item.history || []).concat([{ type: 'remove' }]);
@@ -438,13 +443,15 @@
   // Re-extract the current photo at a new Detail setting: the automatic
   // shapes again, then the last click on top of them, then the isolation
   // that was applied — so the knob feels like it turns the shape itself.
-  batch.setDetail = function (v) {
+  // (the automatic pass runs in the background worker: the page stays live)
+  batch.setDetail = async function (v) {
     const item = batch.queue[batch.idx];
     if (!item) return;
     item.detail = v;
     const keep = $('#reviewChar').value;
     const wasIsolated = !!(item.candidates[item.ci] && item.candidates[item.ci].kind === 'isolated');
-    const res = ST.auto.processImage(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+    const res = await batch.analyze(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+    if (item.detail !== v || batch.queue[batch.idx] !== item) return; // moved on meanwhile
     item.candidates = res.candidates;
     item.ci = 0;
     if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
@@ -507,12 +514,19 @@
 
   // Rebuild the shape from what's left: the last click (or the automatic
   // shapes), the remaining cuts, the remaining added pieces.
-  function rebuild(item) {
+  async function rebuild(item) {
     const keep = $('#reviewChar').value;
+    const cur = item.candidates[item.ci];
+    const want = cur ? cur.base || cur.kind : null;
     if (item.lastClick) {
-      batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
+      const n = batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
+      // back on the kind of shape that was being worked on (the whole, not
+      // the letter the click offers first)
+      const k = item.candidates.slice(0, n).findIndex((c) => c.kind === want);
+      if (k > 0) { item.ci = k; renderCurrent(); }
     } else {
-      const res = ST.auto.processImage(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+      const res = await batch.analyze(item.canvas, { deskew: false, noUpscale: true, smoothing: smoothingFor(item) });
+      if (batch.queue[batch.idx] !== item) return;
       item.candidates = res.candidates;
       item.ci = 0;
       renderCurrent();
@@ -532,7 +546,8 @@
       // back to the shape as it was before the trim
       const k = item.candidates.findIndex((c) => c.kind === 'isolated');
       if (k >= 0) item.candidates.splice(k, 1);
-      item.ci = 0;
+      // back on the shape that was trimmed
+      item.ci = last.ci != null && last.ci < item.candidates.length ? last.ci : 0;
       const keep = $('#reviewChar').value;
       renderCurrent();
       $('#reviewChar').value = keep;
@@ -544,9 +559,10 @@
     if (last.type === 'cut' && item.cuts && item.cuts.length) item.cuts.pop();
     else if (last.type === 'part' && item.parts && item.parts.length) item.parts.pop();
     else if (last.type === 'remove' && item.removals && item.removals.length) item.removals.pop();
-    rebuild(item);
-    ST.toast({ cut: 'Cut undone.', part: 'Added piece undone.', remove: 'Removed piece is back.' }[last.type] || 'Undone.');
-    return true;
+    return Promise.resolve(rebuild(item)).then(() => {
+      ST.toast({ cut: 'Cut undone.', part: 'Added piece undone.', remove: 'Removed piece is back.' }[last.type] || 'Undone.');
+      return true;
+    });
   };
 
   // The most recent cut specifically; anything added after it stays.
@@ -558,7 +574,7 @@
       const k = item.history.map((a) => a.type).lastIndexOf('cut');
       if (k >= 0) item.history.splice(k, 1);
     }
-    rebuild(item);
+    return rebuild(item);
   };
 
   // "Isolate the 2": template-guided trim of a shape to the typed
@@ -587,17 +603,50 @@
     // and stroke by stroke: from the stroke clicked, the touching strokes
     // that make the shape most like the character
     const grown = ST.extract.growLetter(cand.mask, cand.w, cand.h, lc.x, lc.y, (m) => ST.classify.scoreMask(m, cand.w, cand.h, ch));
-    if (grown) trims.push({ mask: grown.mask, res: { score: grown.score } });
-    for (const t of trims) t.rank = ST.classify.scoreMask(t.mask, cand.w, cand.h, ch);
+    if (grown) trims.push({ mask: grown.mask, res: { score: grown.score }, whole: true });
+    // and the recognizer's: the strokes under the click grouped the way
+    // that reads most like the character typed
+    const reads = readsAs(ch);
+    if (reads) {
+      const found = ST.letters.find(cand.mask, cand.w, cand.h, { center: lc, must: lc, target: ch });
+      const lt = found && found.letters[0];
+      if (lt && lt.set.size < found.sc.n) trims.push({ mask: ST.letters.render(found, cand.mask, cand.w, cand.h, lt), res: { score: 0 }, whole: true });
+    }
+    // ranked by how much each trim reads as the character: the recognizer
+    // when there is one, else the font templates. A trim made of whole
+    // strokes ends each one the way the paint does (round, at its join);
+    // a template's box can slice a stroke on a slant and leave a point — so
+    // when the two read about as well, the whole strokes win.
+    const bonus = (t) => (reads && t.whole ? 0.05 : 0);
+    for (const t of trims) {
+      const p = reads ? reads(t.mask, cand.w, cand.h) : ST.classify.scoreMask(t.mask, cand.w, cand.h, ch);
+      t.rank = p + bonus(t);
+      if (reads) t.res = Object.assign({}, t.res, { score: p });
+    }
     trims.sort((a, b) => b.rank - a.rank);
     let best = null;
     for (const t of trims.slice(0, 2)) {
       const got = trimTo(cand, t.mask, t.res);
       if (!got) continue;
-      got.fit = ST.classify.scoreFor(got.cand.paths, ch);
+      got.fit = reads ? reads(got.cand.mask, got.cand.w, got.cand.h) + bonus(t) : ST.classify.scoreFor(got.cand.paths, ch);
       if (!best || got.fit > best.fit) best = got;
     }
     return best;
+  }
+
+  // How much a mask reads as `ch` (either case), by the recognizer — or null
+  // without one (then the font templates judge).
+  function readsAs(ch) {
+    if (!ST.letters || !ST.recognize || !ST.recognize.ready() || !ch || ch.length !== 1) return null;
+    const want = new Set([ch, ch.toUpperCase(), ch.toLowerCase()]);
+    if (!ST.recognize.classes().some((c) => want.has(c))) return null; // not a character it knows
+    return (mask, w, h) => {
+      const r = ST.recognize.classify(mask, w, h);
+      if (!r) return 0;
+      let p = 0;
+      for (const x of r.ranked) if (want.has(x.ch)) p += x.p;
+      return p * r.letterness;
+    };
   }
 
   function trimTo(cand, trimmed, res) {
@@ -614,10 +663,11 @@
     const paths = ST.trace.vectorize(sub, cw, chh, {});
     if (!paths.length) return null;
     const crop = { x: cand.crop.x + x0, y: cand.crop.y + y0, w: cw, h: chh };
-    return { cand: { crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated' }, res };
+    return { cand: { crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated', base: cand.base || cand.kind }, res };
   }
 
   function showIsolated(item, got) {
+    item._beforeIsolate = item.ci;
     item.candidates.unshift(got.cand);
     item.ci = 0;
     reapplyParts(item);
@@ -644,7 +694,7 @@
     cand._autoTried = ch;
     showIsolated(item, got);
     if (quiet) return true;
-    item.history = (item.history || []).concat([{ type: 'isolate' }]);
+    item.history = (item.history || []).concat([{ type: 'isolate', ci: item._beforeIsolate }]);
     const pct = Math.round(got.res.score * 100);
     if (got.res.score < 0.3) {
       ST.toast(`Trimmed to the best “${ch}” match found (only ${pct}%) — check the trace; Try another shape brings the full shape back.`, 'warn');
@@ -668,17 +718,18 @@
     if (!ch || ch.length !== 1 || cand._autoTried === ch) return false;
     cand._autoTried = ch;
     // a shape that already reads as the character has nothing fused to it
-    const whole = ST.classify.scoreFor(cand.paths, ch);
-    if (whole >= 0.5) return false;
+    const reads = readsAs(ch);
+    const whole = reads ? reads(cand.mask, cand.w, cand.h) : ST.classify.scoreFor(cand.paths, ch);
+    if (whole >= (reads ? 0.6 : 0.5)) return false;
     const got = isolatedCandidate(item, cand, ch);
     if (!got) return false;
     const before = ST.raster.count(cand.mask), after = ST.raster.count(got.cand.mask);
     if (after > 0.85 * before || after < 0.2 * before) return false;
     const trimmed = got.fit;
-    if (!(trimmed >= 0.3 && trimmed >= whole + 0.06)) return false;
+    if (!(trimmed >= 0.3 && trimmed >= whole + (reads ? 0.15 : 0.06))) return false;
     got.cand._autoTried = ch;
     showIsolated(item, got);
-    item.history = (item.history || []).concat([{ type: 'isolate' }]);
+    item.history = (item.history || []).concat([{ type: 'isolate', ci: item._beforeIsolate }]);
     ST.toast(`Trimmed the neighbor off the “${ch}” — ⌘Z brings it back.`);
     return true;
   };
@@ -708,7 +759,7 @@
     if (!cand) return false;
     const ch = batch.charKey($('#reviewChar').value);
     if (!ch) { ST.toast('Type the character first.', 'warn'); return false; }
-    const record = ST.metrics.buildRecord(ch, cand.paths);
+    const record = ST.metrics.buildRecord(ch, ST.capture.uprightPaths(cand));
     if (!record) { ST.toast('Could not fit that shape.', 'warn'); return false; }
     record.thumb = ST.capture.makeThumb(record);
     ST.store.addVariant(ch, record);
