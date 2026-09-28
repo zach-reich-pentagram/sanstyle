@@ -228,9 +228,13 @@
     // that read most like one letter
     const B = o.beam || (must ? 3 : 2), depth = Math.min(sc.n, o.depth || 14);
     read(new Set(Array.from({ length: sc.n }, (_, i) => i + 1)));
-    // (a budget of readings keeps a busy shape from taking forever)
-    const budget = o.budget || 200;
+    // (a budget of readings keeps a busy shape from taking forever — shared
+    // out among the seeds, so the first few can't spend it all on a busy
+    // middle and leave a clear letter off to the side unread)
+    const budget = o.budget || 240;
+    let seedsLeft = seeds.size;
     for (const s of seeds) {
+      const stop = Math.min(budget, cache.size + Math.ceil((budget - cache.size) / Math.max(1, seedsLeft--)));
       if (cache.size >= budget) break;
       let beam = [read(new Set([s]))];
       for (let d = 1; d < depth; d++) {
@@ -239,7 +243,7 @@
           const have = new Set(r.ids);
           for (const c of r.ids) {
             for (const nb of adj[c]) {
-              if (have.has(nb) || cache.size >= budget) continue;
+              if (have.has(nb) || cache.size >= stop) continue;
               const t = new Set(have); t.add(nb);
               const rr = read(t);
               next.set(rr.key, rr);
@@ -290,6 +294,8 @@
       const inSet = new Set(r.ids);
       const seen = new Set();
       let ev = r.clear;
+      const crumbs = [];
+      let crumbN = 0;
       for (let c = 1; c <= sc.n; c++) {
         if (inSet.has(c) || seen.has(c)) continue;
         const grp = [c], stack = [c];
@@ -299,9 +305,18 @@
           for (const v of adj[u]) if (!inSet.has(v) && !seen.has(v)) { seen.add(v); grp.push(v); stack.push(v); }
         }
         const gr = read(new Set(grp));
-        if (!gr.bb || gr.bb.n < 0.12 * totalN) continue; // a crumb
+        if (!gr.bb) continue;
+        if (gr.bb.n < 0.12 * totalN) { crumbs.push(...grp); crumbN += gr.bb.n; continue; } // a crumb
         const gc = L.clarity(gr);
         ev *= touchesFrame(gr.bb) ? Math.max(0.6, gc) : gc; // a neighbor the frame cut off need not read well
+      }
+      // crumbs are a flake, a drip: a few of them adding up to a real part
+      // of the shape are the pieces of a neighbor the letter broke up (an
+      // O made of a y and a neighbor's arch leaves that neighbor in bits),
+      // and must read as something together
+      if (crumbs.length > 1 && crumbN >= 0.12 * totalN) {
+        const gr = read(new Set(crumbs));
+        if (gr.bb) { const gc = L.clarity(gr); ev *= touchesFrame(gr.bb) ? Math.max(0.5, gc) : gc; }
       }
       r.evidence = ev;
       return ev > 1.1 * wholeClear;
@@ -313,6 +328,11 @@
       r.explained = explain(r);
       if (!r.explained) r.score *= 0.3;
     }
+    // and among splits that are explained, one whose rest reads well beats
+    // one whose rest reads poorly: taking a y out of "xy" leaves an x;
+    // taking an O made of the y and the x's arch leaves the x in pieces
+    const bestEv = Math.max(0, ...front.filter((r) => r.explained && r.ids.length < sc.n).map((r) => r.evidence || 0));
+    if (bestEv > 0) for (const r of front) if (r.explained && r.ids.length < sc.n) r.score *= Math.sqrt(Math.min(1, (r.evidence || 0) / bestEv));
     // the whole shape read as one character loses to a split into letters
     // that each read far more clearly (a T through an O can pass for a P;
     // a T and an O are what it is)

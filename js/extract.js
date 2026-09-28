@@ -121,6 +121,165 @@
     return R.dominantColor(data, w, h, null) || ring;
   };
 
+  // Light across the wall. A wall lit unevenly — brighter where the sun or
+  // a lamp falls, darker toward a corner — is one color only at the border,
+  // where its reference is taken: judged against it, the bright end of the
+  // wall is well on its way to white paint and the dark end to black, and
+  // once the wall's tolerance is as tight as its grain (see wallTolerance)
+  // whole stretches of bare wall read as paint. So the light is measured
+  // and taken out: the photo is cut into cells, each cell's wall is the
+  // median of its pixels near the wall's color, and a smooth surface
+  // (quadratic in x and y, per channel) is fitted to them, reweighted until
+  // the cells that disagree — a cell a fat letter fills, a patch of another
+  // surface — no longer pull it. Every pixel is then scaled by how far the
+  // light there departs from the border's (paint in that light shades the
+  // same way the wall does). → { data (the evened photo), gain(x, y) →
+  // [r, g, b] factors } or null when the wall is lit evenly already.
+  ex.flatField = function (data, w, h) {
+    const bg = ex.backgroundColor(data, w, h);
+    if (!bg) return null;
+    const G = 20;
+    const cs = Math.max(8, Math.ceil(Math.max(w, h) / G));
+    const gx = Math.ceil(w / cs), gy = Math.ceil(h / cs);
+    const step = Math.max(1, Math.round(cs / 24));
+    const near = 130; // the wall's own light and shade; paint and other surfaces lie further off
+    const cells = [];
+    const rs = [], gs = [], bs = [];
+    for (let cy = 0; cy < gy; cy++) {
+      for (let cx = 0; cx < gx; cx++) {
+        rs.length = gs.length = bs.length = 0;
+        let n = 0;
+        const x1 = Math.min(w, (cx + 1) * cs), y1 = Math.min(h, (cy + 1) * cs);
+        for (let y = cy * cs; y < y1; y += step) {
+          for (let x = cx * cs; x < x1; x += step) {
+            n++;
+            const p = (y * w + x) * 4;
+            if (R.colorDist(data[p], data[p + 1], data[p + 2], bg.r, bg.g, bg.b) > near) continue;
+            rs.push(data[p]); gs.push(data[p + 1]); bs.push(data[p + 2]);
+          }
+        }
+        if (rs.length < 0.3 * n || rs.length < 12) continue;
+        const med = (a) => { a.sort((u, v) => u - v); return a[a.length >> 1]; };
+        cells.push({ x: ((cx + 0.5) * cs) / w - 0.5, y: ((cy + 0.5) * cs) / h - 0.5, r: med(rs), g: med(gs), b: med(bs), wt: rs.length / n });
+      }
+    }
+    if (cells.length < 12) return null;
+    // weighted least squares on [1, x, y, x², xy, y²], reweighted (Tukey)
+    const basis = (x, y) => [1, x, y, x * x, x * y, y * y];
+    const solve = (wts) => {
+      const A = Array.from({ length: 6 }, () => new Float64Array(6));
+      const B = [new Float64Array(6), new Float64Array(6), new Float64Array(6)];
+      cells.forEach((c, k) => {
+        const f = basis(c.x, c.y), wk = wts[k];
+        if (!(wk > 0)) return;
+        for (let i = 0; i < 6; i++) {
+          for (let j = 0; j < 6; j++) A[i][j] += wk * f[i] * f[j];
+          B[0][i] += wk * f[i] * c.r; B[1][i] += wk * f[i] * c.g; B[2][i] += wk * f[i] * c.b;
+        }
+      });
+      for (let i = 0; i < 6; i++) A[i][i] += 1e-6;
+      return B.map((b) => gauss(A.map((row) => Float64Array.from(row)), Float64Array.from(b)));
+    };
+    const gauss = (A, b) => {
+      const n = b.length;
+      for (let i = 0; i < n; i++) {
+        let piv = i;
+        for (let k = i + 1; k < n; k++) if (Math.abs(A[k][i]) > Math.abs(A[piv][i])) piv = k;
+        [A[i], A[piv]] = [A[piv], A[i]]; [b[i], b[piv]] = [b[piv], b[i]];
+        if (Math.abs(A[i][i]) < 1e-12) return null;
+        for (let k = i + 1; k < n; k++) {
+          const f = A[k][i] / A[i][i];
+          for (let j = i; j < n; j++) A[k][j] -= f * A[i][j];
+          b[k] -= f * b[i];
+        }
+      }
+      const x = new Float64Array(n);
+      for (let i = n - 1; i >= 0; i--) {
+        let s = b[i];
+        for (let j = i + 1; j < n; j++) s -= A[i][j] * x[j];
+        x[i] = s / A[i][i];
+      }
+      return x;
+    };
+    const at = (co, x, y) => { const f = basis(x, y); let s = 0; for (let i = 0; i < 6; i++) s += co[i] * f[i]; return s; };
+    let wts = cells.map((c) => c.wt), co = null;
+    for (let it = 0; it < 5; it++) {
+      co = solve(wts);
+      if (!co[0] || !co[1] || !co[2]) return null;
+      const res = cells.map((c) => R.colorDist(c.r, c.g, c.b, at(co[0], c.x, c.y), at(co[1], c.x, c.y), at(co[2], c.x, c.y)));
+      const sorted = res.slice().sort((u, v) => u - v);
+      const scale = Math.max(8, 4.685 * 1.4826 * sorted[sorted.length >> 1]);
+      wts = cells.map((c, k) => { const u = res[k] / scale; return u < 1 ? c.wt * (1 - u * u) * (1 - u * u) : 0; });
+    }
+    // the light's own spread over the wall it was measured on: too little to
+    // matter, no change
+    let spread = 0, ux0 = 1, uy0 = 1, ux1 = -1, uy1 = -1;
+    cells.forEach((c, k) => {
+      if (!(wts[k] > 0)) return;
+      spread = Math.max(spread, R.colorDist(at(co[0], c.x, c.y), at(co[1], c.x, c.y), at(co[2], c.x, c.y), bg.r, bg.g, bg.b));
+      ux0 = Math.min(ux0, c.x); ux1 = Math.max(ux1, c.x); uy0 = Math.min(uy0, c.y); uy1 = Math.max(uy1, c.y);
+    });
+    if (spread < 30) return null;
+    // the gains on a coarse grid, bilinear in between
+    const S = 16, lw = Math.ceil(w / S) + 1, lh = Math.ceil(h / S) + 1;
+    const gr = new Float32Array(lw * lh * 3);
+    const lim = (v) => Math.max(0.55, Math.min(1.8, v));
+    for (let j = 0; j < lh; j++) {
+      for (let i = 0; i < lw; i++) {
+        // (no further out than the wall it was measured on: past it a
+        // quadratic runs off anywhere)
+        const xx = Math.max(ux0, Math.min(ux1, (i * S) / w - 0.5)), yy = Math.max(uy0, Math.min(uy1, (j * S) / h - 0.5)), k = (j * lw + i) * 3;
+        gr[k] = lim(bg.r / Math.max(8, at(co[0], xx, yy)));
+        gr[k + 1] = lim(bg.g / Math.max(8, at(co[1], xx, yy)));
+        gr[k + 2] = lim(bg.b / Math.max(8, at(co[2], xx, yy)));
+      }
+    }
+    const gain = (x, y) => {
+      const fx = Math.max(0, Math.min(lw - 1.001, x / S)), fy = Math.max(0, Math.min(lh - 1.001, y / S));
+      const i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j;
+      const out = [0, 0, 0];
+      for (let c = 0; c < 3; c++) {
+        const a = gr[(j * lw + i) * 3 + c], b = gr[(j * lw + i + 1) * 3 + c];
+        const d = gr[((j + 1) * lw + i) * 3 + c], e = gr[((j + 1) * lw + i + 1) * 3 + c];
+        out[c] = (a * (1 - tx) + b * tx) * (1 - ty) + (d * (1 - tx) + e * tx) * ty;
+      }
+      return out;
+    };
+    const out = new Uint8ClampedArray(data.length);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x += S) {
+        const k0 = gain(x, y), k1 = gain(Math.min(w - 1, x + S), y);
+        const xe = Math.min(w, x + S);
+        for (let xx = x; xx < xe; xx++) {
+          const t = (xx - x) / S, p = (y * w + xx) * 4;
+          out[p] = data[p] * (k0[0] + (k1[0] - k0[0]) * t);
+          out[p + 1] = data[p + 1] * (k0[1] + (k1[1] - k0[1]) * t);
+          out[p + 2] = data[p + 2] * (k0[2] + (k1[2] - k0[2]) * t);
+          out[p + 3] = data[p + 3];
+        }
+      }
+    }
+    return { data: out, gain, spread };
+  };
+  // A canvas's evened pixels, worked out once (clicks come many to a photo).
+  const flatCache = new WeakMap();
+  ex.flatData = function (canvas, raw) {
+    const w = canvas.width, h = canvas.height;
+    const c = flatCache.get(canvas);
+    if (c && c.w === w && c.h === h) return c;
+    const data = raw || canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    const f = ex.flatField(data, w, h);
+    const res = { w, h, data: f ? f.data : data, gain: f ? f.gain : null };
+    flatCache.set(canvas, res);
+    return res;
+  };
+  // a color picked off the photo at (x, y), in the evened light
+  ex.evenColor = function (flat, col) {
+    if (!flat || !flat.gain || col.x == null) return col;
+    const k = flat.gain(col.x, col.y);
+    return Object.assign({}, col, { r: Math.min(255, col.r * k[0]), g: Math.min(255, col.g * k[1]), b: Math.min(255, col.b * k[2]) });
+  };
+
   // The wall a click's letter is painted on, when it is not the photo's:
   // the border of a photo can be one surface (a gray wall, white paper)
   // while the letter sits on another (a dark wooden post between them).
@@ -248,6 +407,13 @@
   // How far the wall's own color wanders (grain, texture, light): the 90th
   // percentile of the frame's border ring's distance to the background
   // estimate, with headroom. Pixels within it read as "wall".
+  // The ring is the wall's only as far as the wall's own color cluster
+  // goes: letters running off the frame put their paint in the ring too —
+  // a tenth of it or more on a busy wall, and then the 90th percentile is
+  // paint, and black and white alike would read as "wall". So the spread
+  // is taken over the ring pixels near the cluster (within three times the
+  // distance at which the wall's own share of the ring is used up, which
+  // takes in a noisy wall whole and leaves out paint well clear of it).
   ex.wallTolerance = function (data, w, h, bg) {
     const m = Math.max(3, Math.round(Math.min(w, h) * 0.08));
     const step = Math.max(1, Math.round(Math.sqrt((w * h) / 60000)));
@@ -261,7 +427,13 @@
     }
     if (!vals.length) return 40;
     vals.sort((a, b) => a - b);
-    return Math.max(25, vals[Math.floor(vals.length * 0.9)] * 1.3);
+    const whole = Math.max(25, vals[Math.floor(vals.length * 0.9)] * 1.3);
+    const share = Math.min(0.5, 0.9 * (bg.frac || 0.5));
+    const cap = Math.max(45, 3 * vals[Math.floor(vals.length * share)]);
+    let n = 0;
+    while (n < vals.length && vals[n] <= cap) n++;
+    if (n < 0.25 * vals.length) return whole;
+    return Math.min(whole, Math.max(25, vals[Math.floor((n - 1) * 0.9)] * 1.3));
   };
 
   // Wall mask: pixels within the wall's tolerance of the background color.
@@ -847,20 +1019,33 @@
     }
     const visited = new Uint8Array(w * h);
     // walk from a node along plain path pixels to the next node; a segment
-    // remembers the nodes at its two ends (-1: none — a free end or ring)
+    // remembers the nodes at its two ends (-1: none — a free end or ring).
+    // A path that passes a junction diagonally, touching it without
+    // stepping on it, ends there all the same: otherwise a stroke running
+    // into a crossing and the one leaving it on the far side come out as
+    // one piece (a letter's diagonal ending in the knot where its
+    // neighbor's arm rises, read as one stroke with that arm), and the
+    // letters can no longer be told apart there. (The junction it left from
+    // and the ones right beside that don't count: every walk starts there.)
+    const nearFrom = (n, from) => from >= 0 && Math.abs((n % w) - (from % w)) <= 1 && Math.abs(((n / w) | 0) - ((from / w) | 0)) <= 1;
     const trace = (start, from) => {
       const pixels = [];
       let prev = from, cur = start, atNode = -1;
       for (;;) {
         visited[cur] = 1; pixels.push(cur);
-        let next = -1;
+        let next = -1, touch = -1;
         atNode = -1;
         for (const d of N8) {
           const n = cur + d;
           if (!skel[n] || n === prev) continue;
-          if (node[n]) { if (atNode < 0) atNode = n; continue; }
-          if (!visited[n]) { next = n; break; }
+          if (node[n]) {
+            if (atNode < 0) atNode = n;
+            if (touch < 0 && junction[n] && n !== from && !nearFrom(n, from) && pixels.length > 1) touch = n;
+            continue;
+          }
+          if (!visited[n] && next < 0) next = n;
         }
+        if (touch >= 0) return { pixels, ends: [from, touch] };
         if (next < 0) return { pixels, ends: [from, atNode] };
         prev = cur; cur = next;
       }
@@ -995,6 +1180,18 @@
     let qh = 0, qt = 0;
     for (let i = 0; i < graph.skel.length; i++) if (graph.skel[i]) { id[i] = 0; queue[qt++] = i; }
     graph.segments.forEach((s, k) => { for (const p of s.pixels) id[p] = k + 1; });
+    // a neighbor's skeleton runs on into the letter's stroke up to the
+    // junction in its middle: that stretch is inside the letter's width,
+    // and is the letter's (else the neighbor takes a notch of it with it)
+    const dtM = R.distanceTransform(mask, w, h);
+    graph.segments.forEach((s, k) => {
+      if (!foreign[k + 1]) return;
+      for (const e of s.ends) {
+        if (e < 0 || !graph.junction[e]) continue;
+        const ex0 = e % w, ey0 = (e / w) | 0, r = dtM[e];
+        for (const p of s.pixels) if (Math.hypot((p % w) - ex0, ((p / w) | 0) - ey0) <= r) id[p] = 0;
+      }
+    });
     while (qh < qt) {
       const j = queue[qh++];
       const x = j % w, y = (j / w) | 0;
@@ -1035,8 +1232,21 @@
   // closing refills the notch (a concavity) without rebuilding the removed
   // stroke (convex); then shave the nub and cap the faces.
   function healCut(result, mask, removed, w, h, sw) {
-    // the work is all around what came off: done in a window round it
-    const bb = R.maskBounds(removed, w, h);
+    // the work is all at the faces where it came off (away from them the
+    // closing has nothing of the letter to join, the opening nothing to
+    // shave): done in a window round them — not round all that came off,
+    // which for a neighbor taken away whole is most of the shape
+    const face = new Uint8Array(w * h);
+    let anyFace = false;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!result[i]) continue;
+        if ((x > 0 && removed[i - 1]) || (x < w - 1 && removed[i + 1]) || (y > 0 && removed[i - w]) || (y < h - 1 && removed[i + w])) { face[i] = 1; anyFace = true; }
+      }
+    }
+    if (!anyFace) return result;
+    const bb = R.maskBounds(face, w, h);
     if (!bb) return result;
     const pad = 4 * Math.max(1, Math.ceil(sw / 2)) + 6;
     const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
@@ -1143,7 +1353,11 @@
         byNode.get(e).push(k);
       }
     });
-    for (const ks of byNode.values()) for (let i = 1; i < ks.length; i++) union(ks[0], ks[i]);
+    // (not in the finer pieces for grouping into letters: a neighbor that
+    // runs into a letter end to end, round a corner — a tick mark whose top
+    // meets an N's top — must be able to come off there, and a letter's own
+    // corners are put back together by the grouping)
+    if (continuation) for (const ks of byNode.values()) for (let i = 1; i < ks.length; i++) union(ks[0], ks[i]);
     // arms of each junction cluster, with the direction they leave in
     const arms = new Map(); // cluster root → [{k, dx, dy}]
     segs.forEach((s, k) => {
@@ -1531,7 +1745,10 @@
     const w = canvas.width, h = canvas.height;
     x = Math.round(x); y = Math.round(y);
     if (x < 0 || y < 0 || x >= w || y >= h) return null;
-    const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    // (in the wall's light evened out: see flatField)
+    const flat = ex.flatData(canvas);
+    const data = flat.data;
+    if (o.paint) o.paint = ex.evenColor(flat, o.paint);
     // the click is on the letter: each cut takes only from its other side
     const excl = ex.cutMask(w, h, o.cuts, { x, y });
     let bg = ex.backgroundColor(data, w, h), wallTol = null;
@@ -1719,10 +1936,18 @@
     // drops part of it is not a neighbor coming off (unless the letter
     // reads unmistakably and the whole shape as nothing: then what was
     // joined on was the neighbor)
+    // (what completion drew wholly on the strokes the split drops — a
+    // neighbor's stroke finished past the frame's edge — is the neighbor's,
+    // and goes with it)
     if (separated && tubeSub && !plainSplit) {
-      let t = 0, kept = 0;
-      for (let i = 0; i < tubeSub.length; i++) if (tubeSub[i] && whole[i]) { t++; if (separated[i]) kept++; }
-      if (t && kept < 0.9 * t) separated = null;
+      const drawn = new Uint8Array(tubeSub.length);
+      for (let i = 0; i < drawn.length; i++) if (tubeSub[i] && whole[i]) drawn[i] = 1;
+      const { labels, sizes } = R.components(drawn, crop.w, crop.h);
+      const kept = new Int32Array(sizes.length);
+      for (let i = 0; i < drawn.length; i++) if (drawn[i] && separated[i]) kept[labels[i]]++;
+      let t = 0, k = 0;
+      for (let L = 1; L < sizes.length; L++) if (kept[L]) { t += sizes[L]; k += kept[L]; }
+      if (t && k < 0.9 * t) separated = null;
     }
     if (separated && kind === 'letter') {
       // boxed to the letter itself

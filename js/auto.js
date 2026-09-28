@@ -289,9 +289,12 @@
     if (top < 70) return null;
     // (there, the commonest color that is not that wall: the most
     // contrasting one can be a white strip at the edge of the middle)
+    // (the commonest color of the strongest contrast, not its mean: white
+    // and black paint on one brown wall both stand out, and their mean is a
+    // gray that is neither)
     let seed = local
       ? R.dominantColor(data, W, H, (x, y) => mid[y * W + x] === 1 && dbg[y * W + x] > Math.max(60, local.tol))
-      : meanWhere(data, dbg, (d) => d >= top * 0.75);
+      : R.dominantColor(data, W, H, (x, y) => dbg[y * W + x] >= top * 0.75) || meanWhere(data, dbg, (d) => d >= top * 0.75);
     if (!seed) return null;
     let field = R.colorDistMap(data, W, H, [seed]);
     let sep = R.colorDist(seed.r, seed.g, seed.b, bg.r, bg.g, bg.b);
@@ -382,21 +385,30 @@
 
     let angle = o.angle || 0;
     let ctx = work.getContext('2d');
-    let img = ctx.getImageData(0, 0, work.width, work.height);
+    // the photo's pixels with the wall's light evened out (see
+    // extract.flatField): a wall brighter at one end reads as one wall
+    const evened = (c) => {
+      const raw = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+      const f = ST.extract ? ST.extract.flatData(c, raw.data) : null;
+      return { img: { data: f ? f.data : raw.data, width: c.width, height: c.height }, paint: o.paint && f ? ST.extract.evenColor(f, o.paint) : o.paint };
+    };
+    let ev = evened(work);
+    let img = ev.img;
     let gray = ST.raster.luma(img.data, work.width, work.height);
 
     // paint first, then straighten by the PAINT's own edges: the letter's
     // stems define upright, not the wall's bricks or the paper's edge
-    let pm = paintMask(img.data, work.width, work.height, o.paint);
+    let pm = paintMask(img.data, work.width, work.height, ev.paint);
     if (o.deskew) {
       const zone = pm ? edgeZone(pm.filled, work.width, work.height) : null;
       angle = auto.estimateSkewAngle(gray, work.width, work.height, zone);
       if (Math.abs(angle) >= 1.5 && Math.abs(angle) <= 20) {
         work = rotateCanvas(work, angle);
         ctx = work.getContext('2d');
-        img = ctx.getImageData(0, 0, work.width, work.height);
+        ev = evened(work);
+        img = ev.img;
         gray = ST.raster.luma(img.data, work.width, work.height);
-        pm = paintMask(img.data, work.width, work.height, o.paint);
+        pm = paintMask(img.data, work.width, work.height, ev.paint);
       } else {
         angle = 0;
       }

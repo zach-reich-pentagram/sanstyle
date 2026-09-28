@@ -82,6 +82,12 @@ test('letters.find: a T fused with an O comes apart into the two letters', () =>
   const oMask = ST.letters.render(onO, m, w, h, onO.letters[0]);
   const ob = R.maskBounds(oMask, w, h);
   assert.ok(ob.x0 > 150 && ob.x1 > 280, `a click on the O gives the O (${ob.x0}–${ob.x1})`);
+  // a click at the far end of the T's stem is a click on the T: the whole
+  // T, not the stem alone because its middle is nearer the click
+  const onFoot = ST.letters.find(m, w, h, { center: { x: 90, y: 185 }, must: { x: 90, y: 185 } });
+  const fMask = ST.letters.render(onFoot, m, w, h, onFoot.letters[0]);
+  const fb = R.maskBounds(fMask, w, h);
+  assert.ok(fb.x0 < 30 && fb.y0 < 30 && fb.x1 < 215, `a click on the stem's foot gives the whole T (${fb.x0},${fb.y0}–${fb.x1})`);
 });
 
 test('letters.lean: a leaning stem stands up; symmetric legs and rounds say nothing', () => {

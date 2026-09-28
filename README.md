@@ -56,6 +56,13 @@ the dark wooden post the tag is on — the wall is taken from round the
 middle of the photo (or round your click), and the paint is looked for
 there: a light-blue letter on the post is then measured against the post,
 soft spray edges and all, not against the gray at the border.
+A wall lit unevenly — brighter where the sun falls, darker toward a corner —
+is evened out first: a smooth light surface is fitted to the wall's own
+color across the photo (cells a letter fills don't pull it) and taken out,
+so the bright end of the wall doesn't pass for white paint or the dark end
+for black. How far the wall's color wanders is measured on the wall's own
+color in the border only: letters running off the frame put their paint in
+the border too, and must not widen "wall" out to their paint.
 Streaky strokes are jumped across at up to half a stroke width. The photo is
 then straightened by the paint's own edges (its stems set upright, not the
 wall's bricks or the paper's edge), and its resolution is normalized: a
@@ -388,7 +395,7 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 75 unit tests: geometry, tracing, fitting, morphology,
+npm test        # 77 unit tests: geometry, tracing, fitting, morphology,
                 # deskew, seeded extraction, stroke-graph isolation,
                 # occlusion completion (hidden ends, joins across occluders
                 # and past the frame, bitten strokes, outlines), stroke
@@ -397,7 +404,8 @@ npm test        # 75 unit tests: geometry, tracing, fitting, morphology,
                 # cuts, necks that hold, no spikes at stroke ends, a halo
                 # vs. a second paint of its own, a stroke kept through a
                 # crossing at its own width, the letter's own wall,
-                # inbox de-duplication,
+                # inbox de-duplication, a wall lit unevenly, the wall's
+                # tolerance with letters running off the frame,
                 # classifier scoring, ligature keys + GSUB, weight targeting,
                 # TTF byte format, and the api routes (JWT signing verified
                 # against a real keypair, Drive calls stubbed)
