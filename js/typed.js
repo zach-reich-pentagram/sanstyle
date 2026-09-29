@@ -1188,57 +1188,66 @@
 
   // Out to the paint's own edge: a stroke drawn at the letter's width comes
   // out narrower than the paint where the brush was wider (an E's stem
-  // beside its bars), and paint read as another color (silver's shaded
-  // rim) is left off. Round what was drawn, a pixel is the stroke's when
-  // it is its paint and nearest its center line (not a neighbor's that
-  // touches it), or — within half the stroke's width — its color is nearer
-  // the stroke's own colors (its core) than the wall's just beyond; only
-  // on from pixels already taken, never into another paint.
-  function growToEdge(out, rgb, w, h, r0, F, mask, other) {
+  // beside its bars), paint read as another color is left off (silver's
+  // shaded rim, a stroke running into a shadow), and a marker's soft edge
+  // fades out past where the paint was read. Round what was drawn, a pixel
+  // is the stroke's when it is its paint and nearest its center line (not a
+  // neighbor's that touches it), or — within about half the stroke's width
+  // — its color lies between the stroke's and the wall's right there (their
+  // colors a stroke or two round it: a shadow, a lit patch are each their
+  // own), and nearer the stroke's: a blend of paint and wall, not a third
+  // color (a stroke of another that crosses it); only on from pixels
+  // already taken.
+  function growToEdge(out, rgb, w, h, r0, F, mask) {
     const R = ST.raster, N = w * h;
-    const g = Math.max(2, Math.round(0.5 * r0)), gMax = Math.max(3, Math.round(0.6 * r0) + 1);
+    const g = Math.max(2, Math.round(0.6 * r0) + 1);
     const inv = new Uint8Array(N);
     for (let i = 0; i < N; i++) inv[i] = out[i] ? 0 : 1;
     const dOut = R.distanceTransform(inv, w, h, { borderInk: true }), dIn = R.distanceTransform(out, w, h);
-    const core = [], ring = [];
+    // (the stroke's colors, its core; the wall's, a ring beyond where it may
+    // grow — each averaged round every pixel)
     const coreD = Math.max(1, 0.5 * r0);
-    for (let i = 0; i < N; i += 2) {
-      if (out[i] && dIn[i] >= coreD) core.push(i);
-      else if (!out[i] && dOut[i] > g + 1.5 && dOut[i] <= g + 6) ring.push(i);
+    const pw = new Float32Array(N), ww = new Float32Array(N);
+    const pc = [0, 1, 2].map(() => new Float32Array(N)), wc = [0, 1, 2].map(() => new Float32Array(N));
+    let nP = 0, nW = 0;
+    for (let i = 0; i < N; i++) {
+      if (out[i] && dIn[i] >= coreD) { pw[i] = 1; for (let c = 0; c < 3; c++) pc[c][i] = rgb[i * 4 + c]; nP++; }
+      else if (!out[i] && dOut[i] > g + 1.5 && dOut[i] <= g + 6) { ww[i] = 1; for (let c = 0; c < 3; c++) wc[c][i] = rgb[i * 4 + c]; nW++; }
     }
-    if (core.length < 12 || ring.length < 12) return out;
-    // (a few colors each: silver is light and shade, a wall is not one color)
-    const centers = (idx) => {
-      const k = Math.min(3, idx.length >> 2), c = [];
-      for (let q = 0; q < k; q++) { const i = idx[Math.floor(((q + 0.5) * idx.length) / k)] * 4; c.push([rgb[i], rgb[i + 1], rgb[i + 2]]); }
-      for (let it = 0; it < 6; it++) {
-        const sum = c.map(() => [0, 0, 0, 0]);
-        for (const i0 of idx) {
-          const i = i0 * 4;
-          let b = 0, bd = Infinity;
-          for (let q = 0; q < c.length; q++) { const d = (rgb[i] - c[q][0]) ** 2 + (rgb[i + 1] - c[q][1]) ** 2 + (rgb[i + 2] - c[q][2]) ** 2; if (d < bd) { bd = d; b = q; } }
-          sum[b][0] += rgb[i]; sum[b][1] += rgb[i + 1]; sum[b][2] += rgb[i + 2]; sum[b][3]++;
-        }
-        for (let q = 0; q < c.length; q++) if (sum[q][3]) c[q] = [sum[q][0] / sum[q][3], sum[q][1] / sum[q][3], sum[q][2] / sum[q][3]];
+    if (nP < 12 || nW < 12) return out;
+    const rad = Math.max(4, Math.round(2 * r0));
+    const B = (a) => R.blur(a, w, h, rad);
+    const bpw = B(pw), bww = B(ww), bpc = pc.map(B), bwc = wc.map(B);
+    // (how far from the wall's color toward the stroke's a pixel's lies, and
+    // how far off that line: a third color is off it; null where the two are
+    // too alike to tell)
+    const blend = (j) => {
+      if (bpw[j] < 1e-3 || bww[j] < 1e-3) return null;
+      let dd = 0, cw = 0, cc = 0;
+      for (let c = 0; c < 3; c++) {
+        const P = bpc[c][j] / bpw[j], Wl = bwc[c][j] / bww[j], v = rgb[j * 4 + c];
+        dd += (P - Wl) ** 2; cw += (v - Wl) * (P - Wl); cc += (v - Wl) ** 2;
       }
-      return c;
+      if (dd < 400) return null;
+      const t = cw / dd;
+      return { t, off: (cc - t * t * dd) / dd };
     };
-    const P = centers(core), Wc = centers(ring);
-    const near = (cs, i) => { let bd = Infinity; for (const c of cs) { const d = (rgb[i] - c[0]) ** 2 + (rgb[i + 1] - c[1]) ** 2 + (rgb[i + 2] - c[2]) ** 2; if (d < bd) bd = d; } return bd; };
+    const tMin = 0.4;
     const res = Uint8Array.from(out);
     // (its own center line: the paint's center-line pixels it was drawn over)
     const own = (j) => { const k = F.near[j]; return k >= 0 && out[k] === 1; };
     // (layer by layer outward, each pixel on from one taken)
     let front = [];
     for (let i = 0; i < N; i++) if (out[i]) front.push(i);
-    for (let step = 0; step < gMax && front.length; step++) {
+    for (let step = 0; step < g && front.length; step++) {
       const next = [];
       for (const i of front) {
         const x = i % w;
         const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w];
         for (const j of nb) {
-          if (j < 0 || j >= N || res[j] || (other && other[j])) continue;
-          const take = mask[j] ? own(j) : step < g && near(P, j * 4) < 0.5 * near(Wc, j * 4);
+          if (j < 0 || j >= N || res[j]) continue;
+          const b = blend(j);
+          const take = mask[j] ? own(j) && (!b || b.off <= 0.25) : !!b && b.t >= tMin && b.off <= 0.12;
           if (take) { res[j] = 1; next.push(j); }
         }
       }
@@ -1306,11 +1315,6 @@
           const paint = got && /^paint/.test(got.from);
           const m = own.mask;
           if (paint) {
-            // (the photo's reading good under your line: only what no other
-            // paint of it has — not a stroke of another color it crosses)
-            let g = 0;
-            for (let i = 0; i < m.length; i++) if (own.near[i] <= 2 && got.mask[i]) g++;
-            if (g >= 0.7 * n) for (let i = 0; i < m.length; i++) if (got.any[i] && !got.mask[i]) m[i] = 0;
             // (less the rim it adds round the paint read: an edge's blend of
             // paint and wall is not the paint)
             for (let i = 0; i < m.length; i++) if (got.mask[i]) m[i] = 1;
@@ -1365,10 +1369,7 @@
     if (!R.count(drawn.mask)) return null;
     let m = drawn.mask;
     if (rgb) {
-      // (never into another paint: a stroke crossing it, a neighbor)
-      const other = new Uint8Array(rw * rh);
-      for (let i = 0; i < other.length; i++) other[i] = got.any[i] && !mask[i] ? 1 : 0;
-      m = growToEdge(m, rgb, rw, rh, drawn.r0, F, mask, other);
+      m = growToEdge(m, rgb, rw, rh, drawn.r0, F, mask);
     }
     m = roundTerminals(m, rw, rh, drawn.lines, drawn.r0);
     m = smoothEdges(m, rw, rh, drawn.r0);

@@ -319,7 +319,7 @@
       $('#reviewHint').textContent = cand.kind === 'traced'
         ? 'Traced from your strokes. Drag along any stroke still missing; ⌘Z takes the last one off.'
         : (item.candidates.length > 1 ? 'Pick the letter below or click it in the photo' : 'Not the letter you want? Click it in the photo') +
-          ' — or trace it: drag along each of its strokes, through the strokes that cross it, and the paint under them is taken. Option-click a neighbor to take it off; shift-click a missing piece. ⌘Z undoes.';
+          ' — or trace it: drag along each of its strokes, through the strokes that cross it, and the paint under them is taken. Option-click a neighbor to take it off; shift-click a missing piece; Option-drag cuts a join. ⌘Z undoes. Scroll zooms; hold space and drag to pan.';
     }
     const tab = $('#tab-capture');
     if (tab && tab.classList.contains('active')) setTimeout(() => { input.focus(); input.select(); }, 60);
@@ -838,7 +838,6 @@
       return false;
     }
     showTraced(item, found, keep);
-    if (item.traces.length === 1) ST.toast('Traced — drag along its other strokes to add them; ⌘Z takes the last one off.');
     return true;
   };
 
@@ -988,12 +987,79 @@
     // which photo, and where in it: the crop can be cut again on any device
     const from = ST.sources.photoOf(item, cand.crop);
     if (from) record.photo = from;
-    ST.store.addVariant(ch, record);
-    if (ST.sources) ST.sources.put(record.id, batch.sourceThumb(item, cand));
-    if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
+    const add = () => {
+      ST.store.addVariant(ch, record);
+      if (ST.sources) ST.sources.put(record.id, batch.sourceThumb(item, cand));
+      if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
+    };
+    // the same character taken from this photo before: one design of it per
+    // photo — you pick which
+    const slot = ST.store.slot(ch);
+    const same = slot ? slot.variants.filter((v) => samePhoto(v, item)) : [];
+    if (same.length) { pickOne(ch, record, same, item, add); return false; }
+    add();
     advance(ch.length > 1 ? `“${ch}” added as a ligature` : `“${ch}” added`);
     return true;
   };
+
+  // (a letterform cut from this photo: the Drive photo it came from, or —
+  // an upload not stored in Drive — the file of the same name)
+  function samePhoto(v, item) {
+    const p = v && v.photo;
+    if (!p) return false;
+    if (item.sourceId) return p.id === item.sourceId;
+    return !p.id && !!item.name && p.name === item.name;
+  }
+
+  // The one to keep, of this photo's designs of a character: the new one
+  // (the ones before go), or one kept before (the new one and the rest go).
+  // Cancel leaves everything as it was.
+  function pickOne(ch, record, same, item, add) {
+    const modal = $('#dupModal');
+    if (!modal) { add(); advance(`“${ch}” added`); return; }
+    if (modal.classList.contains('open')) return;
+    const close = () => { modal.classList.remove('open'); g.removeEventListener('keydown', onKey, true); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+    const drop = (list) => {
+      for (const v of list) {
+        const s = ST.store.slot(ch);
+        const k = s ? s.variants.indexOf(v) : -1;
+        if (k >= 0) ST.store.deleteVariant(ch, k);
+      }
+    };
+    $('#dupTitle').textContent = `You already added “${ch}” from this photo. Which one do you want to keep?`;
+    const picks = $('#dupPicks');
+    picks.textContent = '';
+    const card = (thumb, label, onPick) => {
+      const b = g.document.createElement('button');
+      b.className = 'dup-pick';
+      const img = g.document.createElement('img');
+      if (thumb) img.src = thumb;
+      img.alt = label;
+      const span = g.document.createElement('span');
+      span.textContent = label;
+      b.append(img, span);
+      b.addEventListener('click', () => { close(); onPick(); });
+      picks.appendChild(b);
+    };
+    const thumbOf = (v) => { try { return v.thumb || ST.capture.makeThumb(v); } catch (e) { return null; } };
+    same.forEach((v, k) => card(thumbOf(v), same.length > 1 ? `Added before (${k + 1})` : 'Added before', () => {
+      drop(same.filter((u) => u !== v));
+      const s = ST.store.slot(ch);
+      if (s) ST.store.setActive(ch, s.variants.indexOf(v));
+      if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
+      advance(`Kept the “${ch}” from before`);
+    }));
+    card(record.thumb, 'New', () => {
+      drop(same);
+      add();
+      advance(`“${ch}” replaced`);
+    });
+    $('#dupCancel').onclick = close;
+    g.addEventListener('keydown', onKey, true);
+    modal.classList.add('open');
+  }
+  batch.pickOne = pickOne;
 
   batch.tryNext = function () {
     const item = batch.queue[batch.idx];

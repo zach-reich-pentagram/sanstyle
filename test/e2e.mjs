@@ -401,7 +401,7 @@ await page.waitForTimeout(250);
 const afterT = await page.evaluate(() => (ST.store.slot('T') ? ST.store.slot('T').variants.length : 0));
 check(afterT === beforeT + 1, 'Add to typeface stored the letterform');
 const emptyAfter = await page.evaluate(() => ({
-  queue: __st.state().queue, current: __st.state().current, hint: document.getElementById('stageHint').textContent,
+  queue: __st.state().queue, current: __st.state().current, hint: ST.capture.note,
 }));
 check(emptyAfter.queue === 0 && emptyAfter.current === null, `accepting the only photo empties the stage (“${emptyAfter.hint}”)`);
 
@@ -1079,7 +1079,32 @@ check(turnedCand.dy && dyRes.dy === 120 && dyRes.label === '+120', `Baseline mov
 await page.click('#reviewReset');
 await idle();
 check(await page.evaluate(() => ST.capture.view.rot === 0), 'Reset turns the photo back');
-await page.evaluate(() => ST.batch.skip());
+check(await page.evaluate(() => !document.getElementById('stageHint')), 'nothing is laid over the photo on the stage');
+
+// One design of a character per photo: the A traced and added; the same
+// photo again, an A traced from it and added — you are asked which to keep
+console.log('\n— the same letter from the same photo');
+await dragTrace([[342, 528], [398, 340], [446, 170]]);
+await dragTrace([[456, 178], [505, 350], [556, 520]]);
+await dragTrace([[392, 426], [450, 418], [510, 424]]);
+await page.click('#reviewChar', { clickCount: 3 });
+await page.keyboard.type('A');
+const aBefore = await page.evaluate(() => (ST.store.slot('A') ? ST.store.slot('A').variants.length : 0));
+await page.click('#reviewAccept');
+const firstA = await page.evaluate(() => { const s = ST.store.slot('A'); const v = s.variants[s.variants.length - 1]; return { n: s.variants.length, id: v.id, photo: v.photo && v.photo.name, open: document.getElementById('dupModal').classList.contains('open') }; });
+check(firstA.n === aBefore + 1 && firstA.photo === 'hah.png' && !firstA.open, `the traced A is added, from hah.png (${firstA.n} A's)`);
+await upload('hah.png', hahUrl);
+await page.evaluate(() => { ST.batch.idx = ST.batch.queue.length - 1; ST.batch.renderCurrent(); });
+await dragTrace([[342, 528], [398, 340], [446, 170]]);
+await page.click('#reviewChar', { clickCount: 3 });
+await page.keyboard.type('A');
+await page.click('#reviewAccept');
+const dup = await page.evaluate(() => ({ open: document.getElementById('dupModal').classList.contains('open'), cards: Array.from(document.querySelectorAll('#dupPicks .dup-pick')).map((b) => b.textContent), title: document.getElementById('dupTitle').textContent, n: ST.store.slot('A').variants.length }));
+check(dup.open && dup.cards.length === 2 && /Added before/.test(dup.cards[0]) && /New/.test(dup.cards[1]) && dup.n === firstA.n,
+  `adding a second A from the same photo asks which to keep (“${dup.title}” — ${dup.cards.join(' / ')}), nothing added yet`);
+await page.click('#dupPicks .dup-pick:last-child');
+const kept = await page.evaluate((oldId) => { const s = ST.store.slot('A'); return { n: s.variants.length, hasOld: s.variants.some((v) => v.id === oldId), active: s.variants[s.active].photo && s.variants[s.active].photo.name, open: document.getElementById('dupModal').classList.contains('open') }; }, firstA.id);
+check(!kept.open && kept.n === firstA.n && !kept.hasOld && kept.active === 'hah.png', `picking the new one replaces the one before (${kept.n} A's, the earlier one gone)`);
 
 
 // ---- live font + variant cycling ---------------------------------------------

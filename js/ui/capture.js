@@ -25,7 +25,7 @@
     lastDemo: null,
   });
 
-  let stage, ctx, wrap, hintEl, preview, pctx, traceC, tctx;
+  let stage, ctx, wrap, preview, pctx, traceC, tctx;
   let dragging = null;
   let spaceHeld = false;
   let raf = 0;
@@ -75,10 +75,10 @@
   }
   cap.setRot = setRot;
 
-  function setHint(msg) { if (hintEl) hintEl.textContent = msg || ''; }
+  // (what the empty stage says: nothing is laid over a photo — how to work
+  // on it is told in the Shape panel)
+  function setHint(msg) { cap.note = msg || ''; if (!cap.img) requestDraw(); }
   cap.setHint = setHint;
-
-  const HINT = 'Drag along a letter\'s strokes to trace it · click a letter to take it · shift-click adds a piece · option-click takes one off · option-drag cuts a join · scroll zooms, space pans';
 
   // ---------- the current photo and its shape ----------
   // The review queue calls this whenever the photo or the shape changes.
@@ -96,9 +96,7 @@
     if (wall) { wall.classList.toggle('active', !item); wall.classList.toggle('done', !!item); }
     if (shape) { shape.classList.toggle('active', !!item); shape.classList.toggle('locked', !item); }
     if (tag) { tag.classList.toggle('active', !!cand); tag.classList.toggle('locked', !cand); }
-    if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall.');
-    else if (!cand) setHint('Nothing picked yet — drag along the letter\'s strokes to trace it, or click it.');
-    else setHint(HINT);
+    if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall');
     // a leaning letter stands up by its stems (the Rotate slider adjusts)
     if (cand && cand.turn == null) {
       if (item && item.manualTurn != null) cand.turn = item.manualTurn; // set by hand on this photo: kept
@@ -410,7 +408,7 @@
       ctx.fillStyle = '#bbb';
       ctx.font = '400 14px "Helvetica Neue", Helvetica, Arial, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('Drop photos of graffiti here', stage.clientWidth / 2, stage.clientHeight / 2);
+      ctx.fillText(cap.note || 'Drop photos of graffiti here', stage.clientWidth / 2, stage.clientHeight / 2);
       ctx.textAlign = 'start';
       return;
     }
@@ -579,10 +577,9 @@
     }
   }
 
-  // Tracing, cutting and re-reading run on the page and take a moment:
-  // say so (cursor and hint) and let that paint before the work starts.
+  // Tracing, cutting and re-reading take a moment: say so (the cursor) and
+  // let that paint before the work starts. (label: what is being done)
   function busy(label, fn) {
-    setHint(label);
     if (stage) stage.style.cursor = 'progress';
     const done = () => { setTool(cap.tool); requestDraw(); };
     g.requestAnimationFrame(() => g.setTimeout(() => {
@@ -616,8 +613,7 @@
     const crop = $('#toolCrop');
     if (crop) crop.classList.toggle('on', tool === 'crop');
     if (stage) stage.style.cursor = tool === 'hand' ? 'grab' : 'crosshair';
-    if (tool === 'crop') setHint('Drag a box round the letter to crop the photo to it · Esc cancels');
-    else if (was === 'crop' && cap.item) setHint(HINT);
+    if (tool === 'crop' && was !== 'crop') ST.toast('Drag a box round the letter to crop the photo to it · Esc cancels');
   }
   cap.setTool = setTool;
 
@@ -626,7 +622,6 @@
     wrap = $('.stage-wrap');
     stage = $('#stage');
     ctx = stage.getContext('2d');
-    hintEl = $('#stageHint');
     preview = $('#previewCanvas');
     pctx = preview.getContext('2d');
     traceC = $('#reviewTrace');

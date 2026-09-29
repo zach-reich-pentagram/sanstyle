@@ -139,10 +139,12 @@ zoomed out); what you traced is the letter's skeleton:
   line at once, so it holds on to the stroke you meant — through a stroke
   of the same paint that crosses it, never jumping over to a neighbor's;
 - it is drawn at the paint's own width, out to the paint's own edge — a
-  brush wider in one stroke than another, silver's shaded rim (a pixel is
-  the stroke's when it is its paint and nearest its center line, or its
-  color is nearer the stroke's than the wall's), never into a neighbor's
-  stroke or another paint — and its edges evened out. Where another color
+  brush wider in one stroke than another, silver's shaded rim, a stroke
+  running into a shadow, a marker's soft edge (a pixel is the stroke's
+  when it is its paint and nearest its center line, or its color lies
+  between the stroke's and the wall's right round it, nearer the
+  stroke's), never into a neighbor's stroke or a third color that crosses
+  it — and its edges evened out. Where another color
   crosses over it, the stroke is drawn on underneath at its width; a short
   gap where the stroke runs straight on is bridged; bare wall is never
   painted in;
@@ -213,9 +215,13 @@ later in Glyphs ("Optical nudges"), where both can be nudged again.
 clicks, cuts, pieces, traced strokes or turn.
 
 On the stage the selected letter is boxed and its trace drawn over the
-paint; the clean silhouette and the letterform fitted into the em sit beside
-it, upright. Check the character (or type another), **Add** — the next photo
-comes up. A photo leaves the queue only when its letterform was added or
+paint — nothing else is laid over the photo (how to work on it is told in
+the Shape panel; notes pop up in the corner); the clean silhouette and the
+letterform fitted into the em sit beside it, upright. Check the character
+(or type another), **Add** — the next photo comes up. A character is taken
+from a photo once: add a second design of it from the same photo and you
+are shown both and pick the one to keep (the other goes; Cancel changes
+nothing). A photo leaves the queue only when its letterform was added or
 skipped, and the queue waits across tabs and reloads of Drive photos. The
 same photo shared into the inbox twice (same name, same size) is offered
 once.
@@ -457,7 +463,8 @@ npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the letter strip, a click that hands back the letter alone,
                 # a typed A found in "HAH" through the H's bars (and ⌘Z),
                 # the same A traced by hand, stroke by stroke (⌘Z, Reset,
-                # a dropped analysis read again, traced on a turned photo),
+                # a dropped analysis read again, traced on a turned photo,
+                # a second A from the same photo: pick which to keep),
                 # Baseline,
                 # Option-click removal, crop + its undo, Reset, a letter
                 # behind a pipe, one cut off by the frame, a throw-up's

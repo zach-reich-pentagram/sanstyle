@@ -87,7 +87,6 @@
       <button id="toolTurnR" class="seg-btn turn" title="Turn the photo a quarter turn right (the Rotate slider turns it any amount)" aria-label="Turn right">↻</button>
     </div>
     <div class="stage-status" id="reviewProgress"></div>
-    <div class="stage-hint" id="stageHint">Drop photos of graffiti here — or load a demo wall.</div>
   </div>
 
   <aside class="preview-col">
@@ -293,6 +292,17 @@
       <button class="pill primary" id="inboxExtract">Extract letterforms now</button>
       <button class="pill" id="inboxLater">Later</button>
       <button class="pill sm" id="inboxRescan">Re-scan all photos</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== SAME LETTER, SAME PHOTO ============================== -->
+<div class="modal" id="dupModal">
+  <div class="modal-panel narrow">
+    <p id="dupTitle"></p>
+    <div class="dup-picks" id="dupPicks"></div>
+    <div class="review-actions">
+      <button class="pill sm" id="dupCancel">Cancel</button>
     </div>
   </div>
 </div>
