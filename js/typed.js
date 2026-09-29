@@ -798,6 +798,107 @@
     return got(m, 'line');
   }
 
+  // The paint read from your line itself: the colors that make up much of
+  // what lies right under it (and more there than farther off), or that lie
+  // under it far more often than farther off, are the stroke's — whatever
+  // the photo's own reading made of them (a silver taken for the wall, a
+  // paint read as two). loc: your strokes (box px); rgb: the box's pixels.
+  // → { mask, near (distance to your line) } or null
+  function paintOfLine(loc, rgb, w, h, far) {
+    const R = ST.raster, N = w * h;
+    const inv = new Uint8Array(N).fill(1);
+    for (const p of loc) for (let k = 0; k < p.length; k += 2) {
+      const x = Math.round(p[k]), y = Math.round(p[k + 1]);
+      if (x >= 0 && y >= 0 && x < w && y < h) inv[y * w + x] = 0;
+    }
+    const near = R.distanceTransform(inv, w, h, { borderInk: true });
+    // (the colors of the box, a sample of them: the line's all, the rest thinned)
+    const step = Math.max(1, Math.round(Math.sqrt(N / 9000)));
+    const idx = [];
+    for (let y = 0; y < h; y += step) for (let x = 0; x < w; x += step) idx.push(y * w + x);
+    for (let i = 0; i < N; i++) if (near[i] <= 2 && ((i % w) % step || ((i / w) | 0) % step)) idx.push(i);
+    const M = idx.length, P = new Float32Array(M * 3);
+    for (let q = 0; q < M; q++) { const i = idx[q] * 4; P[q * 3] = rgb[i]; P[q * 3 + 1] = rgb[i + 1]; P[q * 3 + 2] = rgb[i + 2]; }
+    // (eight colors, seeded far apart: the line's own first)
+    const K = 8, C = new Float32Array(K * 3);
+    let nC = 0, n0 = 0;
+    for (let q = 0; q < M; q++) if (near[idx[q]] <= 2) { C[0] += P[q * 3]; C[1] += P[q * 3 + 1]; C[2] += P[q * 3 + 2]; n0++; }
+    if (n0 < 8) return null;
+    C[0] /= n0; C[1] /= n0; C[2] /= n0; nC = 1;
+    const best = new Float32Array(M).fill(Infinity);
+    while (nC < K) {
+      let far2 = -1, arg = -1;
+      const c = (nC - 1) * 3;
+      for (let q = 0; q < M; q++) {
+        const d = (P[q * 3] - C[c]) ** 2 + (P[q * 3 + 1] - C[c + 1]) ** 2 + (P[q * 3 + 2] - C[c + 2]) ** 2;
+        if (d < best[q]) best[q] = d;
+        if (best[q] > far2) { far2 = best[q]; arg = q; }
+      }
+      if (far2 < 64) break;
+      C[nC * 3] = P[arg * 3]; C[nC * 3 + 1] = P[arg * 3 + 1]; C[nC * 3 + 2] = P[arg * 3 + 2]; nC++;
+    }
+    const nearest = (r, g, b) => {
+      let bk = 0, bd = Infinity;
+      for (let k = 0; k < nC; k++) { const d = (r - C[k * 3]) ** 2 + (g - C[k * 3 + 1]) ** 2 + (b - C[k * 3 + 2]) ** 2; if (d < bd) { bd = d; bk = k; } }
+      return bk;
+    };
+    const lab = new Uint8Array(M);
+    for (let it = 0; it < 8; it++) {
+      const sum = new Float64Array(nC * 4);
+      for (let q = 0; q < M; q++) {
+        const k = (lab[q] = nearest(P[q * 3], P[q * 3 + 1], P[q * 3 + 2]));
+        sum[k * 4] += P[q * 3]; sum[k * 4 + 1] += P[q * 3 + 1]; sum[k * 4 + 2] += P[q * 3 + 2]; sum[k * 4 + 3]++;
+      }
+      for (let k = 0; k < nC; k++) if (sum[k * 4 + 3]) for (let j = 0; j < 3; j++) C[k * 3 + j] = sum[k * 4 + j] / sum[k * 4 + 3];
+    }
+    const onL = new Float32Array(nC), offL = new Float32Array(nC);
+    let nOn = 0, nOff = 0;
+    for (let q = 0; q < M; q++) {
+      const i = idx[q];
+      if (near[i] <= 2) { onL[lab[q]]++; nOn++; } else if (near[i] >= far) { offL[lab[q]]++; nOff++; }
+    }
+    if (!nOn || !nOff) return null;
+    // (and a shade of neither — common both on your line and off it, a paint's
+    // light where the paint is on other letters too — goes with the stroke's
+    // colors when it is plainly nearer them than the wall's, which are more
+    // common off your line than on it)
+    const paint = new Uint8Array(nC), wall = new Uint8Array(nC);
+    let any = false, anyWall = false;
+    for (let k = 0; k < nC; k++) {
+      const a = onL[k] / nOn, b = offL[k] / nOff;
+      if ((a >= 0.2 && a >= 1.2 * b) || (a >= 0.05 && a >= 2 * b + 0.02)) { paint[k] = 1; any = true; }
+      else if (b >= 0.05 && a < 0.8 * b) { wall[k] = 1; anyWall = true; }
+    }
+    if (!any) return null;
+    if (anyWall) {
+      const d = (k, j) => (C[k * 3] - C[j * 3]) ** 2 + (C[k * 3 + 1] - C[j * 3 + 1]) ** 2 + (C[k * 3 + 2] - C[j * 3 + 2]) ** 2;
+      const add = [];
+      for (let k = 0; k < nC; k++) {
+        if (paint[k] || wall[k]) continue;
+        let dp = Infinity, dw = Infinity;
+        for (let j = 0; j < nC; j++) { if (paint[j]) dp = Math.min(dp, d(k, j)); if (wall[j]) dw = Math.min(dw, d(k, j)); }
+        if (dp < 0.25 * dw) add.push(k);
+      }
+      for (const k of add) paint[k] = 1;
+    }
+    let mask = new Uint8Array(N);
+    for (let i = 0; i < N; i++) if (paint[nearest(rgb[i * 4], rgb[i * 4 + 1], rgb[i * 4 + 2])]) mask[i] = 1;
+    // (pits in the wall under the paint, the wall showing through a dry
+    // brush's streaks: holes in the stroke, not its edge — a counter is bigger)
+    const pit = Math.round(0.03 * Math.max(w, h, 400));
+    mask = R.fillHoles(mask, w, h, 0.05, pit * pit, 2);
+    // (only what touches your line: another letter of the same colors is not it)
+    const { labels, sizes } = R.components(mask, w, h);
+    const keep = new Uint8Array(sizes.length);
+    for (let i = 0; i < N; i++) if (mask[i] && near[i] <= 3) keep[labels[i]] = 1;
+    for (let i = 0; i < N; i++) mask[i] = keep[labels[i]];
+    // (the wall itself taken for the stroke: most of what is round it)
+    let a = 0, n = 0;
+    for (let i = 0; i < N; i++) if (near[i] >= far) { n++; if (mask[i]) a++; }
+    if (n && a > 0.5 * n) return null;
+    return { mask, near };
+  }
+
   // A line on the wall under your strokes: brighter (or darker) than what
   // is round it — a marker tag no paint was read for, or read in bits.
   function lineUnder(samples, src, box) {
@@ -975,7 +1076,7 @@
         } else if (covered >= 0.8 * (e - k)) for (let q = k; q < e; q++) disc(cx[q], cy[q], r0, hidden);
         k = e;
       }
-      lines.push({ cx, cy, first, last });
+      lines.push({ cx, cy, first, last, run: [[], []] });
     }
     // each end run on along the paint the way it goes, a little: to where
     // the paint ends, not on into what it meets
@@ -995,6 +1096,7 @@
           if (j >= 0 && F.graph.junction[j]) break; // a crossing: the stroke's end
           if (j >= 0 && (F.tx[j] || F.ty[j]) && Math.abs(dx * F.tx[j] + dy * F.ty[j]) < 0.8) break; // it turns off: another stroke
           disc(x, y, Math.min(Math.max(F.dIn[i], 1), r0));
+          L.run[side].push(x, y);
         }
       }
     }
@@ -1003,7 +1105,85 @@
     const rc = Math.max(1, Math.round(0.2 * sw));
     const within = rc > 0 ? ST.raster.close(mask, w, h, rc) : mask;
     for (let i = 0; i < out.length; i++) if (!within[i] && !hidden[i]) out[i] = 0;
-    return { mask: out, r0 };
+    return { mask: out, r0, lines };
+  }
+
+  // A stroke's end as a pen leaves it: where the paint thins out to a point
+  // (a can or a marker lifting off, a dry brush's last streaks), the
+  // stroke is cut where it is still near its own width and capped round at
+  // that width. An end where another of your strokes meets it is a joint,
+  // not an end, and is left as it is.
+  function roundTerminals(m, w, h, lines, r0) {
+    const R = ST.raster;
+    const dIn = R.distanceTransform(m, w, h);
+    const width = (x, y) => { const X = Math.round(x), Y = Math.round(y); return X < 0 || Y < 0 || X >= w || Y >= h ? 0 : dIn[Y * w + X]; };
+    const out = Uint8Array.from(m);
+    for (const L of lines) {
+      for (const side of [0, 1]) {
+        // (the end's center line, from its tip inward: the run on along the
+        // paint, then the stroke's own)
+        const pts = [];
+        const run = L.run[side];
+        for (let k = run.length - 2; k >= 0; k -= 2) pts.push([run[k], run[k + 1]]);
+        if (side) for (let k = L.last; k >= L.first; k--) pts.push([L.cx[k], L.cy[k]]);
+        else for (let k = L.first; k <= L.last; k++) pts.push([L.cx[k], L.cy[k]]);
+        if (pts.length < 6) continue;
+        const [ex, ey] = pts[0];
+        let joint = false;
+        for (const L2 of lines) {
+          if (L2 === L) continue;
+          for (let k = L2.first; k <= L2.last && !joint; k++) if (Math.hypot(L2.cx[k] - ex, L2.cy[k] - ey) < 2 * r0) joint = true;
+          if (joint) break;
+        }
+        if (joint) continue;
+        // (its width a little way in — between one and three half-widths from
+        // the tip — and no wider than the stroke along its length, nor the
+        // letter's: a crossing near the end is not the stroke's width)
+        const arc = [0];
+        for (let k = 1; k < pts.length; k++) arc.push(arc[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+        const ws = [];
+        for (let k = 0; k < pts.length && arc[k] <= 3 * r0; k++) if (arc[k] >= r0) ws.push(width(pts[k][0], pts[k][1]));
+        if (ws.length < 3) continue;
+        ws.sort((a, b) => a - b);
+        const all = [];
+        for (let k = L.first; k <= L.last; k += 2) all.push(width(L.cx[k], L.cy[k]));
+        all.sort((a, b) => a - b);
+        const typ = Math.min(ws[ws.length >> 1], 1.1 * (all[all.length >> 1] || r0), 1.15 * r0);
+        if (typ < 1.5) continue;
+        // (where it is last that wide, coming in from the tip: an end that
+        // keeps its width to the tip — a round end is gone within its own
+        // half-width — is a pen's end already)
+        let kc = -1;
+        for (let k = 0; k < pts.length && arc[k] <= 4 * r0; k++) if (width(pts[k][0], pts[k][1]) >= 0.75 * typ) { kc = k; break; }
+        // (wide to its tip: only a thread of paint run on past it goes)
+        if (kc < 0 || (kc > 0 && arc[kc] < 0.8 * typ)) continue;
+        const [cx, cy] = pts[kc];
+        const rc = Math.min(typ, width(cx, cy));
+        let dx = kc > 0 ? pts[0][0] - cx : pts[0][0] - pts[Math.min(pts.length - 1, 3)][0];
+        let dy = kc > 0 ? pts[0][1] - cy : pts[0][1] - pts[Math.min(pts.length - 1, 3)][1];
+        // the thinning past it goes (what lies on beyond the cap, along the
+        // tip's own line — not another stroke's that passes near), and the
+        // cap comes round
+        const len = Math.hypot(dx, dy) || 1;
+        dx /= len; dy /= len;
+        const reachT = arc[kc] + 4 * typ;
+        const x0 = Math.max(0, Math.floor(cx - reachT)), x1 = Math.min(w - 1, Math.ceil(cx + reachT));
+        const y0 = Math.max(0, Math.floor(cy - reachT)), y1 = Math.min(h - 1, Math.ceil(cy + reachT));
+        const others = (x, y) => lines.some((L2) => L2 !== L && L2.cx.some((v, k) => k >= L2.first && k <= L2.last && Math.hypot(v - x, L2.cy[k] - y) <= 1.3 * r0));
+        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+          const i = y * w + x;
+          if (!out[i]) continue;
+          const along = (x - cx) * dx + (y - cy) * dy, across = Math.abs((x - cx) * dy - (y - cy) * dx);
+          if (along > 0 && along <= reachT && across <= 1.5 * typ && Math.hypot(x - cx, y - cy) > rc && !others(x, y)) out[i] = 0;
+        }
+        if (!kc) continue;
+        const rr = (rc + 0.5) * (rc + 0.5);
+        for (let y = Math.max(0, Math.floor(cy - rc)); y <= Math.min(h - 1, Math.ceil(cy + rc)); y++) {
+          for (let x = Math.max(0, Math.floor(cx - rc)); x <= Math.min(w - 1, Math.ceil(cx + rc)); x++) if ((x - cx) ** 2 + (y - cy) ** 2 <= rr) out[y * w + x] = 1;
+        }
+      }
+    }
+    return out;
   }
 
   // Out to the paint's own edge: a stroke drawn at the letter's width comes
@@ -1067,10 +1247,11 @@
     return res;
   }
 
-  // Edges evened out: a pixel's worth of jag (a brush's bristles, the
-  // paint read pixel by pixel) smoothed away; a line two pixels thick stays.
+  // Edges evened out: the jag of a brush's bristles, a rough wall's pits at
+  // the paint's edge, the paint read pixel by pixel — smoothed away over a
+  // sixth of the stroke's width; a line two pixels thick stays.
   function smoothEdges(m, w, h, r0) {
-    const r = r0 > 8 ? 2 : 1;
+    const r = Math.max(1, Math.min(4, Math.round(r0 / 6)));
     const f = new Float32Array(m.length);
     for (let i = 0; i < m.length; i++) f[i] = m[i];
     const b = ST.raster.blur(ST.raster.blur(f, w, h, r), w, h, r);
@@ -1105,7 +1286,43 @@
     const box = { x0: Math.max(0, Math.floor(x0 - margin)), y0: Math.max(0, Math.floor(y0 - margin)), x1: Math.min(W, Math.ceil(x1 + margin)), y1: Math.min(H, Math.ceil(y1 + margin)) };
     const rw = box.x1 - box.x0, rh = box.y1 - box.y0;
     if (rw < 8 || rh < 8) return null;
-    const got = paintUnder(samples, src, box);
+    let got = paintUnder(samples, src, box);
+    // your strokes, in the box's px
+    const loc = paths.map((p) => p.map((v, k) => v - (k % 2 ? box.y0 : box.x0)));
+    let rgb = null;
+    if (src.data) {
+      rgb = new Uint8ClampedArray(rw * rh * 4);
+      for (let y = 0; y < rh; y++) rgb.set(src.data.subarray(((y + box.y0) * W + box.x0) * 4, ((y + box.y0) * W + box.x0 + rw) * 4), y * rw * 4);
+      // the paint read from your line's own colors too: what the photo's
+      // reading left off (a brush's streaks, a shade of it read as another
+      // paint, a silver taken for the wall) — and in place of a guess (the
+      // photo's shapes, a line's edge) where the photo read no paint under it
+      const own = paintOfLine(loc, rgb, rw, rh, Math.max(30, Math.round(0.06 * Math.max(W, H))));
+      if (own) {
+        let a = 0, n = 0;
+        for (let i = 0; i < own.mask.length; i++) if (own.near[i] <= 2) { n++; if (own.mask[i]) a++; }
+        if (o.debug) o.debug.fOwn = n ? a / n : 0;
+        if (n && a >= 0.5 * n) {
+          const paint = got && /^paint/.test(got.from);
+          const m = own.mask;
+          if (paint) {
+            // (the photo's reading good under your line: only what no other
+            // paint of it has — not a stroke of another color it crosses)
+            let g = 0;
+            for (let i = 0; i < m.length; i++) if (own.near[i] <= 2 && got.mask[i]) g++;
+            if (g >= 0.7 * n) for (let i = 0; i < m.length; i++) if (got.any[i] && !got.mask[i]) m[i] = 0;
+            // (less the rim it adds round the paint read: an edge's blend of
+            // paint and wall is not the paint)
+            for (let i = 0; i < m.length; i++) if (got.mask[i]) m[i] = 1;
+            const core = R.erode(m, rw, rh, 1);
+            for (let i = 0; i < m.length; i++) if (m[i] && !got.mask[i] && !core[i]) m[i] = 0;
+          }
+          const any = got ? got.any : new Uint8Array(rw * rh);
+          for (let i = 0; i < any.length; i++) if (m[i]) any[i] = 1;
+          got = { mask: m, any, from: paint ? got.from + ' + line colors' : 'line colors', line: got && got.line };
+        }
+      }
+    }
     if (!got || !R.count(got.mask)) return null;
     const mask = got.mask;
     if (o.debug) Object.assign(o.debug, { box, mask, any: got.any, from: got.from });
@@ -1140,22 +1357,20 @@
       }
     }
     const F = field(mask, rw, rh, sw);
-    // your strokes, in the box's px, onto the paint (a hand is off by a
-    // stroke's width, or by what a pointer's pixel spans zoomed out)
-    const loc = paths.map((p) => p.map((v, k) => v - (k % 2 ? box.y0 : box.x0)));
+    // your strokes onto the paint (a hand is off by a stroke's width, or by
+    // what a pointer's pixel spans zoomed out)
     const reach = Math.max(1.5 * sw, 8, o.tol || 0);
     const drawn = drawTraced(loc, F, mask, got.any, reach);
     if (o.debug) Object.assign(o.debug, { sw, r0: drawn.r0, drawn: drawn.mask, rw, rh });
     if (!R.count(drawn.mask)) return null;
     let m = drawn.mask;
-    if (src.data) {
-      const rgb = new Uint8ClampedArray(rw * rh * 4);
-      for (let y = 0; y < rh; y++) rgb.set(src.data.subarray(((y + box.y0) * W + box.x0) * 4, ((y + box.y0) * W + box.x0 + rw) * 4), y * rw * 4);
+    if (rgb) {
       // (never into another paint: a stroke crossing it, a neighbor)
       const other = new Uint8Array(rw * rh);
       for (let i = 0; i < other.length; i++) other[i] = got.any[i] && !mask[i] ? 1 : 0;
       m = growToEdge(m, rgb, rw, rh, drawn.r0, F, mask, other);
     }
+    m = roundTerminals(m, rw, rh, drawn.lines, drawn.r0);
     m = smoothEdges(m, rw, rh, drawn.r0);
     // (drawn along your strokes it is smooth already: only pinholes filled
     // and specks dropped — a clean-up for raw paint would shave off a thin

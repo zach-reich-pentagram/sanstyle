@@ -128,8 +128,13 @@ zoomed out); what you traced is the letter's skeleton:
 
 - the paint under your line is read: the photo's paint that lies along it
   (a paint read as two — its light and its shade — taken together), and
-  for a thin marker line, the pixels that stand out from the wall as a line,
-  so a faint stretch of it isn't lost;
+  the colors of your line itself — those that make up much of what lies
+  right under it, or lie there far more often than farther off, and the
+  shades plainly nearer those than the wall's — so a stroke comes out
+  whole whatever the photo's reading made of its paint (a silver taken for
+  the wall, a dry brush's streaks, a paint full of the wall's pits); for a
+  thin marker line, also the pixels that stand out from the wall as a
+  line, so a faint stretch of it isn't lost;
 - your line is moved onto the paint's center line, chosen for the whole
   line at once, so it holds on to the stroke you meant — through a stroke
   of the same paint that crosses it, never jumping over to a neighbor's;
@@ -142,7 +147,11 @@ zoomed out); what you traced is the letter's skeleton:
   gap where the stroke runs straight on is bridged; bare wall is never
   painted in;
 - each end runs on along the paint a little (you needn't hit it exactly),
-  but not on into a neighbor it touches.
+  but not on into a neighbor it touches; an end where the paint thins out
+  to a point (a can or a marker lifting off, a brush's last streaks) is cut
+  where the stroke is still near its own width and capped round, the way a
+  pen tip ends a stroke — an end another of your strokes meets is a joint
+  and is left as it is.
 
 Each stroke you add reads the letter again with all of them (in the worker,
 a fraction of a second); the character it reads as is filled in unless you
