@@ -173,8 +173,50 @@
   // ---------- photos in Drive ----------
   // Every photo in the inbox folder, thumbnails through the api. Photos that
   // already gave a letterform are grayed; click any of them to extract
-  // again — the photo lands on the capture stage like a fresh upload.
+  // again — the photo comes up on the capture stage at once, ahead of the
+  // queue. Hover one to see the letterforms it gave.
   let photos = null, photosAt = 0, photosLoading = false;
+
+  // The letterforms each photo gave: a letterform records its photo's Drive
+  // id (any copy of the photo counts) and name (store.js, `photo`); by name
+  // when the id isn't in the folder (a local upload, a photo shared in
+  // again). Letterforms captured before they recorded their photo can't be
+  // placed.
+  const stem = (name) => String(name || '').toLowerCase().replace(/\.[a-z0-9]{2,5}$/, '');
+  function formsByPhoto(list) {
+    const byId = new Map(), byName = new Map(), out = new Map();
+    for (const p of list) {
+      for (const id of p.copies || [p.id]) byId.set(id, p);
+      const k = stem(p.name);
+      if (k && !byName.has(k)) byName.set(k, p);
+    }
+    for (const ch of ST.store.filledChars()) {
+      for (const v of ST.store.slot(ch).variants) {
+        const src = v.photo;
+        if (!src) continue;
+        const p = (src.id && byId.get(src.id)) || (src.name && byName.get(stem(src.name)));
+        if (!p) continue;
+        if (!out.has(p)) out.set(p, []);
+        out.get(p).push({ ch, v });
+      }
+    }
+    return out;
+  }
+
+  // The overlay a tile shows on hover: each letterform's outline with its
+  // character. Built on the first hover only.
+  const FORMS_SHOWN = 12;
+  function formsOverlay(forms) {
+    const box = el('div', { class: 'photo-forms' });
+    const dpr = Math.min(2, g.devicePixelRatio || 1);
+    for (const { ch, v } of forms.slice(0, FORMS_SHOWN)) {
+      const cnv = el('canvas', { width: Math.round(40 * dpr), height: Math.round(40 * dpr) });
+      drawGlyphInto(cnv, v, false);
+      box.appendChild(el('span', { class: 'photo-form', title: ch }, cnv, el('span', {}, ch)));
+    }
+    if (forms.length > FORMS_SHOWN) box.appendChild(el('span', { class: 'photo-form more' }, `+${forms.length - FORMS_SHOWN}`));
+    return box;
+  }
 
   ui.refreshPhotos = async function (force) {
     if (!ST.sync || !ST.sync.unlocked) { renderPhotos(); return; }
@@ -206,10 +248,12 @@
       el('button', { class: 'pill sm', onclick: () => ui.refreshPhotos(true) }, photosLoading ? 'Loading…' : 'Refresh'),
     ));
     root.appendChild(el('p', { class: 'dim' },
-      'Click a photo to extract letterforms from it again. Grayed photos have already given letterforms.'));
+      'Click a photo to extract letterforms from it again. Grayed photos have already given letterforms — hover one to see them.'));
     const grid = el('div', { class: 'photo-grid' });
+    const byPhoto = formsByPhoto(list);
     for (const p of list) {
-      const used = done.has(p.id);
+      const forms = byPhoto.get(p) || [];
+      const used = forms.length > 0 || (p.copies || [p.id]).some((id) => done.has(id));
       const card = el('button', {
         class: 'photo-card' + (used ? ' done' : ''),
         'data-photo': p.id,
@@ -219,6 +263,15 @@
       const img = el('img', { alt: p.name || '' });
       card.appendChild(img);
       card.appendChild(el('span', { class: 'photo-name' }, p.name || ''));
+      if (forms.length) {
+        card.appendChild(el('span', {
+          class: 'photo-forms-count',
+          title: `${forms.length} letterform${forms.length === 1 ? '' : 's'} from this photo`,
+        }, String(forms.length)));
+        const show = () => { if (!card.querySelector('.photo-forms')) card.appendChild(formsOverlay(forms)); };
+        card.addEventListener('mouseenter', show);
+        card.addEventListener('focus', show);
+      }
       grid.appendChild(card);
       ST.sync.photoThumb(p.id).then((url) => { img.src = url; }).catch(() => card.classList.add('broken'));
     }

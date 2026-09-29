@@ -35,7 +35,7 @@
     if (!item) { el.textContent = batch.intakeActive ? 'Analyzing…' : ''; return; }
     const more = batch.intakeActive ? '+' : '';
     let text = `Photo ${batch.idx + 1} of ${batch.queue.length}${more}`;
-    if (item.angle) text += ` · straightened ${item.angle > 0 ? '−' : '+'}${Math.abs(item.angle)}°`;
+    if (item.rect) text += ' · flattened';
     if (item.name && !/^demo-/.test(item.name)) text += ` · ${item.name.length > 28 ? item.name.slice(0, 26) + '…' : item.name}`;
     el.textContent = text;
   }
@@ -86,7 +86,9 @@
           c.getContext('2d').drawImage(r.image, 0, 0);
           if (r.image.close) r.image.close();
           if (r.inPhoto) c._inPhoto = r.inPhoto;
-          return { canvas: c, angle: r.angle, candidates: r.candidates };
+          // (`analysis`: the worker keeps what it found, and answers clicks
+          // on this photo from it)
+          return { canvas: c, angle: r.angle, rect: r.rect || null, analysis: r.analysis, candidates: r.candidates };
         }
         console.warn('analysis in the worker failed — analyzing on the page instead:', r.error);
       } catch (e) {
@@ -107,18 +109,24 @@
     return pushResult(await batch.analyze(canvas, {}), name, sourceId);
   }
 
-  function pushResult(result, name, sourceId) {
-    batch.queue.push({
+  // (front: onto the stage now, ahead of the rest of the queue — what was
+  // on it waits right behind, edits and all)
+  function pushResult(result, name, sourceId, front) {
+    const item = {
       name: name || 'photo',
       sourceId: sourceId || null,
       canvas: result.canvas,
       angle: result.angle,
+      rect: result.rect || null,        // the flattening (rectify.js), to find the crop in the photo again
+      analysis: result.analysis || null,
       candidates: result.candidates,
       ci: 0,
       // the selection as first made, for Reset
-      original: { canvas: result.canvas, angle: result.angle, candidates: result.candidates },
-    });
-    if (batch.idx === batch.queue.length - 1) renderCurrent();
+      original: { canvas: result.canvas, angle: result.angle, analysis: result.analysis || null, candidates: result.candidates },
+    };
+    if (front) batch.queue.splice(batch.idx, 0, item);
+    else batch.queue.push(item);
+    if (front || batch.idx === batch.queue.length - 1) renderCurrent();
     else setProgress();
     updateQueuePill();
     return result.candidates.length;
@@ -185,6 +193,39 @@
     endIntake();
   };
 
+  // One Drive photo picked in the Glyphs gallery: it comes up on the stage
+  // now — not at the back of the queue, behind a Re-scan or the inbox's new
+  // photos — whether or not it gave letterforms before. A photo still
+  // waiting in the queue is brought forward rather than fetched again.
+  const opening = new Set();
+  batch.openRemotePhoto = async function (photo) {
+    if (!photo || !photo.id) return false;
+    const ids = photo.copies || [photo.id];
+    if (ST.switchTab) ST.switchTab('capture');
+    const k = batch.queue.findIndex((q, i) => i >= batch.idx && ids.includes(q.sourceId));
+    if (k >= 0) {
+      if (k > batch.idx) batch.queue.splice(batch.idx, 0, batch.queue.splice(k, 1)[0]);
+      renderCurrent();
+      return true;
+    }
+    if (opening.has(photo.id)) return false; // on its way already
+    opening.add(photo.id);
+    ST.toast(`Opening ${photo.name || 'the photo'} from Drive…`);
+    if (!batch.queue[batch.idx]) ST.capture.setHint('Analyzing…');
+    try {
+      const canvas = await ST.sync.fetchPhotoCanvas(photo);
+      pushResult(await batch.analyze(canvas, {}), photo.name, photo.id, true);
+      return true;
+    } catch (e) {
+      console.warn('drive photo failed', photo.name, e);
+      ST.toast(`Could not open ${photo.name || 'that photo'}.`, 'warn');
+      if (!batch.queue[batch.idx]) renderCurrent();
+      return false;
+    } finally {
+      opening.delete(photo.id);
+    }
+  };
+
   function fileToCanvas(file) {
     return new Promise((resolve, reject) => {
       const done = (src, w, h) => {
@@ -211,10 +252,6 @@
   }
 
   // ---------- rendering ----------
-  function syncIsolateLabel() {
-    const key = batch.charKey($('#reviewChar').value);
-    $('#reviewIsolate').textContent = key.length === 1 ? `Isolate “${key}”` : 'Isolate';
-  }
 
   // Put the current photo and shape on the stage and sync every control.
   function renderCurrent() {
@@ -228,17 +265,8 @@
     if (guess) { input.value = guess; ST.capture.updatePreview(); }
     setProgress();
     updateQueuePill();
-    syncIsolateLabel();
-    $('#reviewDetail').value = item ? item.detail || 5 : 5;
-    $('#reviewDetail').disabled = !item;
-    $('#reviewAlt').disabled = !item || item.candidates.length < 2;
-    $('#reviewIsolate').disabled = !cand;
+    showLetters(item);
     $('#reviewReset').disabled = !item || !item.original;
-    $('#paintPick').disabled = !item;
-    const sw = $('#paintSwatch'), p = item && item.paint;
-    sw.classList.toggle('set', !!p);
-    sw.style.background = p ? `rgb(${Math.round(p.r)},${Math.round(p.g)},${Math.round(p.b)})` : '';
-    sw.textContent = p ? '' : 'auto';
     $('#reviewSkip').disabled = !item;
     if (!item) {
       $('#reviewHint').textContent = batch.intakeActive
@@ -249,23 +277,66 @@
     if (!cand) {
       $('#reviewHint').textContent = 'Nothing traced yet — click the letter in the photo to trace it, or skip the photo.';
     } else {
-      const kindNote = { separated: ' (separated from a touching neighbor)', letter: ' (the letter alone — what was fused onto it taken off)', isolated: ' (isolated)', parts: ' (with added pieces)', trimmed: ' (pieces removed)' }[cand.kind] || '';
-      $('#reviewHint').textContent =
-        `Shape ${item.ci + 1} of ${item.candidates.length}${kindNote}. ` +
-        'Wrong shape? Click the letter in the photo. Fused with a neighbor? Type the character, Option-click the neighbor to take it off, or drag a cut across the join. ' +
-        'Missing a piece (a dot, a point, a bit that got cut off)? Shift-click it. ⌘Z undoes the last change.';
+      $('#reviewHint').textContent = item.candidates.length > 1
+        ? 'Pick the letter below, or click it in the photo. Still fused with a neighbor? Option-click the neighbor, or drag a cut across the join. Missing a piece? Shift-click it. ⌘Z undoes.'
+        : 'Not the letter you want? Click it in the photo. Fused with a neighbor? Option-click the neighbor, or drag a cut across the join. Missing a piece? Shift-click it. ⌘Z undoes.';
     }
     const tab = $('#tab-capture');
     if (tab && tab.classList.contains('active')) setTimeout(() => { input.focus(); input.select(); }, 60);
   }
   batch.renderCurrent = renderCurrent;
 
+  // Every letter found in the photo, side by side: one click picks it.
+  function thumbOf(cand) {
+    if (cand._thumb) return cand._thumb;
+    const S = 44, c = g.document.createElement('canvas');
+    c.width = S; c.height = S;
+    const x = c.getContext('2d');
+    const bb = ST.raster.maskBounds(cand.mask, cand.w, cand.h);
+    if (bb) {
+      const m = g.document.createElement('canvas');
+      m.width = bb.w; m.height = bb.h;
+      const mx = m.getContext('2d'), id = mx.createImageData(bb.w, bb.h);
+      for (let y = 0; y < bb.h; y++) {
+        for (let xx = 0; xx < bb.w; xx++) if (cand.mask[(y + bb.y0) * cand.w + xx + bb.x0]) id.data[(y * bb.w + xx) * 4 + 3] = 255;
+      }
+      mx.putImageData(id, 0, 0);
+      const k = (S - 8) / Math.max(bb.w, bb.h);
+      x.drawImage(m, (S - bb.w * k) / 2, (S - bb.h * k) / 2, bb.w * k, bb.h * k);
+    }
+    cand._thumb = c;
+    return c;
+  }
+  function showLetters(item) {
+    const strip = $('#letterStrip');
+    if (!strip) return;
+    strip.textContent = '';
+    if (!item || item.candidates.length < 2) { strip.hidden = true; return; }
+    strip.hidden = false;
+    item.candidates.slice(0, 12).forEach((cand, k) => {
+      const b = g.document.createElement('button');
+      b.className = 'letter-pick' + (k === item.ci ? ' on' : '');
+      const r = cand.read && cand.read.ranked && cand.read.ranked[0];
+      b.title = r && cand.read.letterness >= 0.5 ? `Reads as “${r.ch}”` : 'This shape';
+      b.appendChild(thumbOf(cand));
+      if (r && cand.read.letterness >= 0.5) {
+        const t = g.document.createElement('span');
+        t.textContent = r.ch;
+        b.appendChild(t);
+      }
+      b.addEventListener('click', () => batch.pick(k));
+      strip.appendChild(b);
+    });
+  }
+  batch.pick = function (k) {
+    const item = batch.queue[batch.idx];
+    if (!item || !item.candidates[k]) return;
+    item.ci = k;
+    renderCurrent();
+  };
+
   // ---------- click-to-trace, cut, isolate ----------
   // Click-to-trace: canvas-pixel coordinates on the current photo.
-  // The review's Detail knob (1–9) is the extraction's smoothing, inverted:
-  // low detail heals gaps and smooths hard, high detail keeps every nuance.
-  function smoothingFor(item) { return 9 - (item.detail || 5); }
-  batch.smoothingFor = smoothingFor;
 
   batch.clickTrace = function (x, y, opts) {
     const item = batch.queue[batch.idx];
@@ -288,11 +359,10 @@
     return applyClick(item, res, opts);
   };
 
-  const clickOpts = (item) => ({ cuts: item.cuts || null, smoothing: smoothingFor(item), paint: item.paint || null });
-  // a photo read again as it is (already straightened and scaled), in the
-  // paint picked for it, if any
-  function reread(item) {
-    return { deskew: false, noUpscale: true, maxEdge: 1e9, smoothing: smoothingFor(item), paint: item.paint || null };
+  const clickOpts = (item) => ({ cuts: item.cuts || null, smoothing: 4 });
+  // a photo read again as it is (already flattened and scaled)
+  function reread() {
+    return { deskew: false, maxEdge: 1e9 };
   }
 
   function applyClick(item, res, opts) {
@@ -321,7 +391,8 @@
         const cv = item.canvas;
         if (!photoKeys.has(cv)) photoKeys.set(cv, photoKeyNext++);
         const key = photoKeys.get(cv);
-        const msg = { type: 'seeded', key, x, y, opts };
+        // (answered from the photo's analysis when nothing was cut)
+        const msg = { type: 'seeded', key, x, y, opts, analysis: item.analysis, fast: !(opts && (opts.cuts && opts.cuts.length || opts.noSnap)) };
         const transfer = [];
         if (workerPhoto !== key) {
           msg.bitmap = await g.createImageBitmap(cv);
@@ -417,12 +488,12 @@
     return cx >= 0 && cy >= 0 && cx < cand.w && cy < cand.h && !!cand.mask[cy * cand.w + cx];
   };
 
-  batch.addPart = function (x, y, opts) {
+  batch.addPart = async function (x, y, opts) {
     const o = opts || {};
     const item = batch.queue[batch.idx];
     if (!item) return 0;
     const cur = item.candidates[item.ci];
-    if (!cur) return batch.clickTrace(x, y);
+    if (!cur) return batch.clickTraceAsync(x, y);
     if (covers(cur, x, y)) {
       if (!o.quiet) ST.toast('That spot is already part of the shape.');
       return 0;
@@ -431,7 +502,9 @@
     // 1. the paint under the click, grown from the click itself (never
     //    snapped away onto the shape that is already there)
     let merged = null;
-    const res = ST.extract.seeded(item.canvas, x, y, { cuts: item.cuts || null, smoothing: smoothingFor(item), noSnap: true });
+    // (grown in the background worker: a big photo takes a moment)
+    const res = await seededAsync(item, x, y, { cuts: item.cuts || null, smoothing: 4, noSnap: true, noLetters: true });
+    if (batch.queue[batch.idx] !== item || item.candidates[item.ci] !== cur) return 0; // moved on meanwhile
     if (res) merged = mergePart(cur, res.candidates[res.candidates.length - 1], { x, y }, res.click || { x, y }, sw);
     // 2. still nothing at the clicked spot: brush in a stroke-width spot
     let brushed = false;
@@ -454,7 +527,6 @@
       const keep = $('#reviewChar').value;
       renderCurrent();
       $('#reviewChar').value = keep;
-      syncIsolateLabel();
       ST.capture.updatePreview();
       ST.toast(brushed ? 'Filled in a stroke-width spot.' : 'Piece added to the shape.');
     }
@@ -484,7 +556,6 @@
       const keep = $('#reviewChar').value;
       renderCurrent();
       $('#reviewChar').value = keep;
-      syncIsolateLabel();
       ST.capture.updatePreview();
       ST.toast('Piece removed — ⌘Z brings it back.');
     }
@@ -494,40 +565,17 @@
   // Shift-clicked pieces (and Option-clicked removals) are remembered, so a
   // Detail change, a cut, an undo or an Isolate can rebuild the shape and
   // put them back.
-  function reapplyParts(item) {
+  async function reapplyParts(item) {
     let n = 0;
-    for (const p of item.parts || []) n += batch.addPart(p.x, p.y, { replay: true, quiet: true });
+    for (const p of item.parts || []) n += await batch.addPart(p.x, p.y, { replay: true, quiet: true });
     for (const r of item.removals || []) n += batch.removeAt(r.x, r.y, { replay: true, quiet: true });
     if (n) {
       const keep = $('#reviewChar').value;
       renderCurrent();
       $('#reviewChar').value = keep;
-      syncIsolateLabel();
     }
     return n;
   }
-
-  // Re-extract the current photo at a new Detail setting: the automatic
-  // shapes again, then the last click on top of them, then the isolation
-  // that was applied — so the knob feels like it turns the shape itself.
-  // (the automatic pass runs in the background worker: the page stays live)
-  batch.setDetail = async function (v) {
-    const item = batch.queue[batch.idx];
-    if (!item) return;
-    item.detail = v;
-    const keep = $('#reviewChar').value;
-    const wasIsolated = !!(item.candidates[item.ci] && item.candidates[item.ci].kind === 'isolated');
-    const res = await batch.analyze(item.canvas, reread(item));
-    if (item.detail !== v || batch.queue[batch.idx] !== item) return; // moved on meanwhile
-    item.candidates = res.candidates;
-    item.ci = 0;
-    if (item.lastClick) batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
-    else renderCurrent();
-    reapplyParts(item);
-    $('#reviewChar').value = keep;
-    syncIsolateLabel();
-    if (wasIsolated && keep.trim()) batch.isolate({ quiet: true });
-  };
 
   function cutWidthFor(item) {
     const maxDim = Math.max(item.canvas.width, item.canvas.height);
@@ -574,7 +622,6 @@
     const seed = keepSideSeed(item, cut);
     let n = batch.clickTrace(seed.x, seed.y, { keepParts: true });
     if (!n && item.lastClick) n = batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
-    reapplyParts(item);
     item.history = (item.history || []).concat([{ type: 'cut' }]);
     return n > 0;
   };
@@ -591,7 +638,7 @@
     const was = item.lastClick;
     let n = await batch.clickTraceAsync(seed.x, seed.y, { keepParts: true });
     if (!n && was && batch.queue[batch.idx] === item) n = await batch.clickTraceAsync(was.x, was.y, { keepParts: true });
-    reapplyParts(item);
+    await reapplyParts(item);
     return n > 0;
   };
 
@@ -602,7 +649,7 @@
     const cur = item.candidates[item.ci];
     const want = cur ? cur.base || cur.kind : null;
     if (item.lastClick) {
-      const n = batch.clickTrace(item.lastClick.x, item.lastClick.y, { keepParts: true });
+      const n = await batch.clickTraceAsync(item.lastClick.x, item.lastClick.y, { keepParts: true });
       // back on the kind of shape that was being worked on (the whole, not
       // the letter the click offers first)
       const k = item.candidates.slice(0, n).findIndex((c) => c.kind === want);
@@ -611,48 +658,24 @@
       const res = await batch.analyze(item.canvas, reread(item));
       if (batch.queue[batch.idx] !== item) return;
       item.candidates = res.candidates;
+      item.analysis = res.analysis || null;
       item.ci = 0;
       renderCurrent();
     }
-    reapplyParts(item);
+    await reapplyParts(item);
     $('#reviewChar').value = keep;
-    syncIsolateLabel();
     ST.capture.updatePreview();
   }
 
-  // Pick the paint: the color under (x, y) is the paint to extract, and the
-  // photo is read again for it alone (a white tag beside a pink sticker, a
-  // pale stroke next to a bright one). Clicks then trace that paint too.
-  batch.pickPaint = async function (x, y) {
-    const item = batch.queue[batch.idx];
-    if (!item) return false;
-    const c = item.canvas, W = c.width, H = c.height;
-    x = Math.round(x); y = Math.round(y);
-    if (x < 0 || y < 0 || x >= W || y >= H) return false;
-    const d = c.getContext('2d').getImageData(Math.max(0, x - 3), Math.max(0, y - 3), 7, 7).data;
-    let r = 0, g = 0, b = 0, n = 0;
-    for (let i = 0; i < d.length; i += 4) { if (!d[i + 3]) continue; r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
-    if (!n) return false;
-    const prev = { paint: item.paint || null, candidates: item.candidates, ci: item.ci, cuts: item.cuts, parts: item.parts, removals: item.removals, lastClick: item.lastClick };
-    item.paint = { r: r / n, g: g / n, b: b / n, x, y };
-    const res = await batch.analyze(item.canvas, reread(item));
-    if (batch.queue[batch.idx] !== item) return false;
-    Object.assign(item, { candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null });
-    item.history = (item.history || []).concat([{ type: 'paint', prev }]);
-    renderCurrent();
-    ST.toast(res.candidates.length ? 'Reading that paint color only — Reset goes back to the automatic choice.' : 'Nothing found in that color — ⌘Z or Reset.', res.candidates.length ? undefined : 'warn');
-    return true;
-  };
-
   // Reset: the photo and its shapes as the automatic pass first read them —
-  // no crop, picked paint, clicks, cuts, pieces, turn or Detail.
+  // no crop, clicks, cuts, pieces or turn.
   batch.resetItem = function () {
     const item = batch.queue[batch.idx];
     if (!item || !item.original) return false;
     const keep = $('#reviewChar').value;
     Object.assign(item, {
-      canvas: item.original.canvas, angle: item.original.angle, candidates: item.original.candidates, ci: 0,
-      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null, paint: null, detail: undefined,
+      canvas: item.original.canvas, angle: item.original.angle, analysis: item.original.analysis, candidates: item.original.candidates, ci: 0,
+      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null,
     });
     for (const c of item.candidates) { c.turn = c.lean ? -c.lean : 0; c.nudge = null; }
     renderCurrent();
@@ -682,24 +705,16 @@
       c._inPhoto = v;
     }
     const prev = {
-      canvas: item.canvas, angle: item.angle, candidates: item.candidates, ci: item.ci,
+      canvas: item.canvas, angle: item.angle, analysis: item.analysis, candidates: item.candidates, ci: item.ci,
       cuts: item.cuts, parts: item.parts, removals: item.removals, lastClick: item.lastClick,
-      history: item.history, manualTurn: item.manualTurn, paint: item.paint || null,
+      history: item.history, manualTurn: item.manualTurn,
     };
-    // (a picked paint stays picked; where it was picked from moves with the crop)
-    let paint = null;
-    if (item.paint) {
-      const px = item.paint.x - ax, py = item.paint.y - ay;
-      paint = px >= 0 && py >= 0 && px < w && py < h ? Object.assign({}, item.paint, { x: px, y: py }) : { r: item.paint.r, g: item.paint.g, b: item.paint.b };
-    }
-    const res = await batch.analyze(c, { deskew: false, smoothing: smoothingFor(item), paint });
+    // (read at its own size: a small letter cropped out gets the detail back)
+    const res = await batch.analyze(c, { deskew: false, maxEdge: 900 });
     if (batch.queue[batch.idx] !== item) return false; // moved on meanwhile
+    res.canvas._frame = ST.sources.subFrame(item.canvas, ax, ay, w, h); // where it lies in the photo
     const keep = $('#reviewChar').value;
-    Object.assign(item, { canvas: res.canvas, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null });
-    // (read with an upscale, the crop's coordinates change: a picked paint
-    // keeps its color, and is looked for round the letters from now on)
-    if (paint && res.canvas.width !== w) paint = { r: paint.r, g: paint.g, b: paint.b };
-    if (item.paint) item.paint = paint;
+    Object.assign(item, { canvas: res.canvas, analysis: res.analysis || null, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null });
     item.history = [{ type: 'crop', prev }];
     renderCurrent();
     if (keep.trim() && !res.candidates.length) $('#reviewChar').value = keep;
@@ -712,30 +727,10 @@
     const item = batch.queue[batch.idx];
     if (!item || !item.history || !item.history.length) return false;
     const last = item.history.pop();
-    if (last.type === 'paint') {
-      Object.assign(item, last.prev);
-      renderCurrent();
-      ST.toast('Picked paint undone.');
-      return true;
-    }
     if (last.type === 'crop') {
       Object.assign(item, last.prev);
       renderCurrent();
       ST.toast('Crop undone.');
-      return true;
-    }
-    if (last.type === 'isolate') {
-      // back to the shape as it was before the trim
-      const k = item.candidates.findIndex((c) => c.kind === 'isolated');
-      if (k >= 0) item.candidates.splice(k, 1);
-      // back on the shape that was trimmed
-      item.ci = last.ci != null && last.ci < item.candidates.length ? last.ci : 0;
-      const keep = $('#reviewChar').value;
-      renderCurrent();
-      $('#reviewChar').value = keep;
-      syncIsolateLabel();
-      ST.capture.updatePreview();
-      ST.toast('Trim undone.');
       return true;
     }
     if (last.type === 'cut' && item.cuts && item.cuts.length) item.cuts.pop();
@@ -757,163 +752,6 @@
       if (k >= 0) item.history.splice(k, 1);
     }
     return rebuild(item);
-  };
-
-  // "Isolate the 2": template-guided trim of a shape to the typed
-  // character, keeping the piece under the last click — the strokes that
-  // leave the character's box (a neighbor's) are cut off at their joins,
-  // and the joins healed. → { cand, res } or null
-  function isolatedCandidate(item, cand, ch) {
-    const lc = item.lastClick
-      ? { x: item.lastClick.x - cand.crop.x, y: item.lastClick.y - cand.crop.y }
-      : { x: cand.w / 2, y: cand.h / 2 };
-    // where the character sits: the best few placements of its template;
-    // each trims the shape, and the trim that looks most like the character
-    // wins (the best-matching box can still take a bit of the neighbor)
-    const found = ST.classify.locate(cand.mask, cand.w, cand.h, ch, { cx: lc.x, cy: lc.y, alternatives: 3 });
-    // every reading, ranked on the raw trim (cheap); only the front
-    // runners are cleaned up and traced
-    const trims = [];
-    for (const place of (found && (found.alternatives || [found])) || []) {
-      // a loose match still says which strokes are the neighbor's; only a
-      // hopeless one is refused
-      const res = ST.classify.isolate(cand.mask, cand.w, cand.h, ch, lc.x, lc.y, 0.18, { found: place });
-      if (!res) continue;
-      const strokes = res.margin ? ST.extract.isolateStrokes(cand.mask, cand.w, cand.h, res.margin, lc.x, lc.y) : null;
-      trims.push({ mask: strokes ? strokes.mask : res.mask, res });
-    }
-    // and stroke by stroke: from the stroke clicked, the touching strokes
-    // that make the shape most like the character
-    const grown = ST.extract.growLetter(cand.mask, cand.w, cand.h, lc.x, lc.y, (m) => ST.classify.scoreMask(m, cand.w, cand.h, ch));
-    if (grown) trims.push({ mask: grown.mask, res: { score: grown.score }, whole: true });
-    // and the recognizer's: the strokes under the click grouped the way
-    // that reads most like the character typed
-    const reads = readsAs(ch);
-    if (reads) {
-      const found = ST.letters.find(cand.mask, cand.w, cand.h, { center: lc, must: lc, target: ch });
-      const lt = found && found.letters[0];
-      if (lt && lt.set.size < found.sc.n) trims.push({ mask: ST.letters.render(found, cand.mask, cand.w, cand.h, lt), res: { score: 0 }, whole: true });
-    }
-    // ranked by how much each trim reads as the character: the recognizer
-    // when there is one, else the font templates. A trim made of whole
-    // strokes ends each one the way the paint does (round, at its join);
-    // a template's box can slice a stroke on a slant and leave a point — so
-    // when the two read about as well, the whole strokes win.
-    const bonus = (t) => (reads && t.whole ? 0.05 : 0);
-    for (const t of trims) {
-      const p = reads ? reads(t.mask, cand.w, cand.h) : ST.classify.scoreMask(t.mask, cand.w, cand.h, ch);
-      t.rank = p + bonus(t);
-      if (reads) t.res = Object.assign({}, t.res, { score: p });
-    }
-    trims.sort((a, b) => b.rank - a.rank);
-    let best = null;
-    for (const t of trims.slice(0, 2)) {
-      const got = trimTo(cand, t.mask, t.res);
-      if (!got) continue;
-      got.fit = reads ? reads(got.cand.mask, got.cand.w, got.cand.h) + bonus(t) : ST.classify.scoreFor(got.cand.paths, ch);
-      if (!best || got.fit > best.fit) best = got;
-    }
-    return best;
-  }
-
-  // How much a mask reads as `ch` (either case), by the recognizer — or null
-  // without one (then the font templates judge).
-  function readsAs(ch) {
-    if (!ST.letters || !ST.recognize || !ST.recognize.ready() || !ch || ch.length !== 1) return null;
-    const want = new Set([ch, ch.toUpperCase(), ch.toLowerCase()]);
-    if (!ST.recognize.classes().some((c) => want.has(c))) return null; // not a character it knows
-    return (mask, w, h) => {
-      const r = ST.recognize.classify(mask, w, h);
-      if (!r) return 0;
-      let p = 0;
-      for (const x of r.ranked) if (want.has(x.ch)) p += x.p;
-      return p * r.letterness;
-    };
-  }
-
-  function trimTo(cand, trimmed, res) {
-    const clean = ST.extract.cleanMask(trimmed, cand.w, cand.h, 4);
-    // re-crop to the isolated letter so the photo pane boxes just it
-    const bb = ST.raster.maskBounds(clean, cand.w, cand.h);
-    if (!bb) return null;
-    const pad = 10;
-    const x0 = Math.max(0, bb.x0 - pad), y0 = Math.max(0, bb.y0 - pad);
-    const x1 = Math.min(cand.w, bb.x1 + 1 + pad), y1 = Math.min(cand.h, bb.y1 + 1 + pad);
-    const cw = x1 - x0, chh = y1 - y0;
-    const sub = new Uint8Array(cw * chh);
-    for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) sub[y * cw + x] = clean[(y + y0) * cand.w + (x + x0)];
-    const paths = ST.trace.vectorize(sub, cw, chh, {});
-    if (!paths.length) return null;
-    const crop = { x: cand.crop.x + x0, y: cand.crop.y + y0, w: cw, h: chh };
-    return { cand: { crop, mask: sub, w: cw, h: chh, paths, kind: 'isolated', base: cand.base || cand.kind }, res };
-  }
-
-  function showIsolated(item, got) {
-    item._beforeIsolate = item.ci;
-    item.candidates.unshift(got.cand);
-    item.ci = 0;
-    reapplyParts(item);
-    const keep = $('#reviewChar').value;
-    renderCurrent();
-    $('#reviewChar').value = keep;
-    syncIsolateLabel();
-    ST.capture.updatePreview();
-  }
-
-  batch.isolate = function (opts) {
-    const quiet = !!(opts && opts.quiet);
-    const item = batch.queue[batch.idx];
-    const cand = item && item.candidates[item.ci];
-    const ch = batch.charKey($('#reviewChar').value);
-    if (!cand || !ch) { ST.toast('Type the character first, then Isolate.', 'warn'); return false; }
-    if (ch.length > 1) { ST.toast('Isolate works one character at a time — type just the letter to trim to.', 'warn'); return false; }
-    if (!ST.classify) return false;
-    const got = isolatedCandidate(item, cand, ch);
-    if (!got) {
-      ST.toast(`Couldn't find a “${ch}” inside this shape — try a cut across the join, or Edit manually.`, 'warn');
-      return false;
-    }
-    cand._autoTried = ch;
-    showIsolated(item, got);
-    if (quiet) return true;
-    item.history = (item.history || []).concat([{ type: 'isolate', ci: item._beforeIsolate }]);
-    const pct = Math.round(got.res.score * 100);
-    if (got.res.score < 0.3) {
-      ST.toast(`Trimmed to the best “${ch}” match found (only ${pct}%) — check the trace; Try another shape brings the full shape back.`, 'warn');
-    } else {
-      ST.toast(`Isolated a “${ch}” (match ${pct}%).`);
-    }
-    return true;
-  };
-
-  // Typing the character is enough: when the shape is a letter fused with
-  // a neighbor of the same paint (touching it, crossing it, running into
-  // it), it is trimmed to the typed character by itself — but only when
-  // the trimmed shape matches that character clearly better than the whole
-  // did, and something neighbor-sized came off. ⌘Z (or Try another shape)
-  // brings the whole shape back.
-  batch.autoIsolate = function () {
-    const item = batch.queue[batch.idx];
-    const cand = item && item.candidates[item.ci];
-    if (!cand || !ST.classify || cand.kind === 'isolated') return false;
-    const ch = batch.charKey($('#reviewChar').value);
-    if (!ch || ch.length !== 1 || cand._autoTried === ch) return false;
-    cand._autoTried = ch;
-    // a shape that already reads as the character has nothing fused to it
-    const reads = readsAs(ch);
-    const whole = reads ? reads(cand.mask, cand.w, cand.h) : ST.classify.scoreFor(cand.paths, ch);
-    if (whole >= (reads ? 0.6 : 0.5)) return false;
-    const got = isolatedCandidate(item, cand, ch);
-    if (!got) return false;
-    const before = ST.raster.count(cand.mask), after = ST.raster.count(got.cand.mask);
-    if (after > 0.85 * before || after < 0.2 * before) return false;
-    const trimmed = got.fit;
-    if (!(trimmed >= 0.3 && trimmed >= whole + (reads ? 0.15 : 0.06))) return false;
-    got.cand._autoTried = ch;
-    showIsolated(item, got);
-    item.history = (item.history || []).concat([{ type: 'isolate', ci: item._beforeIsolate }]);
-    ST.toast(`Trimmed the neighbor off the “${ch}” — ⌘Z brings it back.`);
-    return true;
   };
 
   // The library key for what was typed: one character, or a ligature of
@@ -944,6 +782,9 @@
     const record = ST.capture.recordFor(cand, ch);
     if (!record) { ST.toast('Could not fit that shape.', 'warn'); return false; }
     record.thumb = ST.capture.makeThumb(record);
+    // which photo, and where in it: the crop can be cut again on any device
+    const from = ST.sources.photoOf(item, cand.crop);
+    if (from) record.photo = from;
     ST.store.addVariant(ch, record);
     if (ST.sources) ST.sources.put(record.id, batch.sourceThumb(item, cand));
     if (item.sourceId && ST.sync) ST.sync.markProcessed(item.sourceId);
@@ -973,13 +814,9 @@
 
   batch.init = function () {
     $('#reviewAccept').addEventListener('click', batch.accept);
-    $('#reviewAlt').addEventListener('click', batch.tryNext);
     $('#reviewReset').addEventListener('click', () => batch.resetItem());
-    $('#paintPick').addEventListener('click', () => ST.capture.setTool(ST.capture.tool === 'pick' ? 'trace' : 'pick'));
     $('#reviewSkip').addEventListener('click', batch.skip);
-    $('#reviewIsolate').addEventListener('click', () => busy('Isolating…', () => batch.isolate()));
     const busy = (label, fn) => (ST.capture.busy ? ST.capture.busy(label, fn) : fn());
-    $('#reviewDetail').addEventListener('input', ST.debounce((e) => { const v = +e.target.value; busy('Re-reading the photo…', () => batch.setDetail(v)); }, 220));
     // ⌘Z / Ctrl-Z on the capture tab undoes the last cut or added piece
     g.addEventListener('keydown', (e) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || (e.key !== 'z' && e.key !== 'Z')) return;
@@ -991,8 +828,6 @@
       e.preventDefault();
       busy('Undoing…', () => batch.undo());
     });
-    $('#reviewChar').addEventListener('input', syncIsolateLabel);
-    $('#reviewChar').addEventListener('input', ST.debounce(() => batch.autoIsolate(), 380));
     $('#queuePill').addEventListener('click', batch.reopen);
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }

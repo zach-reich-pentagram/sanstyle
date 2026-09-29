@@ -211,21 +211,46 @@
     }
     return null;
   }
+  // The crop kept on this device shows at once. Without one (a letterform
+  // synced from another device, or this browser cleared its storage) it is
+  // cut again from the letterform's Drive photo — only for a pointer that
+  // stays a moment, so a sweep across a line fetches nothing — and kept.
+  // A letterform that never recorded its photo says so.
   function showSource(span) {
     const outline = outlineForSpan(span);
     hideSource();
     if (!outline || !outline.id || !ST.sources) return;
     const token = ++popToken;
-    ST.sources.get(outline.id).then((url) => {
-      if (token !== popToken || !url) return;
-      if (!pop) {
-        pop = ST.el('div', { class: 'src-pop' });
-        g.document.body.appendChild(pop);
+    const wanted = () => token === popToken && span.isConnected;
+    const v = ST.store.variantById(outline.id) || { id: outline.id };
+    const label = outline.char || '';
+    ST.sources.get(v.id).then((url) => {
+      if (!wanted()) return;
+      if (url) { popAt(span, url, label); return; }
+      if (!ST.sources.canFetch(v)) {
+        popAt(span, null, label, 'No photo kept for this letterform');
+        return;
       }
-      pop.innerHTML = '';
-      pop.appendChild(ST.el('img', { src: url, alt: '' }));
-      pop.appendChild(ST.el('div', { class: 'src-pop-label' }, outline.char || ''));
-      pop.classList.add('on');
+      popAt(span, null, label, 'Fetching its photo from Drive…');
+      g.setTimeout(() => {
+        if (!wanted()) return;
+        ST.sources.find(v).then((cut) => {
+          if (wanted()) popAt(span, cut, label, cut ? '' : 'Could not fetch its photo');
+        });
+      }, 160);
+    });
+  }
+  function popAt(span, url, label, note) {
+    if (!pop) {
+      pop = ST.el('div', { class: 'src-pop' });
+      g.document.body.appendChild(pop);
+    }
+    pop.innerHTML = '';
+    if (url) pop.appendChild(ST.el('img', { src: url, alt: '' }));
+    else pop.appendChild(ST.el('div', { class: 'src-pop-note' }, note || ''));
+    pop.appendChild(ST.el('div', { class: 'src-pop-label' }, label));
+    pop.classList.add('on');
+    const place = () => {
       const r = span.getBoundingClientRect();
       const pw = pop.offsetWidth, ph = pop.offsetHeight;
       let x = r.left + r.width / 2 - pw / 2;
@@ -234,7 +259,11 @@
       if (y < 6) y = r.bottom + 8;
       pop.style.left = x + 'px';
       pop.style.top = y + 'px';
-    });
+    };
+    place();
+    // (a data URL decodes a beat later: place it again at its real size)
+    const img = pop.querySelector('img');
+    if (img && !img.complete) img.onload = () => { if (pop.classList.contains('on')) place(); };
   }
   function hideSource() {
     popToken++;

@@ -289,11 +289,28 @@
     const wholeRead = read(new Set(Array.from({ length: sc.n }, (_, i) => i + 1)));
     const wholeClear = quality(wholeRead);
     const touchesFrame = (bb) => fr && ((bb.x0 <= fr.x0 + 1) + (bb.x1 >= fr.x1 - 1) + (bb.y0 <= fr.y0 + 1) + (bb.y1 >= fr.y1 - 1)) > 0;
+    // each piece's pen: the median radius of its discs
+    const penOf = new Float32Array(sc.n + 1);
+    for (let c = 1; c <= sc.n; c++) {
+      const d = m.discs[c], rs = [];
+      for (let k = 2; k < d.length; k += 3) rs.push(d[k]);
+      rs.sort((a, b) => a - b);
+      penOf[c] = rs.length ? rs[rs.length >> 1] : 0;
+    }
+    const penOfSet = (ids) => {
+      const rs = [];
+      for (const c of ids) for (let k = 0; k < m.len[c]; k += 4) rs.push(penOf[c]);
+      rs.sort((a, b) => a - b);
+      return rs.length ? rs[rs.length >> 1] : 0;
+    };
     const explain = (r) => {
       if (r.ids.length === sc.n) return true;
       const inSet = new Set(r.ids);
       const seen = new Set();
       let ev = r.clear;
+      // (a leftover far fatter than the letter's pen is no stroke of a
+      // letter: a blob, a drip's pool, a sticker — debris, like a crumb)
+      const pen = penOfSet(r.ids);
       const crumbs = [];
       let crumbN = 0;
       for (let c = 1; c <= sc.n; c++) {
@@ -307,6 +324,7 @@
         const gr = read(new Set(grp));
         if (!gr.bb) continue;
         if (gr.bb.n < 0.12 * totalN) { crumbs.push(...grp); crumbN += gr.bb.n; continue; } // a crumb
+        if (pen > 0 && penOfSet(grp) > 1.8 * pen) continue; // a blob
         const gc = L.clarity(gr);
         ev *= touchesFrame(gr.bb) ? Math.max(0.6, gc) : gc; // a neighbor the frame cut off need not read well
       }

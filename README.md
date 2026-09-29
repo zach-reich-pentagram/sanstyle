@@ -7,7 +7,7 @@ optically fitted, and auto-spaced, entirely in the browser.
 
 Photo of a wall → usable `.ttf`.
 
-![Capture studio](docs/shots/capture.png)
+![Capture studio: the letters found in a photo, one click each](docs/shots/letters.png)
 
 ## Run it
 
@@ -30,44 +30,48 @@ Drop photos on the Capture tab (one or a hundred; iPhone HEIC works), share
 them into the Drive inbox from your phone, or pick any photo from the Drive
 gallery in the Glyphs tab. Each photo is analyzed in a background worker —
 the page stays responsive while a stack of photos or a Drive re-scan is
-worked through — and lands on the stage in turn: the paint is separated from the wall or paper by color contrast
-against the background — the wall is the frame's dominant color, paint is
-whatever contrasts most with it, and the threshold sits where the boundary
-is sharpest, never past the midpoint between the two. That keeps marker
-strokes stroke-thin on fibrous paper instead of swallowing the pink bleed
-halo around them. The classifier works along the wall→paint color axis, so
-metallic and glossy paint whose highlights and shading run *past* the paint
-color (silver on dark red, chrome on brick) still reads as one shape, and
-compact patches inside the paint that are neither paint nor wall — pocks,
-cracks, dirt in a porous wall — are read as paint under it, not as holes.
-Metallic paint's crinkle — silver's
-bright ridges and dark valleys, far finer than its strokes — would leave the
-paint full of pocks and its edge all notches: when a shape comes out far
-more ragged than its stroke width warrants, the paint is read again with the
-texture averaged out (over an eighth of a stroke), which only ever heals —
-fills the pocks and notches, never drops a stroke in shade — and clean-up
-measures such a shape's stroke width with its pocks filled, so it mends them
-instead of taking them for counters. A click on a letter can take the
-threshold all the way to that midpoint however strongly the paint contrasts
-(white or silver on black is far from its wall, and its shaded side lies
-deep in between). When the frame's border is another
-surface than the one the letter is on — a gray wall and white paper round
-the dark wooden post the tag is on — the wall is taken from round the
-middle of the photo (or round your click), and the paint is looked for
-there: a light-blue letter on the post is then measured against the post,
-soft spray edges and all, not against the gray at the border.
+worked through — and lands on the stage with every letter found in it laid
+out beside it: one click picks the one you want.
+
+**Reading the wall.** The photo is worked at 800 px on its long side, so a
+photo from across the street and one from up close get the same treatment.
 A wall lit unevenly — brighter where the sun falls, darker toward a corner —
 is evened out first: a smooth light surface is fitted to the wall's own
-color across the photo (cells a letter fills don't pull it) and taken out,
-so the bright end of the wall doesn't pass for white paint or the dark end
-for black. How far the wall's color wanders is measured on the wall's own
-color in the border only: letters running off the frame put their paint in
-the border too, and must not widen "wall" out to their paint.
-Streaky strokes are jumped across at up to half a stroke width. The photo is
-then straightened by the paint's own edges (its stems set upright, not the
-wall's bricks or the paper's edge), and its resolution is normalized: a
-letter shot from across the street is brought up to the same pixel height as
-one shot up close before smoothing, so both get the same treatment.
+color across the photo and taken out. Then the photo's colors are clustered
+(`auto.inks`), and each cluster is judged by where and what it is:
+
+- colors woven together — brick and its mortar, a wall in and out of
+  shadow — are one surface's shades;
+- a color that runs off the photo's edge and is not stroke-shaped (or fills
+  its box, however many letters are cut out of it) is a *surface*: the
+  wall, a panel, the sky;
+- everything else is *paint*, and one paint's shades are merged — a
+  stroke's dense core and its thin edge, silver's glint and shade — while
+  its bleed halo (short of halfway from the wall to the paint) stays out.
+  Each paint's pixels are judged against the surface right behind them (a
+  white tag on a black panel against the panel, not the brick round it);
+- a paint inside another's outline is the same letter (a throw-up's fill
+  and its outline);
+- every paint's shapes are scored on how much they look like a letter's
+  strokes — long for their width, letter-sized, dense, neither a solid
+  patch nor a sprawl off the frame — and the paints that look like letters
+  go on. A paint that only hugs another (a halo, an outline, a 3D shadow)
+  goes with it.
+
+So the tag is found even when something else stands out more: dark pocks
+on pale concrete, a sticker, a sign's print, the sky.
+
+**Flattening.** A wall shot from the side or from below is foreshortened,
+and every letter on it leans and tapers the same way. The photo's straight
+lines are found (`js/rectify.js`: pixels of like gradient direction grown
+into long thin regions), and the wall's lines — a rail, a panel's edge, a
+curb, a sign's border — vote for vanishing points; the letters' own strokes
+never do (they are masked out, and so is any line with a stroke's band of
+paint on one side of it). When two or more wall lines agree, a homography
+makes them parallel again and an affine map stands them square: the photo
+comes out as if shot straight on. A correction that would warp the photo
+wildly is refused. A leaning letter is then stood up by its own stems (see
+**Upright**).
 
 **Which letter, and what it says.** A photo of graffiti is rarely one clean
 letter: the letter you shot touches its neighbors, a sticker, a sign, drips
@@ -82,121 +86,70 @@ debris, scribbles, blobs, stickers. So it says both which character a shape
 is (A–Z, a–z, 0–9, `! ? # @ & $ % * + = / \ < > ( ) [ ]`) and whether it is
 one character at all. The letter finder (`js/letters.js`) then takes each
 shape apart stroke by stroke (skeleton pieces that stop wherever they meet
-another) and grows groupings of them, keeping the ones that read most
-clearly as a single character; a piece that continues one of a letter's
-strokes straight through a crossing, or an arm or flourish that hangs on
-one letter only, stays with that letter. Every letter found is ranked — it
-reads clearly as one character, it is big, it sits near the middle of the
-photo, the frame didn't cut it off — and the best comes first: in a photo
-of "ck" the **k** comes up alone, the c, the stickers and the paint flakes
-left behind, with **k** already typed in the character box and the next
-best readings (**h**, **K**) one click away. A word gives one shape per
-letter ("Try another shape"); the whole fused shape stays on offer behind
-them. When nothing in the paint that stands out most reads clearly as a
-letter (a sign, a sticker or a strip outshouting the tag), or a second
-color covers a good part of the wall too, the wall's next paint color is
-read as well, apart from the first — unless it only hugs the first paint
-(a bleed halo, an outline, a 3D shadow: those belong to the same letters).
+another, or run into a junction) and grows groupings of them, keeping the
+ones that read most clearly as a single character. A letter taken out of a
+shape has to leave the rest explained — each piece of what is left reads as
+a letter of its own, or is a crumb; a few crumbs adding up to a real part of
+the shape must read as something together — and of two splits the one
+whose rest reads better wins (taking the y out of "xy" leaves an x; an "O"
+made of the y and the x's arch leaves the x in pieces). A shape that reads
+plainly as one letter isn't taken apart at all. Every letter found is
+ranked — it reads clearly as one character, it is big, it sits near the
+middle of the photo, the frame didn't cut it off; a lone stroke that reads
+only as an l, an i or a 1 goes behind the letters — and they are all laid
+out in the Shape panel, the best selected, its character already typed.
 
-**Upright.** A leaning letter is stood up by its stems — a stroke followed
-from end to end through its crossings, tall and near upright (a k's stem
-counts even where it bends at the joint of its arm and leg). Stems that
-disagree (an A's legs) or none at all (an O, an S) leave the letter as it
-is. The glyph is built from the upright shape; the **Rotate** slider in the
-Shape panel turns it anywhere through 360° (a letter painted sideways or
-upside down), and a rotation set by hand is kept for the rest of that photo.
-**Height** scales the letter against the cap or x-height it is fitted to,
-and **Baseline** moves it up or down against the baseline; the fitted
-preview shows both live, and both stay adjustable later in Glyphs
-("Optical nudges"). Slider drags redraw once per frame and re-read the
-character only when the drag pauses, so they stay smooth.
-
-**Pick color, Reset.** When the letter you want isn't in the paint that
-stands out most (a white tag beside a bright sticker, a pale stroke beside a
-bold one), press **Pick color** in the Shape step and click a stroke of it:
-the photo is read again for that paint alone, measured against the wall
-round the stroke you picked it from, and clicks trace that paint from then
-on (the swatch shows it; ⌘Z undoes the pick). **Reset** goes back to the
-shapes the automatic pass first found — no crop, picked paint, clicks,
-cuts or pieces.
-
-**Crop.** The **Crop** button over the stage turns a drag into a crop box:
-the photo is cut to it and read again — the letter gets the whole frame,
-its paint judged against its own patch of wall, and a small letter is
-enlarged for detail. Cuts and clicks made on the old frame go with it; ⌘Z
-brings the whole photo back as it was.
-
-Clicks and cuts on the stage are traced in the background worker (it keeps
-the photo between clicks), so the page never freezes while a busy photo is
-worked on.
-
-On the stage the detected shape is boxed and its trace drawn over the paint;
-the clean silhouette and the letterform fitted into the em sit beside it,
-upright. A **Detail** knob re-reads the photo (low heals gaps and smooths
-hard, high keeps every nuance). Check the character (or type another),
-**Add** — the next photo comes up. A photo leaves the queue only when its
-letterform was added or skipped, and the queue waits across tabs and
-reloads of Drive photos. The same photo shared into the inbox twice (same
-name, same size) is offered once.
-
-**Click the letter you see.** If the detected shape isn't the one you want,
-click the letter in the photo: the click snaps to the densest paint nearby
-(a click in the halo or just off a thin stroke still seeds from the stroke),
-the paint color is sampled and refined, and the connected stroke region is
-grown at the tolerance whose edge is sharpest. Fused with a neighbor of the
-same paint (touching it, crossing it, running into it), the letter finder
-hands back the letter under the click alone — offered first when the whole
-shape reads as several letters, or the letter reads unmistakably and the
-whole as nothing (a silver A fused onto the ring and the stroke beneath
-it), the whole one step behind. What it would leave has to lie beside the
-letter, though: strokes inside its own bounds are its own (a stylized A's
-crossbar is not a neighbor fused onto a "7"). Where a neighbor crossed the
-letter, the letter's stroke is drawn on through the crossing at its own
-width — a smooth curve joining the stroke on either side, measured clear
-of the crossing — so a B's bowl stays smooth where an O ran through it,
-with no bump of the O's ink left on it. Still fused?
-**Type the character**: the shape is trimmed to it by itself when the trim matches the
-character clearly better than the whole did (⌘Z brings the whole back).
-Three readings compete, judged by the recognizer: the letter finder's
-strokes grouped as that character, the shape grown stroke by stroke from
-the one you clicked (strokes rejoined through junctions by good
-continuation, so a bar that crosses a neighbor's O stays one bar and the O
-stays one ring), and a template search. When they read about as well,
-whole strokes win — they end the way the paint does, where a template's
-box can slice a stroke on a slant and leave a point. Or **Option-click** the neighbor: the stroke under the
+**Click the letter you see.** Not the one you want? Click it in the photo.
+The click is answered from the analysis in the worker: the shape under the
+click (or the nearest within reach), and in it the letter that holds the
+stroke you clicked, its neighbors fused on taken off. A thin marker tag the
+analysis read only in bits is traced as a line from the stroke under the
+click — pixels brighter (or darker) than what is round them and narrower
+than a couple of percent of the photo, whatever their color, a fainter
+stretch of the same stroke included — so a tag whose color wanders along
+the stroke is one line to the program as it is to the eye; the wall's own
+lines (a panel's edge running frame to frame) are left out. Where a
+neighbor crossed the letter, the letter's stroke is drawn on through the
+crossing at its own width, so a B's bowl stays smooth where an O ran
+through it. Still fused? **Option-click** the neighbor: the stroke under the
 click goes, with whatever hangs on the letter only through it (a fused
 neighbor, a drip, a stray blob), and the faces where it came off are healed
 and capped. Or drag a short cut across the join and the region regrows
 without it: the cut takes only from the far side of its line, so the letter
-keeps every pixel up to the line — a cut drawn along or into the letter's
-own stroke leaves no notch in it — or press **Isolate** to force the trim: a stroke-weight-agnostic template search (two-way
-chamfer match against system-font renders, scored on the ink connected to
-your click) finds where that character sits inside the fused shape. The
-shape is then read as strokes — skeletonized, cut into pieces at junctions
-and at sharp corners — and every stroke that leaves that box by more than a
-couple of stroke widths is a neighbor's: it is dropped at its join, whether
-it meets the letter side-on or continues one of its strokes around a
-corner, and the cut face is healed and capped. The letter's own overhang
-past an imperfect box stays.
+keeps every pixel up to the line.
+
+**Crop.** The **Crop** button over the stage turns a drag into a crop box:
+the photo is cut to it and read again — the letter gets the whole frame,
+its paint judged against its own patch of wall, and a small letter is read
+at more detail. ⌘Z brings the whole photo back as it was.
+
+**Upright.** A leaning letter is stood up by its stems — a stroke followed
+from end to end through its crossings, tall and near upright. Stems that
+disagree (an A's legs) or none at all (an O, an S) leave the letter as it
+is. The **Rotate** slider in the Shape panel turns it anywhere through 360°
+(a letter painted sideways or upside down), and a rotation set by hand is
+kept for the rest of that photo. Height and baseline are set later in
+Glyphs ("Optical nudges"). **Reset** goes back to the letters the automatic
+pass found — no crop, clicks, cuts or pieces.
+
+On the stage the selected letter is boxed and its trace drawn over the
+paint; the clean silhouette and the letterform fitted into the em sit beside
+it, upright. Check the character (or type another), **Add** — the next photo
+comes up. A photo leaves the queue only when its letterform was added or
+skipped, and the queue waits across tabs and reloads of Drive photos. The
+same photo shared into the inbox twice (same name, same size) is offered
+once.
 
 Stroke ends get a marker's round cap: nothing a pen draws is sharper than
-its tip, so needle points thinner than the thin side of the tip (measured
-from the distance transform of the shape) are pruned back to a cap. Where a
-stroke fades out — spray thinning, a marker lifting — the shape tapers to a
-point the pen never made: the skeleton is walked in from each free end to
-where the stroke has most of its width back, the taper beyond is dropped,
-and the stroke ends there with a disc of that width. Anything *wider* than
-the stroke near its end (an arrowhead) is drawn that way and kept. Where a
-cut sliced a stroke flat, the sliced face is capped the same way. The
+its tip, so needle points thinner than the thin side of the tip are pruned
+back to a cap, and a stroke that fades out (spray thinning, a marker
+lifting) ends where it has its width back, with a disc of that width.
+Anything *wider* than the stroke near its end (an arrowhead) is kept. The
 clean-up that shaves fibers, burrs and drips never takes what holds the
 letter together: a thin neck where an arm meets its stem, or a worn,
-speckled stretch of a curl — even one thin in several places in a row —
-stays (a hair-thin strand of wall texture joins nothing). The tracer then
-measures its corners and smoothing against the stroke width, so a round cap
-only half a stroke across is fitted as a curve, never sharpened into a
-corner; only inside corners, where two strokes meet, are put back on their
-point — an outside corner is a stroke's end or the rim of a bend, and
-extending its edges would grow a spike the wall never had.
+speckled stretch of a curl, stays. The tracer measures its corners and
+smoothing against the stroke width: only inside corners, where two strokes
+meet, are put back on their point.
 
 **Seeing past what hides the letter.** A stroke that stops at bare wall has
 ended: the pen lifted there. A stroke that stops at something else — a
@@ -204,7 +157,7 @@ drainpipe or a sign in front of it, a crack, a sticker, another color
 painted over it, the edge of the photo — has only been hidden, and the
 letter goes on underneath. Every pixel is read as wall, this paint, the
 paint's own halo and shading, or hidden (anything else, and everything past
-the frame, including the corners a straightened photo fills in). A stroke
+the frame, including the corners a flattened photo fills in). A stroke
 end is cut short when the wall starts much further ahead of it than beside
 it (a halo surrounds a stroke on every side alike; an occluder only sits in
 front), and then:
@@ -227,8 +180,6 @@ front), and then:
 
 A cut you draw is the one thing nothing is carried across.
 
-![Isolate a fused 2](docs/shots/isolate-2.png)
-
 **Ligatures and two-part characters.** Type two to four letters ("ar",
 "bl", "gr") for a connected pair and it is captured as a ligature: the font
 swaps it in whenever that sequence is typed (a GSUB `liga`/`rlig` lookup,
@@ -236,12 +187,11 @@ so it also fires in Illustrator, Figma, and browsers with tracking applied).
 A character in pieces — the stem and point of a "!", an "i" and its dot —
 is assembled by **shift-clicking** the other piece: only the new ink under
 that click joins the shape, so a neighbor it touches stays out. The same
-shift-click puts back a bit that the extraction, a cut or Isolate left out
-(where no paint reads under the click at all — a glint, a worn patch — it
-brushes in a stroke-width spot), and the pieces are remembered when the
-shape is rebuilt by the Detail knob, a cut, an undo or an Isolate.
-**⌘Z / Ctrl-Z** undoes the most recent cut, added or removed piece, or trim;
-every one of them is remembered and replayed when the shape is rebuilt.
+shift-click puts back a bit the extraction or a cut left out (where no paint
+reads under the click at all — a glint, a worn patch — it brushes in a
+stroke-width spot), and the pieces are remembered when the shape is rebuilt
+by a cut or an undo. **⌘Z / Ctrl-Z** undoes the most recent cut, added or
+removed piece, or crop.
 
 ## The optical fitting
 
@@ -274,7 +224,10 @@ the FontFace API in a few milliseconds.
   to its heaviest; every letter shows the variant nearest that weight, so
   the whole line thickens as you slide (letters with one variant keep it).
 - **Where did that come from?** Hover any letterform and the bit of photo it
-  was cut from pops up (stored on this device, beside the library).
+  was cut from pops up. The crop is kept on the device that captured it;
+  anywhere else (another device, a browser that cleared its storage) it is
+  cut again from the letterform's Drive photo — every letterform records
+  which photo it came from and where in it, in `library.json` — and kept.
 - **Manual kerning** — hit **Kern**, click a letterform, and arrow-key it
   (shift for coarse). Esc returns to typing; kern tweaks carry into exports.
 - Captured ligatures shape as one glyph while you type, in the tester and in
@@ -290,12 +243,14 @@ the FontFace API in a few milliseconds.
 - **Shoot the whole letter with some wall around it.** The wall's color is
   read from the photo's border; a letter that fills the frame edge to edge
   is finished past the edge, but only as well as the rest of it suggests.
-- **Straight on beats the perfect angle.** Up to ±20° of roll is straightened
-  automatically; strong perspective (shooting a wall from the side) is not.
-- **Full-resolution photos.** Share the originals into the Drive inbox (the
-  Drive app keeps them; messaging apps shrink them). Letters are brought to
-  the same working size either way, but a sharper original means cleaner
-  edges.
+- **Straight on beats the perfect angle.** A photo shot at an angle is
+  flattened by its wall's own lines — a rail, a panel's edge, a curb — when
+  two or more of them show; with none in the frame only the letter's own
+  lean is corrected, so get a straight edge of the wall in shot when you
+  can't shoot square on.
+- **Fill the frame with the letter.** Photos are read at 800 px on their
+  long side: a letter that is a small part of a wide shot comes out coarse
+  (Crop brings it back up to detail).
 - **Avoid hard shadows and glare across the letter.** A shadow reads as a
   different color and gets treated as something hiding the stroke.
 - **Center the letter you want.** The letter nearest the middle of the
@@ -325,8 +280,10 @@ becomes a passcode-gated, cross-device studio backed by two Drive folders:
 - an **inbox folder** — share photos into it from your phone's Drive app (or
   upload through the site) and the site offers to extract letterforms from
   whatever is new since your last visit. The Glyphs tab shows every photo in
-  the folder, used ones grayed; click any to extract from it again, or
-  **Re-scan Drive photos** to queue them all;
+  the folder, used ones grayed with the count of letterforms each gave
+  (hover one to see them); click any to bring it up on the stage at once,
+  ahead of the queue, and extract from it again, or **Re-scan Drive
+  photos** to queue them all;
 - a **letterforms folder** — `library.json` (the full library: variants,
   fits, nudges, settings) plus an auto-maintained **SVG mirror** of every
   letterform, ready to open in Illustrator.
@@ -371,12 +328,14 @@ js/
   fitting.js     char classes, overshoot, auto-spacing, variant sets,
                  ligature keys, weight targeting
   ttf.js         dependency-free TrueType compiler (+ GSUB ligatures)
-  classify.js    template character matching (Isolate, trim on typing)
+  classify.js    template character matching
   recognize.js   the letter recognizer: a small conv net, run in plain JS
   letters-model.js  its trained weights (generated by tools/recognizer)
   letters.js     letters in a fused shape, stroke by stroke; upright lean
-  auto.js        deskew + letter detection for the automated lane
-  worker.js      runs the automated lane off the page's thread
+  rectify.js     flattening: wall lines → vanishing points → homography
+  auto.js        the paints on the wall, letter finding, clicks answered
+                 from the analysis
+  worker.js      runs the analysis and clicks off the page's thread
   extract.js     click-to-trace, clean-up, stroke graph, stroke chains
   complete.js    occlusion: hidden stroke ends, joins, frame completion,
                  bitten strokes, outlines
@@ -395,31 +354,34 @@ a HEIC arrives). The same files run headless in Node for tests.
 ## Tests
 
 ```bash
-npm test        # 77 unit tests: geometry, tracing, fitting, morphology,
+npm test        # 82 unit tests: geometry, tracing, fitting, morphology,
                 # deskew, seeded extraction, stroke-graph isolation,
                 # occlusion completion (hidden ends, joins across occluders
                 # and past the frame, bitten strokes, outlines), stroke
                 # chains splitting fused letters, the recognizer (input
                 # grid, clean letters), the letter finder, lean, one-sided
                 # cuts, necks that hold, no spikes at stroke ends, a halo
-                # vs. a second paint of its own, a stroke kept through a
+                # kept out of its paint and a gray bar read apart, a stroke kept through a
                 # crossing at its own width, the letter's own wall,
-                # inbox de-duplication, a wall lit unevenly, the wall's
+                # inbox de-duplication, where a letterform lies in its
+                # photo, a wall lit unevenly, the wall's
                 # tolerance with letters running off the frame,
                 # classifier scoring, ligature keys + GSUB, weight targeting,
                 # TTF byte format, and the api routes (JWT signing verified
                 # against a real keypair, Drive calls stubbed)
 npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
-                # Isolate, a click that hands back the letter alone, trim
-                # on typing + ⌘Z, Option-click removal, crop + its undo, Pick color, Reset, a letter behind a pipe, one
-                # cut off by the frame, a throw-up's outline,
-                # Detail, variant cycling, ligature shaping, weight
+                # the letter strip, a click that hands back the letter alone,
+                # Option-click removal, crop + its undo, Reset, a letter
+                # behind a pipe, one cut off by the frame, a throw-up's
+                # outline, variant cycling, ligature shaping, weight
                 # slider, source popup, kerning, exports, TTF download
                 # (fontTools-validated) — plus the full sync flow (gate,
                 # inbox extraction, SVG mirroring, wiped-device restore,
-                # site→Drive upload, the Drive gallery + re-scan) against an
-                # in-memory mock of the api contract
+                # site→Drive upload, the Drive gallery — a clicked photo
+                # ahead of the queue, the letterforms each photo gave — +
+                # re-scan, a letterform's photo cut again on a device that
+                # never had it) against an in-memory mock of the api contract
 ```
 
 ## Roadmap

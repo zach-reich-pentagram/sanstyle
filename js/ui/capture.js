@@ -1,10 +1,11 @@
 /* SANSTYLE — ui/capture.js
  * The capture studio is the review surface: every photo in the queue lands
  * on the stage with its detected letterform boxed and outlined over the
- * paint. Click a letter to trace it, shift-click to add a piece, drag a
- * short cut across a join; the Detail knob re-reads the photo. The traced
- * and fitted letterform sit on the right beside the character box. The
- * stage pans and zooms — there is nothing else to dial in.
+ * paint, and every letter found in the photo is offered beside it. Click
+ * a letter to take it, shift-click to add a piece, Option-click to take
+ * one off, drag a short cut across a join. The traced and fitted
+ * letterform sit on the right beside the character box. The stage pans
+ * and zooms — there is nothing else to dial in.
  */
 (function (g) {
   'use strict';
@@ -49,7 +50,7 @@
   function setHint(msg) { if (hintEl) hintEl.textContent = msg || ''; }
   cap.setHint = setHint;
 
-  const HINT = 'Click a letter to trace it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans';
+  const HINT = 'Click a letter to take it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans';
 
   // ---------- the current photo and its shape ----------
   // The review queue calls this whenever the photo or the shape changes.
@@ -456,12 +457,6 @@
     }
     if (ev.button !== 0) return;
     if (cap.tool === 'crop') { dragging = { kind: 'crop', start: ip, last: ip, sStart: sp, moved: false }; return; }
-    if (cap.tool === 'pick') {
-      // the eyedropper: the stroke under the click is the paint to extract
-      setTool('trace');
-      if (ip.x >= 0 && ip.y >= 0 && ip.x < cap.img.width && ip.y < cap.img.height) busy('Reading that paint…', () => ST.batch.pickPaint(ip.x, ip.y));
-      return;
-    }
     dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, moved: false, shift: ev.shiftKey, alt: ev.altKey };
   }
 
@@ -543,12 +538,9 @@
     if (hand) hand.classList.toggle('on', tool === 'hand');
     const crop = $('#toolCrop');
     if (crop) crop.classList.toggle('on', tool === 'crop');
-    const pick = $('#paintPick');
-    if (pick) pick.classList.toggle('on', tool === 'pick');
     if (stage) stage.style.cursor = tool === 'hand' ? 'grab' : 'crosshair';
     if (tool === 'crop') setHint('Drag a box round the letter to crop the photo to it · Esc cancels');
-    else if (tool === 'pick') setHint('Click a stroke of the paint you want extracted · Esc cancels');
-    else if ((was === 'crop' || was === 'pick') && cap.item) setHint(HINT);
+    else if (was === 'crop' && cap.item) setHint(HINT);
   }
   cap.setTool = setTool;
 
@@ -597,7 +589,7 @@
     $('#toolFit').addEventListener('click', fitView);
     $('#toolHand').addEventListener('click', () => setTool(cap.tool === 'hand' ? 'trace' : 'hand'));
     $('#toolCrop').addEventListener('click', () => { if (cap.item) setTool(cap.tool === 'crop' ? 'trace' : 'crop'); });
-    g.addEventListener('keydown', (e) => { if (e.key === 'Escape' && (cap.tool === 'crop' || cap.tool === 'pick')) setTool('trace'); });
+    g.addEventListener('keydown', (e) => { if (e.key === 'Escape' && cap.tool === 'crop') setTool('trace'); });
     $('#reviewChar').addEventListener('input', updatePreview);
     // Slider drags fire far faster than a redraw: the state changes at
     // once, the drawing once per frame, the (slower) recognizer re-read only
@@ -620,8 +612,8 @@
       syncRotate();
       redraw(false);
     };
-    $('#reviewScale').addEventListener('input', nudgeInput('scale'));
-    $('#reviewDy').addEventListener('input', nudgeInput('dy'));
+    if ($('#reviewScale')) $('#reviewScale').addEventListener('input', nudgeInput('scale'));
+    if ($('#reviewDy')) $('#reviewDy').addEventListener('input', nudgeInput('dy'));
 
     setTool('trace');
     cap.showItem(null, null);

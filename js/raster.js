@@ -805,6 +805,34 @@
     return x1 < 0 ? null : { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1 };
   };
 
+  // Gray-level min/max over a (2r+1)² square (separable, van Herk /
+  // Gil-Werman: three comparisons a pixel whatever r) → Float32Array.
+  function runFilter(src, w, h, r, isMax) {
+    const pick = isMax ? Math.max : Math.min;
+    const pass = (inp, out, n, count, stride, step) => {
+      // n lines of `count` samples, sample k of line j at j*stride + k*step
+      const K = 2 * r + 1, g = new Float32Array(count + 2 * r), f = new Float32Array(count + 2 * r), b = new Float32Array(count + 2 * r);
+      for (let j = 0; j < n; j++) {
+        const o = j * stride;
+        const edgeLo = inp[o], edgeHi = inp[o + (count - 1) * step];
+        for (let k = 0; k < count + 2 * r; k++) {
+          const q = k - r;
+          g[k] = q < 0 ? edgeLo : q >= count ? edgeHi : inp[o + q * step];
+        }
+        const L = g.length;
+        for (let k = 0; k < L; k++) f[k] = k % K === 0 ? g[k] : pick(f[k - 1], g[k]);
+        for (let k = L - 1; k >= 0; k--) b[k] = k === L - 1 || (k + 1) % K === 0 ? g[k] : pick(b[k + 1], g[k]);
+        for (let k = 0; k < count; k++) out[o + k * step] = pick(b[k], f[Math.min(L - 1, k + 2 * r)]);
+      }
+    };
+    const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+    pass(src, tmp, h, w, w, 1);
+    pass(tmp, out, w, h, 1, w);
+    return out;
+  }
+  raster.minFilter = (src, w, h, r) => runFilter(src, w, h, r, false);
+  raster.maxFilter = (src, w, h, r) => runFilter(src, w, h, r, true);
+
   raster.count = function (mask) {
     let n = 0;
     for (let i = 0; i < mask.length; i++) n += mask[i];

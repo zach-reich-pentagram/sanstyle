@@ -101,6 +101,13 @@
 
     slot(ch) { return this.state.glyphs[ch] || null; }
 
+    variantById(id) {
+      for (const ch in this.state.glyphs) {
+        for (const v of this.state.glyphs[ch].variants) if (v.id === id) return v;
+      }
+      return null;
+    }
+
     activeVariant(ch) {
       const s = this.slot(ch);
       if (!s || !s.variants.length) return null;
@@ -247,7 +254,9 @@
   // The bit of photo each letterform was cut from, keyed by variant id.
   // Kept out of the library JSON (and out of the cloud push) in IndexedDB:
   // a few hundred JPEG crops would blow the localStorage quota and slow
-  // every sync. Memory-only where IndexedDB is unavailable.
+  // every sync. Memory-only where IndexedDB is unavailable. Elsewhere — on
+  // another device, or after the browser cleared its storage — find() cuts
+  // the bit again from the letterform's Drive photo (see `photo` below).
   const SRC_DB = 'sanstyle.sources', SRC_STORE = 'crops';
   const srcMem = new Map();
   let srcDb = null;
@@ -292,5 +301,177 @@
         try { db.transaction(SRC_STORE, 'readwrite').objectStore(SRC_STORE).delete(id); } catch (e) { /* gone */ }
       });
     },
+    // The crop for a letterform (a variant record): the one kept on this
+    // device, or else cut again from its Drive photo — and kept here from
+    // then on.
+    find(v) {
+      if (!v || !v.id) return Promise.resolve(null);
+      return ST.sources.get(v.id).then((url) => {
+        if (url || !ST.sources.canFetch(v)) return url || null;
+        return ST.sync.cropFromPhoto(v).then((cut) => {
+          if (cut) ST.sources.put(v.id, cut);
+          return cut || null;
+        });
+      });
+    },
+    // whether find() can go to Drive for it
+    canFetch(v) {
+      return !!(v && v.photo && v.photo.id && Array.isArray(v.photo.quad) &&
+        ST.sync && ST.sync.unlocked && ST.sync.cropFromPhoto);
+    },
+  };
+
+  // ---------- where in its photo a letterform was cut ----------
+  // The crops above stay on the device that made them. So that the bit of
+  // photo can be cut again anywhere, a letterform added from a photo
+  // records it in `variant.photo`: `id` (its Drive file, when it has one),
+  // `name`, and `quad` — the crop's corners (top-left, top-right,
+  // bottom-right, bottom-left as the letter stands) as fractions of the
+  // photo's width and height as it was shot. It rides in library.json, so
+  // it syncs, exports and imports with the letterform.
+  //
+  // The stage shows the photo straightened: turned upright by the item's
+  // `angle` about its middle (auto.rotateCanvas — the canvas grows to the
+  // turned photo's bounds), scaled evenly, and perhaps cropped (a cropped
+  // canvas's `_frame` says where it sits in the whole straightened frame,
+  // as fractions of it). Undoing that puts a crop back on the photo.
+  const FULL = { x: 0, y: 0, w: 1, h: 1 };
+  const r4 = (v) => Math.round(v * 1e4) / 1e4;
+
+  // A crop of `canvas` (px) as a frame of the whole straightened photo; a
+  // crop of a crop composes.
+  ST.sources.subFrame = function (canvas, x, y, w, h) {
+    const f = canvas._frame || FULL;
+    return {
+      x: f.x + (x / canvas.width) * f.w, y: f.y + (y / canvas.height) * f.h,
+      w: (w / canvas.width) * f.w, h: (h / canvas.height) * f.h,
+    };
+  };
+
+  // { angle (degrees, as the item has it), full: {w, h} of the whole
+  //   straightened frame, frame (fractions; whole when absent), view: {w, h}
+  //   of the canvas the rect is in, rect: {x, y, w, h} px } → quad
+  ST.sources.photoQuad = function (o) {
+    const f = o.frame || FULL;
+    // a flattened photo (o.flat, rectify.js): its homography undone — px
+    // on the flat canvas back to px on the photo at the working size it was
+    // read at
+    if (o.flat && o.flat.H && ST.rectify) {
+      const Hi = ST.rectify.inv3(o.flat.H);
+      if (!Hi) return null;
+      const W = o.full.w, H = o.full.h, r = o.flat, px = o.rect, q = [];
+      for (const [x, y] of [[px.x, px.y], [px.x + px.w, px.y], [px.x + px.w, px.y + px.h], [px.x, px.y + px.h]]) {
+        const fx = (f.x + (x / o.view.w) * f.w) * W, fy = (f.y + (y / o.view.h) * f.h) * H;
+        const p = ST.rectify.apply(Hi, fx, fy);
+        q.push(r4(p[0] / r.srcW), r4(p[1] / r.srcH));
+      }
+      return q;
+    }
+    const rad = (-(o.angle || 0) * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const cs = Math.abs(cos), sn = Math.abs(sin);
+    const W = o.full.w, H = o.full.h;
+    // the photo's own size in the frame's px: the frame is its turned bounds
+    const det = cs * cs - sn * sn;
+    if (!(det > 0.2) || !W || !H) return null;
+    const pw = (W * cs - H * sn) / det, ph = (H * cs - W * sn) / det;
+    if (!(pw > 0 && ph > 0)) return null;
+    const r = o.rect, quad = [];
+    for (const [x, y] of [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]]) {
+      // frame px about its middle, turned back onto the photo
+      const dx = (f.x + (x / o.view.w) * f.w) * W - W / 2;
+      const dy = (f.y + (y / o.view.h) * f.h) * H - H / 2;
+      quad.push(r4((dx * cos + dy * sin + pw / 2) / pw), r4((-dx * sin + dy * cos + ph / 2) / ph));
+    }
+    return quad;
+  };
+
+  // The `photo` record for a letterform cut from a review-queue item's shape
+  // (crop: px on the item's canvas): the same bit capture.sourceThumb
+  // keeps — the crop with a margin, within the canvas. A demo wall has no
+  // photo to go back to.
+  ST.sources.photoOf = function (item, crop) {
+    if (!item || !item.canvas || !crop) return null;
+    if (!item.sourceId && /^demo-/.test(item.name || '')) return null;
+    const cv = item.canvas, full = (item.original && item.original.canvas) || cv;
+    const pad = Math.round(Math.max(crop.w, crop.h) * 0.15);
+    const x0 = Math.max(0, crop.x - pad), y0 = Math.max(0, crop.y - pad);
+    const x1 = Math.min(cv.width, crop.x + crop.w + pad), y1 = Math.min(cv.height, crop.y + crop.h + pad);
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    const quad = ST.sources.photoQuad({
+      angle: item.rect ? 0 : item.angle,
+      flat: item.rect || null, // the flattening (rectify.js), if any
+      full: { w: full.width, h: full.height },
+      frame: cv === full ? null : cv._frame,
+      view: { w: cv.width, h: cv.height },
+      rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 },
+    });
+    if (!quad) return null;
+    const out = { quad };
+    if (item.sourceId) out.id = item.sourceId;
+    if (item.name) out.name = item.name;
+    return out;
+  };
+
+  // Cut a quad out of a photo (canvas or bitmap), upright, as a small JPEG
+  // data URL — what capture.sourceThumb would have kept. Past the photo's
+  // edge reads neutral gray.
+  ST.sources.cutQuad = function (photo, quad, maxEdge) {
+    const W = photo.width, H = photo.height;
+    const P = (i) => ({ x: quad[2 * i] * W, y: quad[2 * i + 1] * H });
+    const a = P(0), b = P(1), cc = P(2), d = P(3);
+    const sw = (Math.hypot(b.x - a.x, b.y - a.y) + Math.hypot(cc.x - d.x, cc.y - d.y)) / 2;
+    const sh = (Math.hypot(d.x - a.x, d.y - a.y) + Math.hypot(cc.x - b.x, cc.y - b.y)) / 2;
+    if (!(sw >= 1 && sh >= 1)) return null;
+    // (as big as the kept crops come out: extraction reads small letters enlarged)
+    const s = Math.min(3, (maxEdge || 320) / Math.max(sw, sh));
+    const c = g.document.createElement('canvas');
+    c.width = Math.max(1, Math.round(sw * s));
+    c.height = Math.max(1, Math.round(sh * s));
+    const cx = c.getContext('2d');
+    cx.fillStyle = '#8a8a8a';
+    cx.fillRect(0, 0, c.width, c.height);
+    // a parallelogram (a photo turned, scaled, cropped): output px → photo
+    // px is a + u·(b − a)/width + v·(d − a)/height, and the photo is drawn
+    // through its inverse
+    if (Math.hypot(cc.x - (b.x + d.x - a.x), cc.y - (b.y + d.y - a.y)) < 0.5 || !ST.geom) {
+      cx.setTransform(new DOMMatrix([
+        (b.x - a.x) / c.width, (b.y - a.y) / c.width, (d.x - a.x) / c.height, (d.y - a.y) / c.height, a.x, a.y,
+      ]).inverse());
+      cx.imageSmoothingQuality = 'high';
+      cx.drawImage(photo, 0, 0);
+      return c.toDataURL('image/jpeg', 0.75);
+    }
+    // a flattened photo's quad is any four-sided shape: each output pixel
+    // is looked up through the homography from the output onto the quad
+    const Hm = ST.geom.homography(
+      [{ x: 0, y: 0 }, { x: c.width, y: 0 }, { x: c.width, y: c.height }, { x: 0, y: c.height }], [a, b, cc, d]);
+    if (!Hm) return null;
+    // (only the part of the photo the quad covers is read)
+    const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x, cc.x, d.x)) - 1), y0 = Math.max(0, Math.floor(Math.min(a.y, b.y, cc.y, d.y)) - 1);
+    const x1 = Math.min(W, Math.ceil(Math.max(a.x, b.x, cc.x, d.x)) + 1), y1 = Math.min(H, Math.ceil(Math.max(a.y, b.y, cc.y, d.y)) + 1);
+    if (x1 - x0 < 1 || y1 - y0 < 1) return c.toDataURL('image/jpeg', 0.75);
+    const pc = g.document.createElement('canvas');
+    pc.width = x1 - x0; pc.height = y1 - y0;
+    const px = pc.getContext('2d');
+    px.drawImage(photo, x0, y0, pc.width, pc.height, 0, 0, pc.width, pc.height);
+    const src = px.getImageData(0, 0, pc.width, pc.height).data, pw = pc.width, ph = pc.height;
+    const out = cx.getImageData(0, 0, c.width, c.height), od = out.data;
+    for (let v = 0; v < c.height; v++) {
+      for (let u = 0; u < c.width; u++) {
+        const q = ST.geom.applyH(Hm, u + 0.5, v + 0.5);
+        const fx = q.x - x0 - 0.5, fy = q.y - y0 - 0.5;
+        if (fx < 0 || fy < 0 || fx > pw - 1 || fy > ph - 1) continue;
+        const ix = Math.floor(fx), iy = Math.floor(fy), tx = fx - ix, ty = fy - iy;
+        const jx = Math.min(pw - 1, ix + 1), jy = Math.min(ph - 1, iy + 1);
+        const o = (v * c.width + u) * 4;
+        for (let k = 0; k < 3; k++) {
+          od[o + k] = (src[(iy * pw + ix) * 4 + k] * (1 - tx) + src[(iy * pw + jx) * 4 + k] * tx) * (1 - ty) +
+            (src[(jy * pw + ix) * 4 + k] * (1 - tx) + src[(jy * pw + jx) * 4 + k] * tx) * ty;
+        }
+      }
+    }
+    cx.putImageData(out, 0, 0);
+    return c.toDataURL('image/jpeg', 0.75);
   };
 })(typeof window !== 'undefined' ? window : globalThis);

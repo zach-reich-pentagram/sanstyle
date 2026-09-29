@@ -383,6 +383,41 @@ main { flex: 1; display: flex; min-height: 0; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* the letterforms a photo gave: a count, and on hover their outlines */
+.photo-forms-count {
+  position: absolute;
+  z-index: 1;
+  top: 6px; right: 6px;
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 11px;
+  text-align: center;
+}
+.photo-forms {
+  position: absolute;
+  inset: 0 0 22px 0;
+  display: none;
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  pointer-events: none;
+}
+.photo-card:hover .photo-forms, .photo-card:focus-visible .photo-forms { display: flex; }
+.photo-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.photo-form canvas { width: 40px; height: 40px; display: block; }
+.photo-form.more { justify-content: center; height: 54px; padding: 0 4px; color: var(--dim); }
 
 /* drawer */
 .drawer {
@@ -513,6 +548,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .src-pop.on { display: block; }
 .src-pop img { display: block; max-width: 260px; max-height: 260px; border-radius: 10px; }
 .src-pop-label { text-align: center; font-size: 12px; padding-top: 3px; }
+.src-pop-note { max-width: 180px; padding: 4px 6px 0; font-size: 12px; color: var(--dim); text-align: center; }
 #weightRange:disabled { opacity: 0.35; }
 .tester.kerning { cursor: pointer; }
 .tester.kerning .tl:hover { outline: var(--bw) solid #bbb; }
@@ -636,5 +672,10 @@ main { flex: 1; display: flex; min-height: 0; }
 
 .paint-row { margin-top: 2px; }
 .paint-row span:first-child { font-size: 15px; }
-.swatch { display: inline-flex; align-items: center; justify-content: center; min-width: 38px; height: 24px; padding: 0 6px; border: 1px solid #000; border-radius: 12px; font-size: 12px; color: #666; background: #fff; }
-.swatch.set { color: transparent; }
+/* every letter found in the photo: one click picks it */
+.letter-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.letter-pick { position: relative; width: 52px; height: 52px; padding: 3px; border: var(--bw) solid var(--ink); border-radius: 8px; background: var(--paper); cursor: pointer; }
+.letter-pick canvas { display: block; width: 44px; height: 44px; }
+.letter-pick span { position: absolute; right: 3px; bottom: 1px; font-size: 11px; line-height: 1; color: #888; }
+.letter-pick:hover { background: #f1f1f1; }
+.letter-pick.on { outline: 2px solid #3b82f6; outline-offset: 1px; }

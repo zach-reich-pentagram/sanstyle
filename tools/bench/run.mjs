@@ -101,18 +101,10 @@ for (const name of names) {
     let bestA = -1;
     autoScores.forEach((s, i) => { if (s && (bestA < 0 || s.iou > autoScores[bestA].iou)) bestA = i; });
     const clickFirst = seeded ? seeded.candidates[0] : null;
-    // typing the character: the review flow's automatic trim
-    let typed = null;
-    if (scene.char) {
-      ST.batch.addCanvas(canvas, 'bench-' + name);
-      while (ST.batch.idx < ST.batch.queue.length - 1) ST.batch.idx++;
-      ST.batch.renderCurrent();
-      ST.batch.clickTrace(click.x, click.y);
-      document.getElementById('reviewChar').value = scene.char;
-      ST.batch.autoIsolate();
-      const it = ST.batch.queue[ST.batch.idx];
-      typed = it.candidates[0];
-    }
+    // a click answered from the automatic pass's shapes (the review queue's
+    // click in the worker: which shape, which stroke — nothing regrown)
+    const fastRes = ST.auto.clickLetter(auto.shapes, auto.canvas.width, auto.canvas.height, click.x * k, click.y * k);
+    const fast = fastRes ? fastRes.candidates[0] : null;
     const clickWhole = seeded ? seeded.candidates[seeded.candidates.length - 1] : null;
 
     // overlay
@@ -151,8 +143,8 @@ for (const name of names) {
       autoN: auto.candidates.length, autoBest: bestA, auto: bestA >= 0 ? autoScores[bestA] : null,
       auto0: autoScores[0] || null,
       click: score(clickFirst, 1), clickWhole: clickWhole !== clickFirst ? score(clickWhole, 1) : null,
-      typed: typed ? score(typed, 1) : null,
-      imgAuto: render(bestA >= 0 ? auto.candidates[bestA] : null, k), imgClick: render(typed || clickFirst, 1),
+      fast: fast ? score(fast, k) : null,
+      imgAuto: render(bestA >= 0 ? auto.candidates[bestA] : null, k), imgClick: render(clickFirst, 1),
     };
   }, [name, smoothing]);
   writeFileSync(path.join(OUT, `${name}-auto.png`), Buffer.from(r.imgAuto.split(',')[1], 'base64'));
@@ -160,7 +152,7 @@ for (const name of names) {
   delete r.imgAuto; delete r.imgClick;
   rows.push(r);
   const f = (s) => (s ? `iou ${s.iou.toFixed(3)} in ${s.iouIn.toFixed(3)} trace ${s.traceIoU.toFixed(3)} ${s.outer}o/${s.holes}h` : '—');
-  console.log(`${name.padEnd(12)} exp ${r.expect.outer}o/${r.expect.holes}h | auto[${r.autoBest}/${r.autoN}] ${f(r.auto)} | click ${r.click ? r.click.kind : ''} ${f(r.click)}${r.clickWhole ? ` | whole ${f(r.clickWhole)}` : ''}${r.typed ? ` | typed ${r.typed.kind} ${f(r.typed)}` : ''} | ${r.tAuto}+${r.tClick}ms`);
+  console.log(`${name.padEnd(12)} exp ${r.expect.outer}o/${r.expect.holes}h | auto[${r.autoBest}/${r.autoN}] ${f(r.auto)} | click ${r.click ? r.click.kind : ''} ${f(r.click)}${r.clickWhole ? ` | whole ${f(r.clickWhole)}` : ''}${r.fast ? ` | fast ${r.fast.kind} ${f(r.fast)}` : ''} | ${r.tAuto}+${r.tClick}ms`);
 }
 writeFileSync(path.join(OUT, 'results.json'), JSON.stringify(rows, null, 1));
 const mean = (key, sub) => { const v = rows.map((r) => r[sub] && r[sub][key]).filter((x) => x != null); return v.length ? (v.reduce((a, b) => a + b, 0) / v.length).toFixed(3) : '—'; };

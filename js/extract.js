@@ -1752,9 +1752,17 @@
     // the click is on the letter: each cut takes only from its other side
     const excl = ex.cutMask(w, h, o.cuts, { x, y });
     let bg = ex.backgroundColor(data, w, h), wallTol = null;
-    // the letter's own wall, if the photo's border shows another surface
-    const local = bg && ex.localWall(data, w, h, x, y, bg);
-    if (local) { bg = local.bg; wallTol = local.tol; }
+    // the letter's own wall: the surface behind the click, when the
+    // photo's analysis knows it (o.backdrop, see auto.inks) — a black panel
+    // on a brick wall, a post against the street — else the one round the
+    // click if the photo's border shows another
+    const bd = o.backdrop && o.backdrop.W === w && o.backdrop.H === h ? o.backdrop : null;
+    const k = bd ? bd.near[y * w + x] : -1;
+    if (k >= 0) { bg = bd.colors[k]; wallTol = bd.tols[k]; }
+    else {
+      const local = bg && ex.localWall(data, w, h, x, y, bg);
+      if (local) { bg = local.bg; wallTol = local.tol; }
+    }
     // a paint picked for the photo (o.paint): the click goes to the nearest
     // pixel of that color, and that color is the paint — not whatever
     // contrasts most with the wall there

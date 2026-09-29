@@ -205,7 +205,7 @@ test('localWall: a letter on a surface other than the photo border\'s is judged 
   assert.strictEqual(ST.extract.localWall(data, w, h, 10, 10, border), null, 'where the border shows, its color stands');
 });
 
-test('second paint: a halo hugging the letters is told apart from a shape of its own, which never takes the first paint in', () => {
+test('inks: every paint read apart — a bleed halo is not the letter, a gray bar beside it is a paint of its own', () => {
   const A = loadST(['util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'auto.js']);
   const W = 240, H = 240;
   const L = [[60, 40, 60, 200], [60, 200, 130, 200]]; // a red marker L
@@ -222,16 +222,20 @@ test('second paint: a halo hugging the letters is told apart from a shape of its
         data[p] = c[0] + n; data[p + 1] = c[1] + n; data[p + 2] = c[2] + n; data[p + 3] = 255;
       }
     }
-    const pm = A.auto._paintMask(data, W, H);
-    return { pm, second: A.auto._secondPaint(data, W, H, pm) };
+    return A.auto.inks(data, W, H, {});
   };
+  const red = (r) => r.inks.find((k) => k.seed.r > 150 && k.seed.g < 90);
   const halo = photo('halo');
-  assert.ok(halo.second && halo.second.hug >= 0.85, `the halo hugs the L (${halo.second && halo.second.hug.toFixed(2)})`);
+  const rh = red(halo);
+  assert.ok(rh, 'the red L is read as a paint');
+  assert.ok(rh.raw[100 * W + 60] && !rh.raw[100 * W + 60 + 18], 'its core is in, its pink bleed out');
   const pipe = photo('pipe');
-  assert.ok(pipe.second && pipe.second.hug < 0.3, `the bar stands on its own (${pipe.second && pipe.second.hug.toFixed(2)})`);
+  const rp = red(pipe), gray = pipe.inks.find((k) => Math.abs(k.seed.r - k.seed.b) < 20 && k.seed.r < 160);
+  assert.ok(rp && gray, `the L and the bar are two paints (${pipe.inks.map((k) => [k.seed.r, k.seed.g, k.seed.b].map(Math.round).join(',')).join(' / ')})`);
   let shared = 0;
-  for (let i = 0; i < W * H; i++) if (pipe.second.pm.raw[i] && pipe.pm.raw[i]) shared++;
+  for (let i = 0; i < W * H; i++) if (rp.raw[i] && gray.raw[i]) shared++;
   assert.strictEqual(shared, 0, 'the red L is not read again as part of the gray paint');
+  assert.ok(gray.raw[100 * W + 200] && !gray.raw[100 * W + 60], 'the bar is the gray paint, the L is not');
 });
 
 test('sync.dedupe: the same photo shared twice is one entry that knows its copies', () => {

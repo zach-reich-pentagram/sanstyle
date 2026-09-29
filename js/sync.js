@@ -252,10 +252,11 @@
     return p;
   };
 
-  // Queue one Drive photo for extraction (again).
+  // One Drive photo picked in the gallery: onto the capture stage now,
+  // ahead of whatever the queue holds, used before or not (batch.js).
   sync.extractPhoto = function (photo) {
     if (!sync.unlocked || !photo) return;
-    ST.batch.addRemotePhotos([photo]);
+    return ST.batch.openRemotePhoto(photo);
   };
 
   // Queue every photo in the Drive inbox, used or not.
@@ -296,6 +297,40 @@
       }
       throw e;
     }
+  };
+
+  // ---------- a letterform's bit of photo, cut again from Drive ----------
+  // The crop the tester pops up is kept on the device that captured the
+  // letterform. Anywhere else the letterform's record says which Drive
+  // photo it came from and where (variant.photo, see store.js): the photo
+  // is fetched the way extraction fetched it and the bit cut out again.
+  // The last couple of photos stay in memory (neighbors in a word often
+  // share one); a letterform asked for twice is fetched once.
+  const photoCanvases = new Map(); // photo id → Promise<canvas>
+  const cropJobs = new Map();      // variant id → Promise<data URL | null>
+  function photoCanvasOf(src) {
+    if (photoCanvases.has(src.id)) {
+      const p = photoCanvases.get(src.id);
+      photoCanvases.delete(src.id);
+      photoCanvases.set(src.id, p); // most recent last
+      return p;
+    }
+    const p = sync.fetchPhotoCanvas({ id: src.id, name: src.name || '' });
+    photoCanvases.set(src.id, p);
+    p.catch(() => photoCanvases.delete(src.id));
+    while (photoCanvases.size > 2) photoCanvases.delete(photoCanvases.keys().next().value);
+    return p;
+  }
+  sync.cropFromPhoto = function (variant) {
+    const src = variant && variant.photo;
+    if (!sync.unlocked || !src || !src.id || !Array.isArray(src.quad)) return Promise.resolve(null);
+    if (cropJobs.has(variant.id)) return cropJobs.get(variant.id);
+    const job = photoCanvasOf(src)
+      .then((cnv) => ST.sources.cutQuad(cnv, src.quad))
+      .catch((e) => { console.warn('source photo fetch failed', src.name || src.id, e); return null; })
+      .finally(() => cropJobs.delete(variant.id));
+    cropJobs.set(variant.id, job);
+    return job;
   };
 
   // ---------- site → Drive photo upload ----------
