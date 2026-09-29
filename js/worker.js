@@ -9,7 +9,7 @@
  * instead of growing the letter again from nothing.
  */
 'use strict';
-importScripts('util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'letters-model.js', 'recognize.js', 'letters.js', 'rectify.js', 'auto.js');
+importScripts('util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'letters-model.js', 'recognize.js', 'letters.js', 'typed.js', 'rectify.js', 'auto.js');
 
 // the photo clicks are traced on, kept between clicks (sent once per photo)
 let photo = null;
@@ -23,7 +23,7 @@ function send(id, candidates, extra, transfer) {
   const out = candidates.map((cd) => {
     const mask = cd.mask.slice(); // (the analysis keeps its own)
     give(mask);
-    return { crop: cd.crop, mask, w: cd.w, h: cd.h, paths: cd.paths, kind: cd.kind, read: cd.read, lean: cd.lean, score: cd.score };
+    return { crop: cd.crop, mask, w: cd.w, h: cd.h, paths: cd.paths, kind: cd.kind, read: cd.read, lean: cd.lean, score: cd.score, typed: cd.typed, fit: cd.fit, reads: cd.reads };
   });
   if (extra.inPhoto) give(extra.inPhoto);
   self.postMessage(Object.assign({ id, ok: true, candidates: out }, extra), transfer);
@@ -56,6 +56,15 @@ self.onmessage = async (e) => {
       if (!res) { self.postMessage({ id, ok: true, none: true }); return; }
       for (const k of res.candidates) if (k.lean == null) k.lean = self.ST.letters ? self.ST.letters.lean(k.mask, k.w, k.h) : 0;
       send(id, res.candidates, { click: res.click || null }, []);
+      return;
+    }
+    // a character typed: looked for in the photo's shapes (see typed.js)
+    if (type === 'typed') {
+      const an = e.data.analysis != null ? analyses.get(e.data.analysis) : null;
+      const first = e.data.first || null;
+      const found = self.ST.typed.findIn(an ? an.shapes : [], e.data.ch, { first, hint: e.data.hint, hintWeight: e.data.hintWeight, budgetMs: 9000 });
+      if (!found) { self.postMessage({ id, ok: true, none: true }); return; }
+      send(id, [found], {}, []);
       return;
     }
     const c = new OffscreenCanvas(bitmap.width, bitmap.height);

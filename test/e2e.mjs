@@ -966,6 +966,52 @@ check(thin.on && /whole/.test(thin.on) && thin.blank === null,
   `auto.clickLetter answers a click from the analysis's shapes (${thin.on}) and finds nothing on bare wall`);
 
 
+// ---- a letter typed: found in the photo, traced through its neighbors --------
+// "HAH" in one red, the H's bars running into the A's legs: type A and the
+// photo is searched for an A — its strokes fitted onto the paint's, carried
+// through the crossings — and the A comes out alone, apex to feet, no bar.
+console.log('\n— a letter typed, found through its neighbors');
+const hahUrl = await page.evaluate(() => {
+  const W = 900, H = 700, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  x.fillStyle = '#dcd8cf'; x.fillRect(0, 0, W, H);
+  const img = x.getImageData(0, 0, W, H);
+  let s = 7; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  for (let i = 0; i < img.data.length; i += 4) { const n = (rnd() - 0.5) * 18; img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n; }
+  x.putImageData(img, 0, 0);
+  x.strokeStyle = '#b81f2e'; x.lineWidth = 34; x.lineCap = 'round'; x.lineJoin = 'round';
+  const line = (pts) => { x.beginPath(); x.moveTo(pts[0], pts[1]); for (let k = 2; k < pts.length; k += 2) x.lineTo(pts[k], pts[k + 1]); x.stroke(); };
+  line([110, 150, 110, 560]); line([290, 150, 290, 560]); line([110, 350, 392, 350]);    // H, its bar into the A's left leg
+  line([330, 560, 450, 150, 570, 560]); line([383, 420, 517, 420]);                       // A
+  line([660, 150, 660, 560]); line([840, 150, 840, 560]); line([508, 350, 840, 350]);    // H, its bar from the A's right leg
+  return c.toDataURL('image/png');
+});
+await upload('hah.png', hahUrl);
+await page.evaluate(() => { ST.batch.idx = ST.batch.queue.length - 1; ST.batch.renderCurrent(); });
+await page.click('#reviewChar', { clickCount: 3 });
+await page.keyboard.type('A');
+await page.waitForFunction(() => { const it = ST.batch.queue[ST.batch.idx]; const c = it && it.candidates[it.ci]; return c && c.kind === 'typed'; }, null, { timeout: 30000 }).catch(() => {});
+await idle();
+const typedRes = await page.evaluate(() => {
+  const it = ST.batch.queue[ST.batch.idx], c = it.candidates[it.ci];
+  if (!c || c.kind !== 'typed') return { kind: c && c.kind };
+  const b = __e2e.bounds(it, 900, c);
+  const on = (px, py) => { const p = __e2e.at(it, 900, px, py), X = Math.round(p.x - c.crop.x), Y = Math.round(p.y - c.crop.y); return X >= 0 && Y >= 0 && X < c.w && Y < c.h && !!c.mask[Y * c.w + X]; };
+  return { kind: c.kind, typed: c.typed, b, box: document.getElementById('reviewChar').value, btn: document.getElementById('reviewFind').textContent,
+    leftBar: on(345, 350), rightBar: on(600, 350), apex: on(450, 175), leftFoot: on(338, 535), rightFoot: on(562, 535), bar: on(450, 420) };
+});
+check(typedRes.kind === 'typed' && typedRes.typed === 'A' && typedRes.box === 'A', `typing A finds an A in the photo (${typedRes.kind})`);
+check(typedRes.b && typedRes.b.x0 > 290 && typedRes.b.x1 < 620 && typedRes.b.y0 < 175 && typedRes.b.y1 > 540,
+  `the A alone, apex to feet — not the H's beside it (${typedRes.b && `${typedRes.b.x0},${typedRes.b.y0}–${typedRes.b.x1},${typedRes.b.y1}`})`);
+check(typedRes.apex && typedRes.leftFoot && typedRes.rightFoot && typedRes.bar && !typedRes.leftBar && !typedRes.rightBar,
+  `its legs, apex and bar traced, the H's bars that run into its legs left out (${JSON.stringify({ apex: typedRes.apex, feet: typedRes.leftFoot && typedRes.rightFoot, bar: typedRes.bar, hBars: typedRes.leftBar || typedRes.rightBar })})`);
+check(/Find “A” in the photo/.test(typedRes.btn || ''), `the Tag step offers to find the typed letter again (${typedRes.btn})`);
+await page.evaluate(() => ST.batch.undo());
+const typedUndo = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { kind: it.candidates[it.ci].kind, any: it.candidates.some((c) => c.kind === 'typed'), box: document.getElementById('reviewChar').value }; });
+check(!typedUndo.any && typedUndo.box === 'A', `⌘Z brings back the shapes found before (${typedUndo.kind}), the A still typed`);
+await page.evaluate(() => ST.batch.skip());
+
+
 // ---- live font + variant cycling ---------------------------------------------
 console.log('\n— live font, cycling, kerning');
 await page.waitForFunction(() => __st.state().glyphsMapped >= 14 && __st.fontB64(), { timeout: 15000 });

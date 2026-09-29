@@ -261,11 +261,12 @@
     input.value = '';
     ST.capture.showItem(item, cand, { intake: batch.intakeActive });
     // what the shape reads as, filled in (typing replaces it)
-    const guess = cand ? ST.capture.guess(cand) : '';
+    const guess = cand ? (cand.kind === 'typed' ? cand.typed : ST.capture.guess(cand)) : '';
     if (guess) { input.value = guess; ST.capture.updatePreview(); }
     setProgress();
     updateQueuePill();
     showLetters(item);
+    if (batch.syncFind) batch.syncFind();
     $('#reviewReset').disabled = !item || !item.original;
     $('#reviewSkip').disabled = !item;
     if (!item) {
@@ -332,6 +333,7 @@
     const item = batch.queue[batch.idx];
     if (!item || !item.candidates[k]) return;
     item.ci = k;
+    item.pickedCi = k; // (where you are looking now: see findTyped)
     renderCurrent();
   };
 
@@ -371,6 +373,7 @@
       return 0;
     }
     if (res.click) item.lastClick = res.click;
+    item.pickedCi = null;
     // a plain click starts over on the letter under it; the internal
     // re-traces (Detail, cuts, undo) keep the shift-clicked pieces
     if (!(opts && opts.keepParts)) { item.parts = []; item.removals = []; }
@@ -722,6 +725,65 @@
     return true;
   };
 
+  // ---------- a letter typed: looked for in the photo ----------
+  // Type the character you see and the photo is searched for it (typed.js):
+  // the character's strokes are fitted onto the paint's own — the shape
+  // you are looking at first, then the photo's other shapes — and drawn
+  // stroke by stroke, carried on through the strokes of the letters that
+  // cross it. Runs in the background worker, where the photo's analysis is.
+  async function typedAsync(item, ch, first, hint, hintWeight) {
+    const w = analysisWorker();
+    if (w && item.analysis != null) {
+      try {
+        const id = nextJob++;
+        const r = await new Promise((resolve) => {
+          workerJobs.set(id, resolve);
+          const f = first ? { crop: first.crop, mask: first.mask.slice(), w: first.w, h: first.h } : null;
+          w.postMessage({ id, type: 'typed', analysis: item.analysis, ch, first: f, hint, hintWeight }, f ? [f.mask.buffer] : []);
+        });
+        if (r.ok) return r.none ? null : r.candidates[0];
+        console.warn('typed search in the worker failed — searching on the page instead:', r.error);
+      } catch (e) {
+        console.warn('typed search in the worker failed — searching on the page instead:', e);
+      }
+    }
+    const shapes = ((item.original && item.original.candidates) || item.candidates).filter((c) => c.kind !== 'typed');
+    return ST.typed.findIn(shapes, ch, { first, hint, hintWeight, budgetMs: 9000 });
+  }
+
+  batch.findTyped = async function (chIn, opts) {
+    const o = opts || {};
+    const item = batch.queue[batch.idx];
+    const ch = chIn || batch.charKey($('#reviewChar').value);
+    if (!item || !ch || ch.length !== 1 || !ST.typed) return false;
+    // the shape you are looking at (not one found for another character)
+    const cur = item.candidates.find((c, k) => k >= item.ci && c.kind !== 'typed') || item.candidates.find((c) => c.kind !== 'typed') || null;
+    // where you are looking: where you clicked, else the letter you picked
+    // in the strip, else the middle of the photo (the letter you are after
+    // is usually the one you framed)
+    const picked = item.pickedCi != null ? item.candidates[item.pickedCi] : null;
+    const hint = picked ? { x: picked.crop.x + picked.w / 2, y: picked.crop.y + picked.h / 2 }
+      : item.lastClick || { x: item.canvas.width / 2, y: item.canvas.height / 2 };
+    const hintWeight = picked ? 0.2 : item.lastClick ? 0.25 : 0.08;
+    const seq = (item._typedSeq = (item._typedSeq || 0) + 1);
+    const found = await typedAsync(item, ch, cur, hint, hintWeight);
+    if (batch.queue[batch.idx] !== item || item._typedSeq !== seq) return false; // moved on meanwhile
+    const keep = $('#reviewChar').value;
+    if (!found) {
+      if (!o.quiet) ST.toast(`Couldn't find a “${ch}” here — click it in the photo, then type it again.`, 'warn');
+      return false;
+    }
+    item.history = (item.history || []).concat([{ type: 'typed', prev: { candidates: item.candidates, ci: item.ci } }]);
+    item.candidates = [found].concat(item.candidates.filter((c) => !(c.kind === 'typed' && c.typed === ch)));
+    item.ci = 0;
+    item.pickedCi = null;
+    renderCurrent();
+    $('#reviewChar').value = keep;
+    ST.capture.updatePreview();
+    ST.toast(`Found the “${ch}” — ⌘Z brings the other shapes back.`);
+    return true;
+  };
+
   // ⌘Z: the last cut or added piece, most recent first.
   batch.undo = function () {
     const item = batch.queue[batch.idx];
@@ -731,6 +793,15 @@
       Object.assign(item, last.prev);
       renderCurrent();
       ST.toast('Crop undone.');
+      return true;
+    }
+    if (last.type === 'typed') {
+      const keep = $('#reviewChar').value;
+      Object.assign(item, last.prev);
+      renderCurrent();
+      $('#reviewChar').value = keep;
+      ST.capture.updatePreview();
+      ST.toast('Back to the shapes found before.');
       return true;
     }
     if (last.type === 'cut' && item.cuts && item.cuts.length) item.cuts.pop();
@@ -832,6 +903,34 @@
     $('#reviewChar').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); batch.accept(); }
     });
+    // typing a character the shape doesn't read as: the photo is searched
+    // for it (a pause after the key, so a character typed over is not)
+    const findBtn = $('#reviewFind');
+    const syncFind = () => {
+      const ch = batch.charKey($('#reviewChar').value);
+      if (!findBtn) return;
+      findBtn.disabled = !batch.queue[batch.idx] || ch.length !== 1;
+      findBtn.textContent = ch.length === 1 ? `Find “${ch}” in the photo` : 'Find the letter I typed';
+    };
+    batch.syncFind = syncFind;
+    $('#reviewChar').addEventListener('input', syncFind);
+    $('#reviewChar').addEventListener('input', ST.debounce(() => {
+      const item = batch.queue[batch.idx];
+      const ch = batch.charKey($('#reviewChar').value);
+      if (!item || ch.length !== 1) return;
+      const cur = item.candidates[item.ci];
+      if (cur && cur.kind === 'typed' && cur.typed === ch) return;
+      // (a shape that already reads plainly as it needs no search)
+      const read = cur ? ST.capture.readOf(cur) : null;
+      if (read) {
+        const want = new Set(ST.typed ? ST.typed.cases(ch) : [ch]);
+        let p = 0;
+        for (const r of read.ranked) if (want.has(r.ch)) p += r.p;
+        if (p >= 0.55 && read.letterness >= 0.7) return;
+      }
+      busy(`Finding “${ch}” in the photo…`, () => batch.findTyped(ch, { quiet: true }));
+    }, 550));
+    if (findBtn) findBtn.addEventListener('click', () => busy('Finding the letter in the photo…', () => batch.findTyped()));
     ST.store.on('change', updateQueuePill);
     renderCurrent();
   };
