@@ -689,4 +689,409 @@
       fit: r.fit, reads: r.reads,
     };
   };
+
+  // ---------- a letter you trace ----------
+  // Drag along a letter's strokes and the paint under them is taken as
+  // the letter: your strokes are its skeleton. Each is moved onto the
+  // center line of the paint running your way and drawn at the paint's
+  // own width; where another stroke crosses, it carries on through at the
+  // letter's width; where you traced across something hiding it, it is
+  // drawn across (never out onto bare wall); each end follows the paint a
+  // little on (you needn't reach it exactly). Any letterform at all: no
+  // typeface, no reading, is involved.
+
+  // your drag, smoothed and evened out to a point every 2 px
+  function resample(path) {
+    const pts = [];
+    for (let k = 0; k + 1 < path.length; k += 2) pts.push([path[k], path[k + 1]]);
+    if (pts.length < 2) return null;
+    // (a hand's tremor averaged away: a running mean over ~8 px of path)
+    const even = [];
+    let carry = 0;
+    even.push(pts[0].slice());
+    for (let k = 1; k < pts.length; k++) {
+      const a = pts[k - 1], b = pts[k], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      let d = 2 - carry;
+      while (d <= L) { even.push([a[0] + ((b[0] - a[0]) * d) / L, a[1] + ((b[1] - a[1]) * d) / L]); d += 2; }
+      carry = L - (d - 2);
+    }
+    const last = pts[pts.length - 1];
+    if (Math.hypot(last[0] - even[even.length - 1][0], last[1] - even[even.length - 1][1]) > 0.5) even.push(last.slice());
+    if (even.length < 3) return null;
+    const m = 2, out = [];
+    for (let k = 0; k < even.length; k++) {
+      let sx = 0, sy = 0, c = 0;
+      for (let q = Math.max(0, k - m); q <= Math.min(even.length - 1, k + m); q++) { sx += even[q][0]; sy += even[q][1]; c++; }
+      out.push(sx / c, sy / c);
+    }
+    return out;
+  }
+
+  // The paint the strokes were traced over: the photo's paint that lies
+  // under most of them (within a pen's reach of your line — a hand is not
+  // exact), or — a thin marker tag no paint was read for — the pixels that
+  // stand out as a line from what is round them. → { mask (box px), any
+  // (every paint in the box: what can hide a stroke), from, line() (the
+  // line reading, on demand) } or null
+  function paintUnder(samples, src, box) {
+    const { W, H } = src, R = ST.raster;
+    const reach = Math.max(6, Math.round(0.012 * Math.max(W, H)));
+    const cover = (has) => {
+      let hit = 0, n = 0;
+      for (let k = 0; k < samples.length; k += 6) {
+        const x = Math.round(samples[k]), y = Math.round(samples[k + 1]);
+        n++;
+        let got = false;
+        for (let yy = Math.max(0, y - reach); yy <= Math.min(H - 1, y + reach) && !got; yy += 2) {
+          for (let xx = Math.max(0, x - reach); xx <= Math.min(W - 1, x + reach); xx += 2) if (has(yy * W + xx)) { got = true; break; }
+        }
+        if (got) hit++;
+      }
+      return n ? hit / n : 0;
+    };
+    let best = null, shapesU = null;
+    const each = (src.paints || []).map((p) => ({ c: cover((i) => p[i]), full: p })).sort((a, b) => b.c - a.c);
+    if (each.length) best = each[0];
+    // (a paint read as two — its light and its shade, a line's core and its
+    // edge — taken together, when the second lies under more of your line)
+    for (let k = 1; best && k < each.length && best.c < 0.95; k++) {
+      if (each[k].c < 0.2) break;
+      const a = best.full, b = each[k].full;
+      const c = cover((i) => a[i] || b[i]);
+      if (c < best.c + 0.08) continue;
+      const u = new Uint8Array(W * H);
+      for (let i = 0; i < u.length; i++) u[i] = a[i] | b[i];
+      best = { c, full: u };
+    }
+    // the shapes the photo's analysis made, when no one paint lies under
+    // your strokes (not otherwise: they hold every color — a stroke of
+    // another that crosses the letter too)
+    if (src.shapes && src.shapes.length) {
+      const u = new Uint8Array(W * H);
+      for (const sh of src.shapes) {
+        for (let y = 0; y < sh.h; y++) {
+          const Y = y + sh.crop.y;
+          if (Y < 0 || Y >= H) continue;
+          for (let x = 0; x < sh.w; x++) { const X = x + sh.crop.x; if (X >= 0 && X < W && sh.mask[y * sh.w + x]) u[Y * W + X] = 1; }
+        }
+      }
+      const c = cover((i) => u[i]);
+      if (!best || (best.c < 0.55 && c > best.c + 0.1)) best = { c, full: u };
+      shapesU = u;
+    }
+    const rw = box.x1 - box.x0, rh = box.y1 - box.y0;
+    const crop = (full) => {
+      const m = new Uint8Array(rw * rh);
+      for (let y = 0; y < rh; y++) m.set(full.subarray((y + box.y0) * W + box.x0, (y + box.y0) * W + box.x0 + rw), y * rw);
+      return m;
+    };
+    // (any paint at all in the box: what a stroke can run on under)
+    const any = new Uint8Array(rw * rh);
+    for (const full of (src.paints || []).concat(shapesU ? [shapesU] : [])) {
+      for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) if (full[(y + box.y0) * W + x + box.x0]) any[y * rw + x] = 1;
+    }
+    const got = (m, from) => ({ mask: m, any, from: from || (best && best.full === shapesU ? 'shapes' : 'paint') + ' ' + (best ? best.c.toFixed(2) : '') });
+    if (best && best.c >= 0.55) return Object.assign(got(crop(best.full)), { line: () => lineUnder(samples, src, box) });
+    const m = lineUnder(samples, src, box);
+    if (!m) return best ? got(crop(best.full)) : null;
+    if (best && best.c > 0.3) { const b2 = crop(best.full); for (let i = 0; i < m.length; i++) if (b2[i]) m[i] = 1; }
+    return got(m, 'line');
+  }
+
+  // A line on the wall under your strokes: brighter (or darker) than what
+  // is round it — a marker tag no paint was read for, or read in bits.
+  function lineUnder(samples, src, box) {
+    const { W, H } = src, R = ST.raster;
+    const rw = box.x1 - box.x0, rh = box.y1 - box.y0;
+    if (!src.data) return null;
+    const Lm = new Float32Array(rw * rh);
+    for (let y = 0; y < rh; y++) {
+      for (let x = 0; x < rw; x++) {
+        const p = ((y + box.y0) * W + x + box.x0) * 4;
+        Lm[y * rw + x] = 0.299 * src.data[p] + 0.587 * src.data[p + 1] + 0.114 * src.data[p + 2];
+      }
+    }
+    const rr = Math.max(3, Math.round(0.012 * Math.max(W, H)));
+    const op = R.maxFilter(R.minFilter(Lm, rw, rh, rr), rw, rh, rr), cl = R.minFilter(R.maxFilter(Lm, rw, rh, rr), rw, rh, rr);
+    let sb = 0, sd = 0, n = 0;
+    for (let k = 0; k < samples.length; k += 6) {
+      const x = Math.round(samples[k]) - box.x0, y = Math.round(samples[k + 1]) - box.y0;
+      if (x < 0 || y < 0 || x >= rw || y >= rh) continue;
+      let b = 0, d = 0;
+      for (let yy = Math.max(0, y - 4); yy <= Math.min(rh - 1, y + 4); yy++) for (let xx = Math.max(0, x - 4); xx <= Math.min(rw - 1, x + 4); xx++) {
+        const i = yy * rw + xx; b = Math.max(b, Lm[i] - op[i]); d = Math.max(d, cl[i] - Lm[i]);
+      }
+      sb += b; sd += d; n++;
+    }
+    if (!n) return null;
+    const bright = sb >= sd;
+    const th = new Float32Array(rw * rh);
+    for (let i = 0; i < th.length; i++) th[i] = bright ? Lm[i] - op[i] : cl[i] - Lm[i];
+    const T = Math.max(12, (0.3 * (bright ? sb : sd)) / n);
+    let m = new Uint8Array(rw * rh);
+    for (let i = 0; i < m.length; i++) if (th[i] > T) m[i] = 1;
+    return R.open(m, rw, rh, 1);
+  }
+
+  // Your line, moved onto the paint's center line: at each point of it,
+  // how far across it (along its normal) the paint's line lies — chosen for
+  // the whole line at once (one Viterbi pass), so it holds to the stroke you
+  // meant through crossings and gaps, never jumping to a neighbor's.
+  // p: [x0, y0, …] 2 px apart, box px; reach: how far off your line may be.
+  // → { cx, cy (the center line), agree (on a line of paint running your
+  // way: its center-line pixel, or -1) }
+  function snapTrace(p, F, reach) {
+    const { w, h, sw } = F;
+    const n = p.length >> 1;
+    const D = Math.max(2, Math.ceil(reach)), S = 2 * D + 1;
+    const nx = new Float32Array(n), ny = new Float32Array(n), tx = new Float32Array(n), ty = new Float32Array(n);
+    const win = Math.max(2, Math.round(sw / 4));
+    for (let k = 0; k < n; k++) {
+      const a = Math.max(0, k - win), b = Math.min(n - 1, k + win);
+      let dx = p[2 * b] - p[2 * a], dy = p[2 * b + 1] - p[2 * a + 1];
+      const L = Math.hypot(dx, dy) || 1;
+      tx[k] = dx / L; ty[k] = dy / L; nx[k] = -ty[k]; ny[k] = tx[k];
+    }
+    const half = Math.max(1.5, 0.5 * sw);
+    const at = (k, d) => {
+      const x = Math.round(p[2 * k] + d * nx[k]), y = Math.round(p[2 * k + 1] + d * ny[k]);
+      return x < 0 || y < 0 || x >= w || y >= h ? -1 : y * w + x;
+    };
+    // what each place costs: on a line of paint running your way, little;
+    // on one running across (another stroke), more than on none at all
+    const unary = new Float32Array(n * S), agreeAt = new Int32Array(n * S).fill(-1);
+    for (let k = 0; k < n; k++) {
+      for (let s2 = 0; s2 < S; s2++) {
+        const d = s2 - D, i = at(k, d);
+        let c = 1;
+        if (i >= 0 && F.dOut[i] === 0 && F.dS[i] < half) {
+          const j = F.near[i];
+          const hasDir = j >= 0 && (F.tx[j] || F.ty[j]);
+          const cos = hasDir ? Math.abs(tx[k] * F.tx[j] + ty[k] * F.ty[j]) : 0.75;
+          c = 0.5 * (F.dS[i] / half) + 1.6 * (1 - cos);
+          if (hasDir && cos > 0.8) agreeAt[k * S + s2] = j;
+        } else if (i < 0) c = 1.5;
+        unary[k * S + s2] = c + 0.3 * Math.abs(d) / D;
+      }
+    }
+    // (a step across per 2 px along: up to about 45°, and paid for)
+    const J = 2, lam = 0.12;
+    let prev = new Float32Array(S), cur = new Float32Array(S);
+    const back = new Int16Array(n * S);
+    for (let s2 = 0; s2 < S; s2++) prev[s2] = unary[s2];
+    for (let k = 1; k < n; k++) {
+      for (let s2 = 0; s2 < S; s2++) {
+        let best = Infinity, arg = s2;
+        for (let q = Math.max(0, s2 - J); q <= Math.min(S - 1, s2 + J); q++) {
+          const v = prev[q] + lam * Math.abs(q - s2);
+          if (v < best) { best = v; arg = q; }
+        }
+        cur[s2] = best + unary[k * S + s2];
+        back[k * S + s2] = arg;
+      }
+      const t = prev; prev = cur; cur = t;
+    }
+    let sEnd = 0;
+    for (let s2 = 1; s2 < S; s2++) if (prev[s2] < prev[sEnd]) sEnd = s2;
+    const cx = new Float32Array(n), cy = new Float32Array(n), agree = new Int32Array(n);
+    for (let k = n - 1, s2 = sEnd; k >= 0; k--) {
+      const d = s2 - D;
+      cx[k] = p[2 * k] + d * nx[k]; cy[k] = p[2 * k + 1] + d * ny[k];
+      agree[k] = agreeAt[k * S + s2];
+      if (k) s2 = back[k * S + s2];
+    }
+    return { cx, cy, agree };
+  }
+
+  // The letter your strokes trace: each drawn along the paint's center line
+  // it snapped to, at the paint's own width; across a crossing (a stroke of
+  // another color over it, a gap) at the letter's width, only where
+  // something hides it — never out onto bare wall; each end run on along
+  // the paint a little (you stopped short), never on into a neighbor.
+  function drawTraced(paths, F, mask, any, reach) {
+    const { w, h, sw } = F;
+    const out = new Uint8Array(w * h), hidden = new Uint8Array(w * h);
+    const disc = (cx, cy, r, into) => {
+      const rr = (r + 0.5) * (r + 0.5);
+      for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(h - 1, Math.ceil(cy + r)); y++) {
+        for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(w - 1, Math.ceil(cx + r)); x++) {
+          if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= rr) { out[y * w + x] = 1; if (into) into[y * w + x] = 1; }
+        }
+      }
+    };
+    const snaps = paths.map((p) => snapTrace(p, F, reach));
+    // the letter's half-width: where its strokes lie along the paint's
+    const rs = [];
+    for (const sn of snaps) for (const j of sn.agree) if (j >= 0) rs.push(F.dIn[j]);
+    rs.sort((a, b) => a - b);
+    const r0 = rs.length ? rs[rs.length >> 1] : sw / 2;
+    const idx = (x, y) => { const X = Math.round(x), Y = Math.round(y); return X < 0 || Y < 0 || X >= w || Y >= h ? -1 : Y * w + X; };
+    const lines = [];
+    for (const sn of snaps) {
+      const { cx, cy, agree } = sn, n = cx.length;
+      const rad = new Float32Array(n), onP = new Uint8Array(n);
+      for (let k = 0; k < n; k++) {
+        const i = idx(cx[k], cy[k]);
+        onP[k] = i >= 0 && F.dOut[i] <= 1.5 ? 1 : 0;
+        rad[k] = agree[k] >= 0 ? Math.min(F.dIn[agree[k]], 1.25 * r0) : r0;
+      }
+      // (smoothed, so switching between the paint's width and the letter's leaves no step)
+      const m = Math.max(1, Math.round(r0 / 4));
+      const r2 = new Float32Array(n);
+      for (let k = 0; k < n; k++) {
+        let sr = 0, c = 0;
+        for (let q = Math.max(0, k - m); q <= Math.min(n - 1, k + m); q++) { sr += rad[q]; c++; }
+        r2[k] = sr / c;
+      }
+      let first = -1, last = -1;
+      for (let k = 0; k < n; k++) if (onP[k]) { if (first < 0) first = k; last = k; }
+      if (first < 0) {
+        // a stroke hidden all along under another's paint: drawn where you
+        // traced it, at the letter's width
+        let covered = 0;
+        for (let k = 0; k < n; k++) { const i = idx(cx[k], cy[k]); if (i >= 0 && any[i]) covered++; }
+        if (covered >= 0.8 * n) for (let k = 0; k < n; k++) disc(cx[k], cy[k], r0, hidden);
+        continue;
+      }
+      for (let k = first; k <= last;) {
+        if (onP[k]) { disc(cx[k], cy[k], r2[k]); k++; continue; }
+        // a stretch without this paint: drawn across where it is short
+        // (straight, from where the paint left off to where it goes on), or
+        // where other paint lies over it (the stroke runs on underneath)
+        let e = k;
+        while (e <= last && !onP[e]) e++;
+        let covered = 0;
+        for (let q = k; q < e; q++) { const i = idx(cx[q], cy[q]); if (i >= 0 && any[i]) covered++; }
+        const ax = cx[k - 1], ay = cy[k - 1], len = Math.hypot(cx[e] - ax, cy[e] - ay);
+        // (the stroke runs on straight across it: the way it went before, and
+        // after — not from one stroke over to another)
+        const way = (a, b) => { const L = Math.hypot(cx[b] - cx[a], cy[b] - cy[a]) || 1; return [(cx[b] - cx[a]) / L, (cy[b] - cy[a]) / L]; };
+        const before = way(Math.max(first, k - 1 - 2 * m - 3), k - 1), after = way(e, Math.min(last, e + 2 * m + 3));
+        const chord = len ? [(cx[e] - ax) / len, (cy[e] - ay) / len] : before;
+        const straight = before[0] * chord[0] + before[1] * chord[1] > 0.8 && after[0] * chord[0] + after[1] * chord[1] > 0.8;
+        if (len <= 2.5 * sw && straight) {
+          const m2 = Math.max(1, Math.ceil(len / 2));
+          for (let q = 1; q < m2; q++) disc(ax + ((cx[e] - ax) * q) / m2, ay + ((cy[e] - ay) * q) / m2, r0, hidden);
+        } else if (covered >= 0.8 * (e - k)) for (let q = k; q < e; q++) disc(cx[q], cy[q], r0, hidden);
+        k = e;
+      }
+      lines.push({ cx, cy, first, last });
+    }
+    // each end run on along the paint the way it goes, a little: to where
+    // the paint ends, not on into what it meets
+    for (const L of lines) {
+      for (const side of [0, 1]) {
+        const k0 = side ? L.last : L.first, k1 = side ? Math.max(L.first, L.last - 4) : Math.min(L.last, L.first + 4);
+        let dx = L.cx[k0] - L.cx[k1], dy = L.cy[k0] - L.cy[k1];
+        const len = Math.hypot(dx, dy);
+        if (!len) continue;
+        dx /= len; dy /= len;
+        let x = L.cx[k0], y = L.cy[k0];
+        for (let step = 0; step < 0.6 * sw; step++) {
+          const i = idx(x + dx, y + dy);
+          if (i < 0 || !mask[i]) break;
+          x += dx; y += dy;
+          const j = F.dS[i] < 0.5 * sw ? F.near[i] : -1;
+          if (j >= 0 && F.graph.junction[j]) break; // a crossing: the stroke's end
+          if (j >= 0 && (F.tx[j] || F.ty[j]) && Math.abs(dx * F.tx[j] + dy * F.ty[j]) < 0.8) break; // it turns off: another stroke
+          disc(x, y, Math.min(Math.max(F.dIn[i], 1), r0));
+        }
+      }
+    }
+    // on the paint only (its pits and notches closed: a photo's paint is
+    // read patchy at its edges, a faint line in bits), or across what hides it
+    const rc = Math.max(1, Math.round(0.2 * sw));
+    const within = rc > 0 ? ST.raster.close(mask, w, h, rc) : mask;
+    for (let i = 0; i < out.length; i++) if (!within[i] && !hidden[i]) out[i] = 0;
+    return { mask: out, r0 };
+  }
+
+  /**
+   * The letter under strokes you traced. strokes: [[x0, y0, x1, y1, …], …]
+   * in photo px; src: { W, H, paints (masks of the photo's paints, W×H),
+   * shapes (the analysis's shapes), data (the photo's rgba, for a line no
+   * paint was read for) }; opts.tol: how far off the paint your line may
+   * run (photo px — a few pointer widths at the zoom you traced at).
+   * → a candidate for the review queue ({crop, mask, w, h, paths, kind:
+   * 'traced', read, lean}) or null.
+   */
+  TY.traceStrokes = function (strokes, src, opts) {
+    const o = opts || {};
+    const R = ST.raster;
+    const { W, H } = src;
+    const paths = strokes.map(resample).filter(Boolean);
+    if (!paths.length) return null;
+    // the strokes' box, with room for their ends to run on
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const samples = [];
+    for (const p of paths) for (let k = 0; k < p.length; k += 2) {
+      samples.push(p[k], p[k + 1]);
+      x0 = Math.min(x0, p[k]); x1 = Math.max(x1, p[k]); y0 = Math.min(y0, p[k + 1]); y1 = Math.max(y1, p[k + 1]);
+    }
+    const margin = Math.round(40 + 0.3 * Math.max(x1 - x0, y1 - y0));
+    const box = { x0: Math.max(0, Math.floor(x0 - margin)), y0: Math.max(0, Math.floor(y0 - margin)), x1: Math.min(W, Math.ceil(x1 + margin)), y1: Math.min(H, Math.ceil(y1 + margin)) };
+    const rw = box.x1 - box.x0, rh = box.y1 - box.y0;
+    if (rw < 8 || rh < 8) return null;
+    const got = paintUnder(samples, src, box);
+    if (!got || !R.count(got.mask)) return null;
+    const mask = got.mask;
+    if (o.debug) Object.assign(o.debug, { box, mask, any: got.any, from: got.from });
+    // the pen's width, read on the paint along your strokes (the widest the
+    // paint gets near each point of your line, low in the spread of those —
+    // not the width of whatever else lies in the box, or of a crossing)
+    const dIn = R.distanceTransform(mask, rw, rh);
+    const near = Math.max(6, Math.round(0.012 * Math.max(W, H)));
+    const halfs = [];
+    for (let k = 0; k < samples.length; k += 6) {
+      const x = Math.round(samples[k]) - box.x0, y = Math.round(samples[k + 1]) - box.y0;
+      let m = 0;
+      for (let yy = Math.max(0, y - near); yy <= Math.min(rh - 1, y + near); yy++) {
+        for (let xx = Math.max(0, x - near); xx <= Math.min(rw - 1, x + near); xx++) if (dIn[yy * rw + xx] > m) m = dIn[yy * rw + xx];
+      }
+      if (m > 0) halfs.push(m);
+    }
+    if (!halfs.length) return null;
+    halfs.sort((a, b) => a - b);
+    const sw = Math.max(3, 2 * halfs[Math.floor(0.35 * halfs.length)]);
+    // (a thin line's paint is read in bits: the line itself, where it
+    // stands out from the wall, fills them in)
+    if (sw <= 16 && got.line) {
+      const lm = got.line();
+      if (lm) {
+        // (less the rim it adds round the paint already read: a line's
+        // soft edge is not its paint)
+        const u = new Uint8Array(mask.length);
+        for (let i = 0; i < u.length; i++) u[i] = mask[i] | lm[i];
+        const core = R.erode(u, rw, rh, 1);
+        for (let i = 0; i < mask.length; i++) if (lm[i] && core[i]) mask[i] = 1;
+      }
+    }
+    const F = field(mask, rw, rh, sw);
+    // your strokes, in the box's px, onto the paint (a hand is off by a
+    // stroke's width, or by what a pointer's pixel spans zoomed out)
+    const loc = paths.map((p) => p.map((v, k) => v - (k % 2 ? box.y0 : box.x0)));
+    const reach = Math.max(1.5 * sw, 8, o.tol || 0);
+    const drawn = drawTraced(loc, F, mask, got.any, reach);
+    if (o.debug) Object.assign(o.debug, { sw, r0: drawn.r0, drawn: drawn.mask, rw, rh });
+    if (!R.count(drawn.mask)) return null;
+    // (drawn along your strokes it is smooth already: only pinholes filled
+    // and specks dropped — a clean-up for raw paint would shave off a thin
+    // stretch you traced)
+    const clean = ST.extract.cleanMask(drawn.mask, rw, rh, 0);
+    const bb = R.maskBounds(clean, rw, rh);
+    if (!bb) return null;
+    const pad = 12;
+    const cx0 = Math.max(0, bb.x0 - pad), cy0 = Math.max(0, bb.y0 - pad);
+    const cx1 = Math.min(rw, bb.x1 + 1 + pad), cy1 = Math.min(rh, bb.y1 + 1 + pad);
+    const w = cx1 - cx0, h = cy1 - cy0, out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) out[y * w + x] = clean[(y + cy0) * rw + x + cx0];
+    const vec = ST.trace.vectorize(out, w, h, {});
+    if (!vec.length) return null;
+    const cl = ST.recognize && ST.recognize.ready() ? ST.recognize.classify(out, w, h) : null;
+    return {
+      crop: { x: box.x0 + cx0, y: box.y0 + cy0, w, h }, mask: out, w, h, paths: vec, kind: 'traced',
+      read: cl ? { ranked: cl.ranked, letterness: cl.letterness } : null,
+      lean: ST.letters ? ST.letters.lean(out, w, h) : 0,
+    };
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

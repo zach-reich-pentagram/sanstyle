@@ -259,10 +259,12 @@
     const cand = item ? item.candidates[item.ci] || null : null;
     const input = $('#reviewChar');
     input.value = '';
+    input.dataset.typed = '';
     ST.capture.showItem(item, cand, { intake: batch.intakeActive });
     // what the shape reads as, filled in (typing replaces it)
     const guess = cand ? (cand.kind === 'typed' ? cand.typed : ST.capture.guess(cand)) : '';
     if (guess) { input.value = guess; ST.capture.updatePreview(); }
+    if (cand && cand.kind === 'typed') input.dataset.typed = '1';
     setProgress();
     updateQueuePill();
     showLetters(item);
@@ -278,9 +280,10 @@
     if (!cand) {
       $('#reviewHint').textContent = 'Nothing traced yet — click the letter in the photo to trace it, or skip the photo.';
     } else {
-      $('#reviewHint').textContent = item.candidates.length > 1
-        ? 'Pick the letter below, or click it in the photo. Still fused with a neighbor? Option-click the neighbor, or drag a cut across the join. Missing a piece? Shift-click it. ⌘Z undoes.'
-        : 'Not the letter you want? Click it in the photo. Fused with a neighbor? Option-click the neighbor, or drag a cut across the join. Missing a piece? Shift-click it. ⌘Z undoes.';
+      $('#reviewHint').textContent = cand.kind === 'traced'
+        ? 'Traced from your strokes. Drag along any stroke still missing; ⌘Z takes the last one off.'
+        : (item.candidates.length > 1 ? 'Pick the letter below or click it in the photo' : 'Not the letter you want? Click it in the photo') +
+          ' — or trace it: drag along each of its strokes, through the strokes that cross it, and the paint under them is taken. Option-click a neighbor to take it off; shift-click a missing piece. ⌘Z undoes.';
     }
     const tab = $('#tab-capture');
     if (tab && tab.classList.contains('active')) setTimeout(() => { input.focus(); input.select(); }, 60);
@@ -527,9 +530,10 @@
     if (!o.replay) {
       item.parts = (item.parts || []).concat([{ x, y }]);
       item.history = (item.history || []).concat([{ type: 'part' }]);
-      const keep = $('#reviewChar').value;
+      const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
       renderCurrent();
       $('#reviewChar').value = keep;
+      $('#reviewChar').dataset.typed = keepTyped;
       ST.capture.updatePreview();
       ST.toast(brushed ? 'Filled in a stroke-width spot.' : 'Piece added to the shape.');
     }
@@ -556,9 +560,10 @@
     if (!o.replay) {
       item.removals = (item.removals || []).concat([{ x, y }]);
       item.history = (item.history || []).concat([{ type: 'remove' }]);
-      const keep = $('#reviewChar').value;
+      const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
       renderCurrent();
       $('#reviewChar').value = keep;
+      $('#reviewChar').dataset.typed = keepTyped;
       ST.capture.updatePreview();
       ST.toast('Piece removed — ⌘Z brings it back.');
     }
@@ -573,9 +578,10 @@
     for (const p of item.parts || []) n += await batch.addPart(p.x, p.y, { replay: true, quiet: true });
     for (const r of item.removals || []) n += batch.removeAt(r.x, r.y, { replay: true, quiet: true });
     if (n) {
-      const keep = $('#reviewChar').value;
+      const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
       renderCurrent();
       $('#reviewChar').value = keep;
+      $('#reviewChar').dataset.typed = keepTyped;
     }
     return n;
   }
@@ -648,7 +654,7 @@
   // Rebuild the shape from what's left: the last click (or the automatic
   // shapes), the remaining cuts, the remaining added pieces.
   async function rebuild(item) {
-    const keep = $('#reviewChar').value;
+    const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
     const cur = item.candidates[item.ci];
     const want = cur ? cur.base || cur.kind : null;
     if (item.lastClick) {
@@ -667,6 +673,7 @@
     }
     await reapplyParts(item);
     $('#reviewChar').value = keep;
+    $('#reviewChar').dataset.typed = keepTyped;
     ST.capture.updatePreview();
   }
 
@@ -675,14 +682,14 @@
   batch.resetItem = function () {
     const item = batch.queue[batch.idx];
     if (!item || !item.original) return false;
-    const keep = $('#reviewChar').value;
+    const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
     Object.assign(item, {
       canvas: item.original.canvas, angle: item.original.angle, analysis: item.original.analysis, candidates: item.original.candidates, ci: 0,
-      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null,
+      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null, traces: [], pickedCi: null,
     });
     for (const c of item.candidates) { c.turn = c.lean ? -c.lean : 0; c.nudge = null; }
     renderCurrent();
-    if (!item.candidates.length) $('#reviewChar').value = keep;
+    if (!item.candidates.length) { $('#reviewChar').value = keep; $('#reviewChar').dataset.typed = keepTyped; }
     ST.toast('Back to the automatic selection.');
     return true;
   };
@@ -710,18 +717,85 @@
     const prev = {
       canvas: item.canvas, angle: item.angle, analysis: item.analysis, candidates: item.candidates, ci: item.ci,
       cuts: item.cuts, parts: item.parts, removals: item.removals, lastClick: item.lastClick,
-      history: item.history, manualTurn: item.manualTurn,
+      history: item.history, manualTurn: item.manualTurn, traces: item.traces, _beforeTrace: item._beforeTrace,
     };
     // (read at its own size: a small letter cropped out gets the detail back)
     const res = await batch.analyze(c, { deskew: false, maxEdge: 900 });
     if (batch.queue[batch.idx] !== item) return false; // moved on meanwhile
     res.canvas._frame = ST.sources.subFrame(item.canvas, ax, ay, w, h); // where it lies in the photo
-    const keep = $('#reviewChar').value;
-    Object.assign(item, { canvas: res.canvas, analysis: res.analysis || null, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null });
+    const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
+    Object.assign(item, { canvas: res.canvas, analysis: res.analysis || null, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null, traces: [] });
     item.history = [{ type: 'crop', prev }];
     renderCurrent();
-    if (keep.trim() && !res.candidates.length) $('#reviewChar').value = keep;
+    if (keep.trim() && !res.candidates.length) { $('#reviewChar').value = keep; $('#reviewChar').dataset.typed = keepTyped; }
     ST.toast(res.candidates.length ? 'Cropped — ⌘Z brings the whole photo back.' : 'Cropped, but no letter found in the box — click it, or ⌘Z.');
+    return true;
+  };
+
+  // ---------- a letter you trace ----------
+  // Drag along the letter's strokes on the photo — one drag a stroke — and
+  // the paint under them is taken as the letter (typed.js): your strokes
+  // are its skeleton, carried through whatever crosses them. Each stroke
+  // traced reads the letter again with all of them; ⌘Z takes the last off.
+  async function traceAsync(item) {
+    const strokes = item.traces || [];
+    // (how far off the paint a hand's line may be: a few pointer widths,
+    // in the photo's px at the zoom you traced at)
+    const tol = 16 / ((ST.capture.view && ST.capture.view.scale) || 1);
+    const w = analysisWorker();
+    if (w && item.analysis != null) {
+      try {
+        const id = nextJob++;
+        const r = await new Promise((resolve) => {
+          workerJobs.set(id, resolve);
+          w.postMessage({ id, type: 'strokes', analysis: item.analysis, strokes, tol });
+        });
+        if (r.ok) return r.none ? null : r.candidates[0];
+        console.warn('tracing in the worker failed — tracing on the page instead:', r.error);
+      } catch (e) {
+        console.warn('tracing in the worker failed — tracing on the page instead:', e);
+      }
+    }
+    const shapes = ((item.original && item.original.candidates) || item.candidates).filter((c) => c.kind !== 'typed' && c.kind !== 'traced');
+    return ST.typed.traceStrokes(strokes, { W: item.canvas.width, H: item.canvas.height, paints: [], shapes, data: ST.extract.flatData(item.canvas).data }, { tol });
+  }
+
+  // (the candidates as they were before the first stroke: Reset and ⌘Z of
+  // the last stroke come back to them)
+  // (a character you typed stays; one filled in for the shape before is
+  // replaced by what the traced letter reads as)
+  function showTraced(item, found, keep) {
+    item.candidates = [found].concat(item.candidates.filter((c) => c.kind !== 'traced'));
+    item.ci = 0;
+    item.pickedCi = null;
+    renderCurrent();
+    if (keep) {
+      $('#reviewChar').value = keep;
+      $('#reviewChar').dataset.typed = '1';
+      ST.capture.updatePreview();
+    }
+  }
+  const typedChar = () => ($('#reviewChar').dataset.typed ? $('#reviewChar').value : '');
+
+  batch.addTrace = async function (path) {
+    const item = batch.queue[batch.idx];
+    if (!item || !path || path.length < 6) return false;
+    const keep = typedChar();
+    if (!item.traces || !item.traces.length) item._beforeTrace = { candidates: item.candidates, ci: item.ci };
+    item.traces = (item.traces || []).concat([path]);
+    item.history = (item.history || []).concat([{ type: 'trace' }]);
+    const seq = (item._traceSeq = (item._traceSeq || 0) + 1);
+    const found = await traceAsync(item);
+    if (batch.queue[batch.idx] !== item || item._traceSeq !== seq) return false; // moved on meanwhile
+    if (!found) {
+      item.traces.pop();
+      item.history.pop();
+      ST.capture.requestDraw();
+      ST.toast('No paint under that stroke — trace along the letter itself.', 'warn');
+      return false;
+    }
+    showTraced(item, found, keep);
+    if (item.traces.length === 1) ST.toast('Traced — drag along its other strokes to add them; ⌘Z takes the last one off.');
     return true;
   };
 
@@ -768,7 +842,7 @@
     const seq = (item._typedSeq = (item._typedSeq || 0) + 1);
     const found = await typedAsync(item, ch, cur, hint, hintWeight);
     if (batch.queue[batch.idx] !== item || item._typedSeq !== seq) return false; // moved on meanwhile
-    const keep = $('#reviewChar').value;
+    const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
     if (!found) {
       if (!o.quiet) ST.toast(`Couldn't find a “${ch}” here — click it in the photo, then type it again.`, 'warn');
       return false;
@@ -779,6 +853,7 @@
     item.pickedCi = null;
     renderCurrent();
     $('#reviewChar').value = keep;
+    $('#reviewChar').dataset.typed = keepTyped;
     ST.capture.updatePreview();
     ST.toast(`Found the “${ch}” — ⌘Z brings the other shapes back.`);
     return true;
@@ -795,11 +870,28 @@
       ST.toast('Crop undone.');
       return true;
     }
+    if (last.type === 'trace') {
+      const keep = typedChar();
+      if (item.traces && item.traces.length) item.traces.pop();
+      if (!item.traces || !item.traces.length) {
+        if (item._beforeTrace) Object.assign(item, item._beforeTrace);
+        renderCurrent();
+        if (keep) { $('#reviewChar').value = keep; $('#reviewChar').dataset.typed = '1'; ST.capture.updatePreview(); }
+        ST.toast('Traced stroke taken off.');
+        return true;
+      }
+      return traceAsync(item).then((found) => {
+        if (found && batch.queue[batch.idx] === item) showTraced(item, found, keep);
+        ST.toast('Traced stroke taken off.');
+        return true;
+      });
+    }
     if (last.type === 'typed') {
-      const keep = $('#reviewChar').value;
+      const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
       Object.assign(item, last.prev);
       renderCurrent();
       $('#reviewChar').value = keep;
+      $('#reviewChar').dataset.typed = keepTyped;
       ST.capture.updatePreview();
       ST.toast('Back to the shapes found before.');
       return true;
@@ -914,12 +1006,15 @@
     };
     batch.syncFind = syncFind;
     $('#reviewChar').addEventListener('input', syncFind);
+    $('#reviewChar').addEventListener('input', () => { $('#reviewChar').dataset.typed = $('#reviewChar').value ? '1' : ''; });
     $('#reviewChar').addEventListener('input', ST.debounce(() => {
       const item = batch.queue[batch.idx];
       const ch = batch.charKey($('#reviewChar').value);
       if (!item || ch.length !== 1) return;
       const cur = item.candidates[item.ci];
       if (cur && cur.kind === 'typed' && cur.typed === ch) return;
+      // (a letter you traced is the letter: typing only names it)
+      if (cur && cur.kind === 'traced') return;
       // (a shape that already reads plainly as it needs no search)
       const read = cur ? ST.capture.readOf(cur) : null;
       if (read) {

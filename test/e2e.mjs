@@ -482,9 +482,10 @@ const reset = await page.evaluate(async () => {
 check(reset.edited.hist === 1 && reset.edited.cuts === 1 && reset.same && reset.ci === 0 && reset.hist === 0 && reset.cuts === 0 && !reset.lastClick && reset.shown,
   'Reset goes back to the automatic selection (the first shapes, no clicks or cuts, nothing to undo)');
 await page.evaluate((lc) => ST.batch.clickTraceAsync(lc.x, lc.y), reset.lc); // (the checks below work on the clicked letter)
-// a cut dragged through the N's middle: a vertical stroke just right of the
-// click severs its right stem — the letter is grown again from the click
-// (with cuts the worker regrows it rather than answering from the analysis)
+// a cut Option-dragged through the N's middle: a vertical stroke just right
+// of the click severs its right stem — the letter is grown again from the
+// click (with cuts the worker regrows it rather than answering from the
+// analysis; a plain drag traces a stroke instead)
 const cutAt = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx], k = item.canvas.width / 1200;
   const cx = item.lastClick.x, cy = item.lastClick.y;
@@ -493,9 +494,11 @@ const cutAt = await page.evaluate(() => {
     before: ST.raster.count(item.candidates[item.ci].mask),
   };
 });
+await page.keyboard.down('Alt');
 await page.mouse.move(cutAt.a.x, cutAt.a.y); await page.mouse.down();
 await page.mouse.move(cutAt.a.x, (cutAt.a.y + cutAt.b.y) / 2, { steps: 4 });
 await page.mouse.move(cutAt.b.x, cutAt.b.y, { steps: 4 }); await page.mouse.up();
+await page.keyboard.up('Alt');
 await idle();
 const cutRes = await page.evaluate(() => {
   const item = ST.batch.queue[ST.batch.idx];
@@ -1009,6 +1012,45 @@ check(/Find “A” in the photo/.test(typedRes.btn || ''), `the Tag step offers
 await page.evaluate(() => ST.batch.undo());
 const typedUndo = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { kind: it.candidates[it.ci].kind, any: it.candidates.some((c) => c.kind === 'typed'), box: document.getElementById('reviewChar').value }; });
 check(!typedUndo.any && typedUndo.box === 'A', `⌘Z brings back the shapes found before (${typedUndo.kind}), the A still typed`);
+
+// Or trace it: drag along each of the A's strokes on the photo (a hand's
+// line — a little off the paint, stopping short of the ends) and the paint
+// under them is taken, carried through the H's bars that run into its legs.
+console.log('\n— a letter traced by hand');
+const dragTrace = async (pts) => {
+  const sp = await page.evaluate((pts) => { const it = ST.batch.queue[ST.batch.idx]; return pts.map(([x, y]) => __e2e.screen(__e2e.at(it, 900, x, y))); }, pts);
+  await page.mouse.move(sp[0].x, sp[0].y); await page.mouse.down();
+  for (let k = 1; k < sp.length; k++) await page.mouse.move(sp[k].x, sp[k].y, { steps: 16 });
+  await page.mouse.up();
+  await idle();
+};
+const tracedNow = () => page.evaluate(() => {
+  const it = ST.batch.queue[ST.batch.idx], c = it.candidates[it.ci];
+  const on = (px, py) => { const p = __e2e.at(it, 900, px, py), X = Math.round(p.x - c.crop.x), Y = Math.round(p.y - c.crop.y); return X >= 0 && Y >= 0 && X < c.w && Y < c.h && !!c.mask[Y * c.w + X]; };
+  return { kind: c.kind, traces: (it.traces || []).length, last: (it.history || []).slice(-1).map((h) => h.type)[0], b: __e2e.bounds(it, 900, c),
+    box: document.getElementById('reviewChar').value, shown: ST.capture.cand === c,
+    leftBar: on(345, 350), rightBar: on(600, 350), apex: on(450, 175), leftFoot: on(338, 535), rightFoot: on(562, 535), bar: on(450, 420), leftLeg: on(392, 350) };
+});
+await dragTrace([[342, 528], [398, 340], [446, 170]]);                 // the left leg, up
+const tr1 = await tracedNow();
+check(tr1.kind === 'traced' && tr1.traces === 1 && tr1.last === 'trace' && tr1.shown && tr1.leftLeg && tr1.leftFoot && !tr1.leftBar && !tr1.rightFoot,
+  `a drag along the left leg takes that leg alone — not the H's bar that runs into it (${JSON.stringify({ kind: tr1.kind, leg: tr1.leftLeg, hBar: tr1.leftBar })})`);
+await dragTrace([[456, 178], [505, 350], [556, 520]]);                 // the right leg, down
+await dragTrace([[392, 426], [450, 418], [510, 424]]);                 // the bar
+const tr3 = await tracedNow();
+check(tr3.kind === 'traced' && tr3.traces === 3 && tr3.box === 'A', `three strokes traced, the letter read as ${tr3.box}`);
+check(tr3.b && tr3.b.x0 > 290 && tr3.b.x1 < 620 && tr3.b.y0 < 175 && tr3.b.y1 > 540,
+  `the traced A alone, apex to feet — the ends run on to the paint's (${tr3.b && `${tr3.b.x0},${tr3.b.y0}–${tr3.b.x1},${tr3.b.y1}`})`);
+check(tr3.apex && tr3.leftFoot && tr3.rightFoot && tr3.bar && !tr3.leftBar && !tr3.rightBar,
+  `its legs, apex and bar, the H's bars left out (${JSON.stringify({ apex: tr3.apex, feet: tr3.leftFoot && tr3.rightFoot, bar: tr3.bar, hBars: tr3.leftBar || tr3.rightBar })})`);
+await page.evaluate(() => ST.batch.undo());
+await idle();
+const trUndo = await tracedNow();
+check(trUndo.kind === 'traced' && trUndo.traces === 2 && !trUndo.bar && trUndo.apex, `⌘Z takes the last stroke off (the bar gone, ${trUndo.traces} strokes left)`);
+await page.click('#reviewReset');
+await idle();
+const trReset = await tracedNow();
+check(trReset.kind !== 'traced' && trReset.traces === 0, `Reset drops the traced strokes (${trReset.kind})`);
 await page.evaluate(() => ST.batch.skip());
 
 

@@ -358,7 +358,10 @@
       candidates = findLetters(candidates, W, H);
       for (const c of candidates) delete c._found; // stroke models are big: not kept with the queue
     }
-    return { canvas: work, angle: rect ? rect.tilt : 0, rect: rect ? { tilt: rect.tilt, keystone: rect.keystone, H: rect.H, srcW: rect.srcW, srcH: rect.srcH } : null, candidates, shapes, backdrop: read ? read.backdrop : null };
+    return { canvas: work, angle: rect ? rect.tilt : 0, rect: rect ? { tilt: rect.tilt, keystone: rect.keystone, H: rect.H, srcW: rect.srcW, srcH: rect.srcH } : null, candidates, shapes, backdrop: read ? read.backdrop : null,
+      // every paint read, at the canvas's size (a stroke you trace is matched
+      // to the paint under it)
+      paints: read ? read.inks.map((k) => k.raw) : [] };
   };
 
   /**

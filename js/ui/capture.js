@@ -1,9 +1,10 @@
 /* SANSTYLE — ui/capture.js
  * The capture studio is the review surface: every photo in the queue lands
  * on the stage with its detected letterform boxed and outlined over the
- * paint, and every letter found in the photo is offered beside it. Click
- * a letter to take it, shift-click to add a piece, Option-click to take
- * one off, drag a short cut across a join. The traced and fitted
+ * paint, and every letter found in the photo is offered beside it. Drag
+ * along a letter's strokes to trace it, click a letter to take it,
+ * shift-click to add a piece, Option-click to take one off, Option-drag a
+ * short cut across a join. The traced and fitted
  * letterform sit on the right beside the character box. The stage pans
  * and zooms — there is nothing else to dial in.
  */
@@ -50,7 +51,7 @@
   function setHint(msg) { if (hintEl) hintEl.textContent = msg || ''; }
   cap.setHint = setHint;
 
-  const HINT = 'Click a letter to take it · shift-click adds a piece · option-click takes one off · drag a cut across a join · scroll zooms, space pans';
+  const HINT = 'Drag along a letter\'s strokes to trace it · click a letter to take it · shift-click adds a piece · option-click takes one off · option-drag cuts a join · scroll zooms, space pans';
 
   // ---------- the current photo and its shape ----------
   // The review queue calls this whenever the photo or the shape changes.
@@ -409,6 +410,17 @@
         ctx.beginPath(); ctx.moveTo(cut.x0, cut.y0); ctx.lineTo(cut.x1, cut.y1); ctx.stroke();
       }
     }
+    // the strokes you traced, thin over the paint
+    if (item && item.traces && item.traces.length) {
+      ctx.strokeStyle = 'rgba(34,211,238,0.95)';
+      ctx.lineWidth = 2.5 / v.scale;
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      for (const t of item.traces) {
+        ctx.beginPath();
+        for (let i = 0; i < t.length; i += 2) (i ? ctx.lineTo(t[i], t[i + 1]) : ctx.moveTo(t[i], t[i + 1]));
+        ctx.stroke();
+      }
+    }
     if (item && item.parts && item.parts.length) {
       ctx.strokeStyle = '#d8ff3d';
       ctx.lineWidth = 2 / v.scale;
@@ -428,8 +440,20 @@
       ctx.strokeRect(x, y, w, h);
       ctx.setLineDash([]);
     }
+    // a stroke being traced, in screen space
+    if (dragging && dragging.kind === 'gesture' && dragging.moved && !dragging.alt) {
+      const pts = dragging.path;
+      ctx.strokeStyle = '#22d3ee';
+      ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i += 2) {
+        const q = toScreen({ x: pts[i], y: pts[i + 1] });
+        i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y);
+      }
+      ctx.stroke();
+    }
     // a cut being drawn, in screen space
-    if (dragging && dragging.kind === 'gesture' && dragging.moved) {
+    if (dragging && dragging.kind === 'gesture' && dragging.moved && dragging.alt) {
       const a = toScreen(dragging.start), b = toScreen(dragging.last);
       ctx.strokeStyle = '#e11d48';
       ctx.lineWidth = 3;
@@ -439,7 +463,8 @@
     }
   }
 
-  // ---------- gestures: click = trace, shift-click = add a piece, drag = cut ----------
+  // ---------- gestures: drag = trace a stroke, click = take a letter,
+  // shift-click = add a piece, option-click = take one off, option-drag = cut ----------
   function stagePos(ev) {
     const r = stage.getBoundingClientRect();
     return { x: ev.clientX - r.left, y: ev.clientY - r.top };
@@ -457,7 +482,7 @@
     }
     if (ev.button !== 0) return;
     if (cap.tool === 'crop') { dragging = { kind: 'crop', start: ip, last: ip, sStart: sp, moved: false }; return; }
-    dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, moved: false, shift: ev.shiftKey, alt: ev.altKey };
+    dragging = { kind: 'gesture', start: ip, last: ip, sStart: sp, sLast: sp, moved: false, shift: ev.shiftKey, alt: ev.altKey, path: [ip.x, ip.y] };
   }
 
   function onPointerMove(ev) {
@@ -471,6 +496,11 @@
     }
     if (Math.hypot(sp.x - dragging.sStart.x, sp.y - dragging.sStart.y) > 6) dragging.moved = true;
     dragging.last = toImage(sp);
+    // the stroke's path, a point every couple of screen pixels
+    if (dragging.path && Math.hypot(sp.x - dragging.sLast.x, sp.y - dragging.sLast.y) >= 2) {
+      dragging.path.push(dragging.last.x, dragging.last.y);
+      dragging.sLast = sp;
+    }
     if (dragging.moved) requestDraw();
   }
 
@@ -487,8 +517,19 @@
     }
     if (!d || d.kind !== 'gesture' || !cap.item || !cap.img) { requestDraw(); return; }
     const inside = (p) => p.x >= 0 && p.y >= 0 && p.x < cap.img.width && p.y < cap.img.height;
-    if (d.moved) {
+    if (d.moved && d.alt) {
+      // Option-drag: a cut across a join
       if (inside(d.start) || inside(d.last)) busy('Cutting…', () => ST.batch.addCutAsync(d.start.x, d.start.y, d.last.x, d.last.y));
+      else requestDraw();
+    } else if (d.moved) {
+      // a drag: one stroke of the letter, traced
+      const path = d.path.slice();
+      const last = toImage(stagePos(ev));
+      if (last.x !== path[path.length - 2] || last.y !== path[path.length - 1]) path.push(last.x, last.y);
+      const W = cap.img.width, H = cap.img.height;
+      const onPhoto = path.some((v, i) => i % 2 === 0 && inside({ x: v, y: path[i + 1] }));
+      for (let i = 0; i < path.length; i += 2) { path[i] = ST.clamp(path[i], 0, W - 1); path[i + 1] = ST.clamp(path[i + 1], 0, H - 1); }
+      if (onPhoto) busy('Tracing the stroke…', () => ST.batch.addTrace(path));
       else requestDraw();
     } else if (d.alt || ev.altKey) {
       // Option-click: take that piece off the shape (a piece completed past

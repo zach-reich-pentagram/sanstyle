@@ -58,6 +58,17 @@ self.onmessage = async (e) => {
       send(id, res.candidates, { click: res.click || null }, []);
       return;
     }
+    // strokes traced over the photo: the letter under them (see typed.js)
+    if (type === 'strokes') {
+      const an = e.data.analysis != null ? analyses.get(e.data.analysis) : null;
+      if (!an) { self.postMessage({ id, ok: false, error: 'no analysis' }); return; }
+      if (!an.data) an.data = self.ST.extract.flatData(an.canvas).data; // (kept for the next stroke)
+      const src = { W: an.canvas.width, H: an.canvas.height, paints: an.paints || [], shapes: an.shapes, data: an.data };
+      const found = self.ST.typed.traceStrokes(e.data.strokes, src, { tol: e.data.tol });
+      if (!found) { self.postMessage({ id, ok: true, none: true }); return; }
+      send(id, [found], {}, []);
+      return;
+    }
     // a character typed: looked for in the photo's shapes (see typed.js)
     if (type === 'typed') {
       const an = e.data.analysis != null ? analyses.get(e.data.analysis) : null;
@@ -75,7 +86,7 @@ self.onmessage = async (e) => {
     const inPhoto = work._inPhoto || null;
     const image = await createImageBitmap(work);
     const key = nextAnalysis++;
-    analyses.set(key, { canvas: work, shapes: res.shapes || [], backdrop: res.backdrop || null });
+    analyses.set(key, { canvas: work, shapes: res.shapes || [], backdrop: res.backdrop || null, paints: res.paints || [] });
     while (analyses.size > 8) analyses.delete(analyses.keys().next().value);
     send(id, res.candidates, { angle: res.angle, rect: res.rect, analysis: key, width: image.width, height: image.height, image, inPhoto: inPhoto ? inPhoto.slice() : null }, [image]);
   } catch (err) {
