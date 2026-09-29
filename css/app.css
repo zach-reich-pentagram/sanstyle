@@ -81,6 +81,7 @@ p { color: var(--ink); }
 .seg-btn:first-child { border-left: none; }
 .seg-btn.on { background: var(--ink); color: var(--paper); }
 .seg-btn:hover:not(.on) { background: #f2f2f2; }
+.seg-btn.turn { padding: 0 12px; font-size: 19px; line-height: 1; }
 
 /* ---------- sliders ---------- */
 input[type="range"] {

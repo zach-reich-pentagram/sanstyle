@@ -51,9 +51,13 @@
       <div class="step-body">
         <p id="reviewHint"></p>
         <div class="letter-strip" id="letterStrip" hidden></div>
-        <label class="slider-row" title="Stand the letter upright. A leaning letter is straightened by its stems automatically; drag to adjust.">
+        <label class="slider-row" title="Turn the photo (and the letter with it) until the letter stands upright — before you trace, or after. A leaning letter is straightened by its stems automatically.">
           <span>Rotate: <b id="reviewRotateVal">0°</b></span>
           <input type="range" id="reviewRotate" min="-180" max="180" value="0" step="1" disabled>
+        </label>
+        <label class="slider-row" title="Move the letter up or down against the baseline (font units, 1000 per em).">
+          <span>Baseline: <b id="reviewDyVal">0</b></span>
+          <input type="range" id="reviewDy" min="-300" max="300" value="0" step="5" disabled>
         </label>
         <div class="btn-row">
           <button class="pill sm" id="reviewReset" disabled title="Back to the letters the automatic pass found: no crop, clicks, cuts, pieces or traced strokes">Reset</button>
@@ -79,6 +83,8 @@
       <button id="toolHand" class="seg-btn" title="Pan (or hold space)">Hand</button>
       <button id="toolFit" class="seg-btn" title="Fit the photo">Fit</button>
       <button id="toolCrop" class="seg-btn" title="Crop the photo to a box round the letter, and read it again (⌘Z undoes)">Crop</button>
+      <button id="toolTurnL" class="seg-btn turn" title="Turn the photo a quarter turn left (the Rotate slider turns it any amount)" aria-label="Turn left">↺</button>
+      <button id="toolTurnR" class="seg-btn turn" title="Turn the photo a quarter turn right (the Rotate slider turns it any amount)" aria-label="Turn right">↻</button>
     </div>
     <div class="stage-status" id="reviewProgress"></div>
     <div class="stage-hint" id="stageHint">Drop photos of graffiti here — or load a demo wall.</div>

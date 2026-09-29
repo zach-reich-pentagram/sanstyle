@@ -18,7 +18,7 @@
     item: null,       // current queue item
     cand: null,       // current shape
     record: null,     // fitted record for the typed character
-    view: { scale: 1, tx: 0, ty: 0 },
+    view: { scale: 1, tx: 0, ty: 0, rot: 0 }, // rot: the photo turned on the stage (degrees, clockwise +)
     tool: 'trace',    // trace | hand
     needsFit: false,
     demoIdx: 0,
@@ -31,22 +31,49 @@
   let raf = 0;
 
   // ---------- view ----------
-  const toScreen = (p) => ({ x: p.x * cap.view.scale + cap.view.tx, y: p.y * cap.view.scale + cap.view.ty });
-  const toImage = (p) => ({ x: (p.x - cap.view.tx) / cap.view.scale, y: (p.y - cap.view.ty) / cap.view.scale });
+  // photo px → stage px: turned by rot about the photo's middle, scaled,
+  // moved (and back)
+  const turned = (p, deg) => {
+    if (!deg || !cap.img) return p;
+    const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a), cx = cap.img.width / 2, cy = cap.img.height / 2;
+    return { x: cx + (p.x - cx) * c - (p.y - cy) * s, y: cy + (p.x - cx) * s + (p.y - cy) * c };
+  };
+  const toScreen = (p) => { const q = turned(p, cap.view.rot); return { x: q.x * cap.view.scale + cap.view.tx, y: q.y * cap.view.scale + cap.view.ty }; };
+  const toImage = (p) => turned({ x: (p.x - cap.view.tx) / cap.view.scale, y: (p.y - cap.view.ty) / cap.view.scale }, -cap.view.rot);
   cap.toScreen = toScreen; cap.toImage = toImage;
 
   function fitView() {
     if (!cap.img || !stage) return;
     const W = stage.clientWidth, H = stage.clientHeight;
     if (!W || !H) { cap.needsFit = true; return; }
-    const s = Math.min(W / cap.img.width, H / cap.img.height) * 0.94;
+    // (the photo as turned: its box on the stage)
+    const a = (cap.view.rot * Math.PI) / 180, c = Math.abs(Math.cos(a)), sn = Math.abs(Math.sin(a));
+    const bw = cap.img.width * c + cap.img.height * sn, bh = cap.img.width * sn + cap.img.height * c;
+    const s = Math.min(W / bw, H / bh) * 0.94;
     cap.view.scale = s;
-    cap.view.tx = (W - cap.img.width * s) / 2;
-    cap.view.ty = (H - cap.img.height * s) / 2;
+    cap.view.tx = W / 2 - (cap.img.width / 2) * s;
+    cap.view.ty = H / 2 - (cap.img.height / 2) * s;
     cap.needsFit = false;
     requestDraw();
   }
   cap.fitView = fitView;
+
+  // Turn the photo on the stage (about what is in the middle of the view,
+  // so the letter you are looking at stays put): the letter is traced as
+  // you see it, and comes out turned the same way.
+  function setRot(deg) {
+    if (!stage || deg === cap.view.rot) return;
+    const mid = { x: stage.clientWidth / 2, y: stage.clientHeight / 2 };
+    const ip = cap.img ? toImage(mid) : null;
+    cap.view.rot = deg;
+    if (ip) {
+      const q = turned(ip, deg);
+      cap.view.tx = mid.x - q.x * cap.view.scale;
+      cap.view.ty = mid.y - q.y * cap.view.scale;
+    }
+    requestDraw();
+  }
+  cap.setRot = setRot;
 
   function setHint(msg) { if (hintEl) hintEl.textContent = msg || ''; }
   cap.setHint = setHint;
@@ -62,13 +89,15 @@
     cap.item = item || null;
     cap.cand = cand || null;
     cap.img = item ? item.canvas : null;
-    if (newPhoto) fitView();
+    // (the photo as turned by hand)
+    const rot = item && item.manualTurn != null ? item.manualTurn : 0;
+    if (newPhoto) { cap.view.rot = rot; fitView(); } else setRot(rot);
     const wall = $('#step-wall'), shape = $('#step-shape'), tag = $('#step-tag');
     if (wall) { wall.classList.toggle('active', !item); wall.classList.toggle('done', !!item); }
     if (shape) { shape.classList.toggle('active', !!item); shape.classList.toggle('locked', !item); }
     if (tag) { tag.classList.toggle('active', !!cand); tag.classList.toggle('locked', !cand); }
     if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall.');
-    else if (!cand) setHint('Nothing traced yet — click the letter in the photo, or skip it.');
+    else if (!cand) setHint('Nothing picked yet — drag along the letter\'s strokes to trace it, or click it.');
     else setHint(HINT);
     // a leaning letter stands up by its stems (the Rotate slider adjusts)
     if (cand && cand.turn == null) {
@@ -103,9 +132,9 @@
   function syncRotate() {
     const r = $('#reviewRotate'), v = $('#reviewRotateVal');
     if (!r) return;
-    const turn = cap.cand ? Math.round(cap.cand.turn || 0) : 0;
+    const turn = cap.cand ? Math.round(cap.cand.turn || 0) : cap.item && cap.item.manualTurn != null ? Math.round(cap.item.manualTurn) : 0;
     r.value = turn;
-    r.disabled = !cap.cand;
+    r.disabled = !cap.item;
     if (v) v.textContent = `${turn > 0 ? '+' : turn < 0 ? '−' : ''}${Math.abs(turn)}°`;
     const n = (cap.cand && cap.cand.nudge) || {};
     const sc = $('#reviewScale'), dy = $('#reviewDy');
@@ -390,6 +419,11 @@
     ctx.save();
     ctx.translate(v.tx, v.ty);
     ctx.scale(v.scale, v.scale);
+    if (v.rot) {
+      ctx.translate(cap.img.width / 2, cap.img.height / 2);
+      ctx.rotate((v.rot * Math.PI) / 180);
+      ctx.translate(-cap.img.width / 2, -cap.img.height / 2);
+    }
     ctx.imageSmoothingEnabled = v.scale < 3;
     ctx.drawImage(cap.img, 0, 0);
 
@@ -431,13 +465,15 @@
     ctx.restore();
 
     // a crop box being drawn: the photo outside it dimmed
+    // (the box as it will be cut: square to the photo, turned with it)
     if (dragging && dragging.kind === 'crop' && dragging.moved) {
-      const a = toScreen(dragging.start), b = toScreen(dragging.last);
-      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+      const a = dragging.start, b = dragging.last;
+      const box = [toScreen(a), toScreen({ x: b.x, y: a.y }), toScreen(b), toScreen({ x: a.x, y: b.y })];
+      const poly = () => { ctx.moveTo(box[0].x, box[0].y); for (let k = 1; k < 4; k++) ctx.lineTo(box[k].x, box[k].y); ctx.closePath(); };
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.beginPath(); ctx.rect(0, 0, stage.width, stage.height); ctx.rect(x, y, w, h); ctx.fill('evenodd');
+      ctx.beginPath(); ctx.rect(0, 0, stage.width, stage.height); poly(); ctx.fill('evenodd');
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
-      ctx.strokeRect(x, y, w, h);
+      ctx.beginPath(); poly(); ctx.stroke();
       ctx.setLineDash([]);
     }
     // a stroke being traced, in screen space
@@ -565,7 +601,7 @@
     const sp = stagePos(ev);
     const factor = Math.pow(1.0016, -ev.deltaY);
     const ns = ST.clamp(cap.view.scale * factor, 0.04, 40);
-    const ip = toImage(sp);
+    const ip = turned(toImage(sp), cap.view.rot);
     cap.view.scale = ns;
     cap.view.tx = sp.x - ip.x * ns;
     cap.view.ty = sp.y - ip.y * ns;
@@ -640,13 +676,21 @@
       if (!frame) frame = requestAnimationFrame(() => { frame = 0; drawTrace(); updatePreview(); });
       if (turned) { clearTimeout(guessTimer); guessTimer = setTimeout(showGuesses, 180); }
     };
-    $('#reviewRotate').addEventListener('input', (e) => {
-      if (!cap.cand) return;
-      cap.cand.turn = +e.target.value;
-      if (cap.item) cap.item.manualTurn = cap.cand.turn;
+    // (turns the photo on the stage and the letter with it: set by hand,
+    // it holds for every letter taken from this photo)
+    const turnTo = (deg) => {
+      if (!cap.item) return;
+      deg = ((((Math.round(deg) + 180) % 360) + 360) % 360) - 180;
+      cap.item.manualTurn = deg;
+      if (cap.cand) cap.cand.turn = deg;
+      setRot(deg);
       syncRotate();
       redraw(true);
-    });
+    };
+    cap.turnTo = turnTo;
+    $('#reviewRotate').addEventListener('input', (e) => turnTo(+e.target.value));
+    if ($('#toolTurnL')) $('#toolTurnL').addEventListener('click', () => turnTo((cap.view.rot || 0) - 90));
+    if ($('#toolTurnR')) $('#toolTurnR').addEventListener('click', () => turnTo((cap.view.rot || 0) + 90));
     const nudgeInput = (key) => (e) => {
       if (!cap.cand) return;
       cap.cand.nudge = Object.assign({ scale: 0, dy: 0 }, cap.cand.nudge, { [key]: +e.target.value });

@@ -4,9 +4,10 @@
  * letterforms here, so a stack of photos or a Drive re-scan is analyzed
  * while the page stays responsive. See batch.analyze.
  *
- * Each photo's analysis is kept (the last few): a click on the photo is
- * then answered from the shapes already found — which shape, which stroke —
- * instead of growing the letter again from nothing.
+ * Each photo's analysis is kept (the last few used): a click on the photo
+ * is then answered from the shapes already found — which shape, which
+ * stroke — instead of growing the letter again from nothing. A photo come
+ * back to after many others is read again (`reread`), once.
  */
 'use strict';
 importScripts('util.js', 'geometry.js', 'fitcurves.js', 'raster.js', 'trace.js', 'classify.js', 'extract.js', 'complete.js', 'letters-model.js', 'recognize.js', 'letters.js', 'typed.js', 'rectify.js', 'auto.js');
@@ -16,6 +17,18 @@ let photo = null;
 // analyses by id: { canvas (the flattened photo), shapes }
 const analyses = new Map();
 let nextAnalysis = 1;
+// (used: moved to the back, so the photo on the stage is the last dropped)
+function analysisOf(key) {
+  const an = key != null ? analyses.get(key) : null;
+  if (an) { analyses.delete(key); analyses.set(key, an); }
+  return an || null;
+}
+function keep(an) {
+  const key = nextAnalysis++;
+  analyses.set(key, an);
+  while (analyses.size > 8) analyses.delete(analyses.keys().next().value);
+  return key;
+}
 
 function send(id, candidates, extra, transfer) {
   const seen = new Set(transfer.map((t) => t));
@@ -41,7 +54,7 @@ self.onmessage = async (e) => {
         if (e.data.inPhoto) c._inPhoto = e.data.inPhoto;
         photo = { key: e.data.key, canvas: c };
       }
-      const an = e.data.analysis != null ? analyses.get(e.data.analysis) : null;
+      const an = analysisOf(e.data.analysis);
       if (an && (!photo || photo.key !== e.data.key)) photo = { key: e.data.key, canvas: an.canvas };
       // answered from the analysis when there is one and nothing was cut
       // (a cut changes the shapes: those are grown again)
@@ -60,7 +73,7 @@ self.onmessage = async (e) => {
     }
     // strokes traced over the photo: the letter under them (see typed.js)
     if (type === 'strokes') {
-      const an = e.data.analysis != null ? analyses.get(e.data.analysis) : null;
+      const an = analysisOf(e.data.analysis);
       if (!an) { self.postMessage({ id, ok: false, error: 'no analysis' }); return; }
       if (!an.data) an.data = self.ST.extract.flatData(an.canvas).data; // (kept for the next stroke)
       const src = { W: an.canvas.width, H: an.canvas.height, paints: an.paints || [], shapes: an.shapes, data: an.data };
@@ -71,23 +84,34 @@ self.onmessage = async (e) => {
     }
     // a character typed: looked for in the photo's shapes (see typed.js)
     if (type === 'typed') {
-      const an = e.data.analysis != null ? analyses.get(e.data.analysis) : null;
+      const an = analysisOf(e.data.analysis);
       const first = e.data.first || null;
       const found = self.ST.typed.findIn(an ? an.shapes : [], e.data.ch, { first, hint: e.data.hint, hintWeight: e.data.hintWeight, budgetMs: 9000 });
       if (!found) { self.postMessage({ id, ok: true, none: true }); return; }
       send(id, [found], {}, []);
       return;
     }
+    // is a photo's analysis still kept?
+    if (type === 'has') {
+      self.postMessage({ id, ok: true, has: !!analysisOf(e.data.analysis) });
+      return;
+    }
     const c = new OffscreenCanvas(bitmap.width, bitmap.height);
     c.getContext('2d').drawImage(bitmap, 0, 0);
     if (bitmap.close) bitmap.close();
+    // a photo on the queue read again, as it is now (flattened, cropped):
+    // only its analysis is wanted
+    if (type === 'reread') {
+      const res = self.ST.auto.processImage(c, { deskew: false, maxEdge: Math.max(c.width, c.height) });
+      const key = keep({ canvas: res.canvas, shapes: res.shapes || [], backdrop: res.backdrop || null, paints: res.paints || [] });
+      self.postMessage({ id, ok: true, analysis: key });
+      return;
+    }
     const res = self.ST.auto.processImage(c, opts || {});
     const work = res.canvas;
     const inPhoto = work._inPhoto || null;
     const image = await createImageBitmap(work);
-    const key = nextAnalysis++;
-    analyses.set(key, { canvas: work, shapes: res.shapes || [], backdrop: res.backdrop || null, paints: res.paints || [] });
-    while (analyses.size > 8) analyses.delete(analyses.keys().next().value);
+    const key = keep({ canvas: work, shapes: res.shapes || [], backdrop: res.backdrop || null, paints: res.paints || [] });
     send(id, res.candidates, { angle: res.angle, rect: res.rect, analysis: key, width: image.width, height: image.height, image, inPhoto: inPhoto ? inPhoto.slice() : null }, [image]);
   } catch (err) {
     self.postMessage({ id, ok: false, error: String((err && err.message) || err) });

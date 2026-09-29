@@ -1051,6 +1051,34 @@ await page.click('#reviewReset');
 await idle();
 const trReset = await tracedNow();
 check(trReset.kind !== 'traced' && trReset.traces === 0, `Reset drops the traced strokes (${trReset.kind})`);
+// the worker keeps the last few photos' analyses: one dropped (a long queue
+// read since) is read again, and the stroke is still found in its paint
+await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; it.analysis = 99999; it.original.analysis = 99999; });
+await dragTrace([[342, 528], [398, 340], [446, 170]]);
+const trAgain = await tracedNow();
+const reread = await page.evaluate(() => ST.batch.queue[ST.batch.idx].analysis);
+check(trAgain.kind === 'traced' && trAgain.leftLeg && !trAgain.leftBar && reread !== 99999 && reread != null,
+  `a photo whose analysis was dropped is read again, and the stroke found in its paint (analysis ${reread})`);
+await page.click('#reviewReset');
+await idle();
+// Rotate turns the photo on the stage — before anything is traced — and a
+// stroke traced on the turned photo is the same stroke, the letter turned
+// with it; Baseline moves it against the baseline
+await page.evaluate(() => { const r = document.getElementById('reviewRotate'); r.value = 90; r.dispatchEvent(new Event('input', { bubbles: true })); });
+const turnedView = await page.evaluate(() => ({ rot: ST.capture.view.rot, manual: ST.batch.queue[ST.batch.idx].manualTurn }));
+await dragTrace([[342, 528], [398, 340], [446, 170]]);
+const trTurned = await tracedNow();
+const turnedCand = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { turn: it.candidates[it.ci].turn, dy: !document.getElementById('reviewDy').disabled }; });
+check(turnedView.rot === 90 && turnedView.manual === 90 && trTurned.kind === 'traced' && trTurned.leftLeg && !trTurned.leftBar && turnedCand.turn === 90,
+  `Rotate turns the photo on the stage (${turnedView.rot}°); a leg traced on it is the same leg, the letter turned ${turnedCand.turn}°`);
+await page.click('#toolTurnL');
+check(await page.evaluate(() => ST.capture.view.rot === 0 && ST.batch.queue[ST.batch.idx].candidates[0].turn === 0), 'the ↺ button turns it back a quarter turn');
+await page.evaluate(() => { const r = document.getElementById('reviewDy'); r.value = 120; r.dispatchEvent(new Event('input', { bubbles: true })); });
+const dyRes = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { dy: (it.candidates[it.ci].nudge || {}).dy, label: document.getElementById('reviewDyVal').textContent }; });
+check(turnedCand.dy && dyRes.dy === 120 && dyRes.label === '+120', `Baseline moves the letter up or down (${dyRes.label})`);
+await page.click('#reviewReset');
+await idle();
+check(await page.evaluate(() => ST.capture.view.rot === 0), 'Reset turns the photo back');
 await page.evaluate(() => ST.batch.skip());
 
 
@@ -1485,11 +1513,12 @@ await page3.evaluate(async () => {
 });
 check(await page3.evaluate(async () => !(await ST.sources.get(ST.store.activeVariant('N').id))), 'the new device has no crop of its own');
 await page3.locator('#tester span.tl').first().hover();
-await page3.waitForFunction(() => {
+// (read off the popup the moment it shows: a re-render may close it after)
+const popShown = await (await page3.waitForFunction(() => {
   const i = document.querySelector('.src-pop.on img');
-  return i && i.complete && i.naturalWidth > 0;
-}, { timeout: 15000 });
-const recut = await page3.evaluate(async (kept) => {
+  return i && i.complete && i.naturalWidth > 0 && { src: i.src, label: document.querySelector('.src-pop.on .src-pop-label').textContent };
+}, null, { timeout: 15000 })).jsonValue();
+const recut = await page3.evaluate(async ([kept, shown]) => {
   const load = (u) => new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.src = u; });
   const gray = (im) => {
     const c = document.createElement('canvas'); c.width = c.height = 32;
@@ -1498,17 +1527,17 @@ const recut = await page3.evaluate(async (kept) => {
     for (let i = 0; i < d.length; i += 4) o.push((d[i] + d[i + 1] + d[i + 2]) / 3);
     return o;
   };
-  const src = document.querySelector('.src-pop.on img').src;
+  const src = shown.src;
   const [a, b] = await Promise.all([load(src), load(kept)]);
   const A = gray(a), B = gray(b);
   let diff = 0;
   for (let i = 0; i < A.length; i++) diff += Math.abs(A[i] - B[i]);
   return {
-    jpeg: src.startsWith('data:image/jpeg;base64,'), label: document.querySelector('.src-pop.on .src-pop-label').textContent,
+    jpeg: src.startsWith('data:image/jpeg;base64,'), label: shown.label,
     diff: diff / A.length, size: [a.naturalWidth, a.naturalHeight], keptSize: [b.naturalWidth, b.naturalHeight],
     keptNow: !!(await ST.sources.get(ST.store.activeVariant('N').id)),
   };
-}, keptN);
+}, [keptN, popShown]);
 check(recut.jpeg && recut.label === 'N' && recut.diff < 6,
   `hovering it cuts the bit of photo again from Drive — the same bit the capturing device kept (mean diff ${recut.diff.toFixed(1)}/255, ${recut.size.join('×')} vs ${recut.keptSize.join('×')})`);
 check(recut.keptNow, 'and keeps it on this device from then on');

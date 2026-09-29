@@ -71,6 +71,41 @@
     return worker;
   }
 
+  // one job for the worker, answered in order
+  function ask(w, msg, transfer) {
+    const id = nextJob++;
+    return new Promise((resolve) => {
+      workerJobs.set(id, resolve);
+      w.postMessage(Object.assign({ id }, msg), transfer || []);
+    });
+  }
+
+  // The photo's analysis, kept in the worker (the last few used): a photo
+  // come back to after many others were read is read again — once, in the
+  // background as soon as it is on the stage — so a stroke traced or a
+  // letter typed on it is found in its paints, not guessed at.
+  function ensureAnalysis(item) {
+    const w = analysisWorker();
+    if (!w || !item || !item.canvas) return Promise.resolve(null);
+    if (item._ensuring) return item._ensuring;
+    const canvas = item.canvas;
+    const p = (async () => {
+      if (item.analysis != null) {
+        const r = await ask(w, { type: 'has', analysis: item.analysis });
+        if (r.ok && r.has) return item.analysis;
+      }
+      const bitmap = await g.createImageBitmap(canvas);
+      const r = await ask(w, { type: 'reread', bitmap }, [bitmap]);
+      if (!r.ok || item.canvas !== canvas) return null;
+      item.analysis = r.analysis;
+      if (item.original && item.original.canvas === canvas) item.original.analysis = r.analysis;
+      return r.analysis;
+    })().catch(() => null).finally(() => { item._ensuring = null; });
+    item._ensuring = p;
+    return p;
+  }
+  batch.ensureAnalysis = ensureAnalysis;
+
   batch.analyze = async function (canvas, opts) {
     const w = analysisWorker();
     if (w) {
@@ -260,6 +295,7 @@
     const input = $('#reviewChar');
     input.value = '';
     input.dataset.typed = '';
+    if (item) ensureAnalysis(item);
     ST.capture.showItem(item, cand, { intake: batch.intakeActive });
     // what the shape reads as, filled in (typing replaces it)
     const guess = cand ? (cand.kind === 'typed' ? cand.typed : ST.capture.guess(cand)) : '';
@@ -724,7 +760,8 @@
     if (batch.queue[batch.idx] !== item) return false; // moved on meanwhile
     res.canvas._frame = ST.sources.subFrame(item.canvas, ax, ay, w, h); // where it lies in the photo
     const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
-    Object.assign(item, { canvas: res.canvas, analysis: res.analysis || null, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, manualTurn: null, traces: [] });
+    // (the turn set by hand holds: the crop is of the same photo)
+    Object.assign(item, { canvas: res.canvas, analysis: res.analysis || null, candidates: res.candidates, ci: 0, cuts: [], parts: [], removals: [], lastClick: null, traces: [] });
     item.history = [{ type: 'crop', prev }];
     renderCurrent();
     if (keep.trim() && !res.candidates.length) { $('#reviewChar').value = keep; $('#reviewChar').dataset.typed = keepTyped; }
@@ -741,23 +778,29 @@
     const strokes = item.traces || [];
     // (how far off the paint a hand's line may be: a few pointer widths,
     // in the photo's px at the zoom you traced at)
-    const tol = 16 / ((ST.capture.view && ST.capture.view.scale) || 1);
+    const tol = 28 / ((ST.capture.view && ST.capture.view.scale) || 1);
     const w = analysisWorker();
-    if (w && item.analysis != null) {
+    if (w) {
       try {
-        const id = nextJob++;
-        const r = await new Promise((resolve) => {
-          workerJobs.set(id, resolve);
-          w.postMessage({ id, type: 'strokes', analysis: item.analysis, strokes, tol });
-        });
-        if (r.ok) return r.none ? null : r.candidates[0];
-        console.warn('tracing in the worker failed — tracing on the page instead:', r.error);
+        let r = null;
+        for (let tries = 0; tries < 2; tries++) {
+          const key = await ensureAnalysis(item);
+          if (key == null) break;
+          r = await ask(w, { type: 'strokes', analysis: key, strokes, tol });
+          if (r.ok || r.error !== 'no analysis') break;
+        }
+        if (r && r.ok) return r.none ? null : r.candidates[0];
+        console.warn('tracing in the worker failed — tracing on the page instead:', r && r.error);
       } catch (e) {
         console.warn('tracing in the worker failed — tracing on the page instead:', e);
       }
     }
-    const shapes = ((item.original && item.original.candidates) || item.candidates).filter((c) => c.kind !== 'typed' && c.kind !== 'traced');
-    return ST.typed.traceStrokes(strokes, { W: item.canvas.width, H: item.canvas.height, paints: [], shapes, data: ST.extract.flatData(item.canvas).data }, { tol });
+    // (no worker: the photo read on the page, once, for its paints)
+    if (!item._pageRead || item._pageRead.canvas !== item.canvas) {
+      const res = ST.auto.processImage(item.canvas, { deskew: false, maxEdge: Math.max(item.canvas.width, item.canvas.height) });
+      item._pageRead = { canvas: item.canvas, src: { W: res.canvas.width, H: res.canvas.height, paints: res.paints || [], shapes: res.shapes || [], data: ST.extract.flatData(res.canvas).data } };
+    }
+    return ST.typed.traceStrokes(strokes, item._pageRead.src, { tol });
   }
 
   // (the candidates as they were before the first stroke: Reset and ⌘Z of
@@ -807,14 +850,11 @@
   // cross it. Runs in the background worker, where the photo's analysis is.
   async function typedAsync(item, ch, first, hint, hintWeight) {
     const w = analysisWorker();
-    if (w && item.analysis != null) {
+    const key = w ? await ensureAnalysis(item) : null;
+    if (w && key != null) {
       try {
-        const id = nextJob++;
-        const r = await new Promise((resolve) => {
-          workerJobs.set(id, resolve);
-          const f = first ? { crop: first.crop, mask: first.mask.slice(), w: first.w, h: first.h } : null;
-          w.postMessage({ id, type: 'typed', analysis: item.analysis, ch, first: f, hint, hintWeight }, f ? [f.mask.buffer] : []);
-        });
+        const f = first ? { crop: first.crop, mask: first.mask.slice(), w: first.w, h: first.h } : null;
+        const r = await ask(w, { type: 'typed', analysis: key, ch, first: f, hint, hintWeight }, f ? [f.mask.buffer] : []);
         if (r.ok) return r.none ? null : r.candidates[0];
         console.warn('typed search in the worker failed — searching on the page instead:', r.error);
       } catch (e) {

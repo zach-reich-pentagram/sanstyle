@@ -1006,6 +1006,79 @@
     return { mask: out, r0 };
   }
 
+  // Out to the paint's own edge: a stroke drawn at the letter's width comes
+  // out narrower than the paint where the brush was wider (an E's stem
+  // beside its bars), and paint read as another color (silver's shaded
+  // rim) is left off. Round what was drawn, a pixel is the stroke's when
+  // it is its paint and nearest its center line (not a neighbor's that
+  // touches it), or — within half the stroke's width — its color is nearer
+  // the stroke's own colors (its core) than the wall's just beyond; only
+  // on from pixels already taken, never into another paint.
+  function growToEdge(out, rgb, w, h, r0, F, mask, other) {
+    const R = ST.raster, N = w * h;
+    const g = Math.max(2, Math.round(0.5 * r0)), gMax = Math.max(3, Math.round(0.6 * r0) + 1);
+    const inv = new Uint8Array(N);
+    for (let i = 0; i < N; i++) inv[i] = out[i] ? 0 : 1;
+    const dOut = R.distanceTransform(inv, w, h, { borderInk: true }), dIn = R.distanceTransform(out, w, h);
+    const core = [], ring = [];
+    const coreD = Math.max(1, 0.5 * r0);
+    for (let i = 0; i < N; i += 2) {
+      if (out[i] && dIn[i] >= coreD) core.push(i);
+      else if (!out[i] && dOut[i] > g + 1.5 && dOut[i] <= g + 6) ring.push(i);
+    }
+    if (core.length < 12 || ring.length < 12) return out;
+    // (a few colors each: silver is light and shade, a wall is not one color)
+    const centers = (idx) => {
+      const k = Math.min(3, idx.length >> 2), c = [];
+      for (let q = 0; q < k; q++) { const i = idx[Math.floor(((q + 0.5) * idx.length) / k)] * 4; c.push([rgb[i], rgb[i + 1], rgb[i + 2]]); }
+      for (let it = 0; it < 6; it++) {
+        const sum = c.map(() => [0, 0, 0, 0]);
+        for (const i0 of idx) {
+          const i = i0 * 4;
+          let b = 0, bd = Infinity;
+          for (let q = 0; q < c.length; q++) { const d = (rgb[i] - c[q][0]) ** 2 + (rgb[i + 1] - c[q][1]) ** 2 + (rgb[i + 2] - c[q][2]) ** 2; if (d < bd) { bd = d; b = q; } }
+          sum[b][0] += rgb[i]; sum[b][1] += rgb[i + 1]; sum[b][2] += rgb[i + 2]; sum[b][3]++;
+        }
+        for (let q = 0; q < c.length; q++) if (sum[q][3]) c[q] = [sum[q][0] / sum[q][3], sum[q][1] / sum[q][3], sum[q][2] / sum[q][3]];
+      }
+      return c;
+    };
+    const P = centers(core), Wc = centers(ring);
+    const near = (cs, i) => { let bd = Infinity; for (const c of cs) { const d = (rgb[i] - c[0]) ** 2 + (rgb[i + 1] - c[1]) ** 2 + (rgb[i + 2] - c[2]) ** 2; if (d < bd) bd = d; } return bd; };
+    const res = Uint8Array.from(out);
+    // (its own center line: the paint's center-line pixels it was drawn over)
+    const own = (j) => { const k = F.near[j]; return k >= 0 && out[k] === 1; };
+    // (layer by layer outward, each pixel on from one taken)
+    let front = [];
+    for (let i = 0; i < N; i++) if (out[i]) front.push(i);
+    for (let step = 0; step < gMax && front.length; step++) {
+      const next = [];
+      for (const i of front) {
+        const x = i % w;
+        const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, i - w, i + w];
+        for (const j of nb) {
+          if (j < 0 || j >= N || res[j] || (other && other[j])) continue;
+          const take = mask[j] ? own(j) : step < g && near(P, j * 4) < 0.5 * near(Wc, j * 4);
+          if (take) { res[j] = 1; next.push(j); }
+        }
+      }
+      front = next;
+    }
+    return res;
+  }
+
+  // Edges evened out: a pixel's worth of jag (a brush's bristles, the
+  // paint read pixel by pixel) smoothed away; a line two pixels thick stays.
+  function smoothEdges(m, w, h, r0) {
+    const r = r0 > 8 ? 2 : 1;
+    const f = new Float32Array(m.length);
+    for (let i = 0; i < m.length; i++) f[i] = m[i];
+    const b = ST.raster.blur(ST.raster.blur(f, w, h, r), w, h, r);
+    const out = new Uint8Array(m.length);
+    for (let i = 0; i < m.length; i++) out[i] = b[i] >= 0.5 ? 1 : 0;
+    return out;
+  }
+
   /**
    * The letter under strokes you traced. strokes: [[x0, y0, x1, y1, …], …]
    * in photo px; src: { W, H, paints (masks of the photo's paints, W×H),
@@ -1074,10 +1147,20 @@
     const drawn = drawTraced(loc, F, mask, got.any, reach);
     if (o.debug) Object.assign(o.debug, { sw, r0: drawn.r0, drawn: drawn.mask, rw, rh });
     if (!R.count(drawn.mask)) return null;
+    let m = drawn.mask;
+    if (src.data) {
+      const rgb = new Uint8ClampedArray(rw * rh * 4);
+      for (let y = 0; y < rh; y++) rgb.set(src.data.subarray(((y + box.y0) * W + box.x0) * 4, ((y + box.y0) * W + box.x0 + rw) * 4), y * rw * 4);
+      // (never into another paint: a stroke crossing it, a neighbor)
+      const other = new Uint8Array(rw * rh);
+      for (let i = 0; i < other.length; i++) other[i] = got.any[i] && !mask[i] ? 1 : 0;
+      m = growToEdge(m, rgb, rw, rh, drawn.r0, F, mask, other);
+    }
+    m = smoothEdges(m, rw, rh, drawn.r0);
     // (drawn along your strokes it is smooth already: only pinholes filled
     // and specks dropped — a clean-up for raw paint would shave off a thin
     // stretch you traced)
-    const clean = ST.extract.cleanMask(drawn.mask, rw, rh, 0);
+    const clean = ST.extract.cleanMask(m, rw, rh, 0);
     const bb = R.maskBounds(clean, rw, rh);
     if (!bb) return null;
     const pad = 12;

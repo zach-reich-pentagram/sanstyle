@@ -133,15 +133,27 @@ zoomed out); what you traced is the letter's skeleton:
 - your line is moved onto the paint's center line, chosen for the whole
   line at once, so it holds on to the stroke you meant — through a stroke
   of the same paint that crosses it, never jumping over to a neighbor's;
-- it is drawn at the paint's own width. Where another color crosses over
-  it, the stroke is drawn on underneath at its width; a short gap where the
-  stroke runs straight on is bridged; bare wall is never painted in;
+- it is drawn at the paint's own width, out to the paint's own edge — a
+  brush wider in one stroke than another, silver's shaded rim (a pixel is
+  the stroke's when it is its paint and nearest its center line, or its
+  color is nearer the stroke's than the wall's), never into a neighbor's
+  stroke or another paint — and its edges evened out. Where another color
+  crosses over it, the stroke is drawn on underneath at its width; a short
+  gap where the stroke runs straight on is bridged; bare wall is never
+  painted in;
 - each end runs on along the paint a little (you needn't hit it exactly),
   but not on into a neighbor it touches.
 
 Each stroke you add reads the letter again with all of them (in the worker,
 a fraction of a second); the character it reads as is filled in unless you
-typed one. ⌘Z takes the last stroke off; Reset drops them all.
+typed one. ⌘Z takes the last stroke off; Reset drops them all. The worker
+keeps the analyses of the last few photos it used; a photo come back to
+after a long queue was read is read again (in the background, as soon as
+it is on the stage), so its strokes are always found in its paints.
+
+A letter painted at a slant or sideways: turn the photo first — the
+**Rotate** slider, or ↺ ↻ over the stage for a quarter turn — and trace it
+as it stands; it comes out turned the same way.
 
 **Type the letter you see.** Graffiti letters cross, overlap and run into
 each other in the same paint, and no split into pieces can tell which
@@ -182,10 +194,14 @@ at more detail. ⌘Z brings the whole photo back as it was.
 from end to end through its crossings, tall and near upright. Stems that
 disagree (an A's legs) or none at all (an O, an S) leave the letter as it
 is. The **Rotate** slider in the Shape panel turns it anywhere through 360°
-(a letter painted sideways or upside down), and a rotation set by hand is
-kept for the rest of that photo. Height and baseline are set later in
-Glyphs ("Optical nudges"). **Reset** goes back to the letters the automatic
-pass found — no crop, clicks, cuts or pieces.
+(a letter painted sideways or upside down) — the photo on the stage turns
+with it, so what you see is what goes in the font, and you can turn it
+before you trace — and a rotation set by hand is kept for the rest of that
+photo (a crop keeps it too). **Baseline** moves the letter up or down
+against the baseline (a descender, a letter that sits high); height is set
+later in Glyphs ("Optical nudges"), where both can be nudged again.
+**Reset** goes back to the letters the automatic pass found — no crop,
+clicks, cuts, pieces, traced strokes or turn.
 
 On the stage the selected letter is boxed and its trace drawn over the
 paint; the clean silhouette and the letterform fitted into the em sit beside
@@ -431,7 +447,9 @@ npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # the review queue, click-to-trace, cuts, shift-click pieces,
                 # the letter strip, a click that hands back the letter alone,
                 # a typed A found in "HAH" through the H's bars (and ⌘Z),
-                # the same A traced by hand, stroke by stroke (⌘Z, Reset),
+                # the same A traced by hand, stroke by stroke (⌘Z, Reset,
+                # a dropped analysis read again, traced on a turned photo),
+                # Baseline,
                 # Option-click removal, crop + its undo, Reset, a letter
                 # behind a pipe, one cut off by the frame, a throw-up's
                 # outline, variant cycling, ligature shaping, weight
