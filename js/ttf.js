@@ -240,6 +240,21 @@
   // standard ligatures off keep the required ones, and browsers drop
   // `liga` whenever letter-spacing is non-zero — but never `rlig`.
   // ligs: [{ gid, comps: [gid, ...] }]
+  // 'kern' version 0, one horizontal format-0 subtable: pairs sorted by
+  // (left, right) glyph id
+  function kernTable(pairs) {
+    pairs.sort((a, b) => a.l - b.l || a.r - b.r);
+    const n = pairs.length;
+    let sr = 1, es = 0;
+    while (sr * 2 <= n) { sr *= 2; es++; }
+    const w = new W();
+    w.u16(0); w.u16(1);
+    w.u16(0); w.u16(14 + 6 * n); w.u16(1);
+    w.u16(n); w.u16(sr * 6); w.u16(es); w.u16((n - sr) * 6);
+    for (const p of pairs) { w.u16(p.l); w.u16(p.r); w.i16(p.v); }
+    return w;
+  }
+
   function gsubTable(ligs) {
     const sets = new Map();
     for (const L of ligs) {
@@ -338,7 +353,8 @@
 
   /**
    * Compile a TrueType font.
-   * @param opts { fontName, glyphMap: Map(cp → {contours, advance, lsb}), styleName }
+   * @param opts { fontName, glyphMap: Map(cp → {contours, advance, lsb}), styleName,
+   *   kern (a pair kerning table from metrics.kernPair) }
    * @returns Uint8Array
    */
   ttf.compile = function (opts) {
@@ -513,6 +529,16 @@
 
     tables.cmap = cmapTable(cpToGid);
     if (ligs.length) tables.GSUB = gsubTable(ligs);
+    // pair kerning (metrics.kernPair) between the drawn glyphs
+    if (opts.kern && M && M.kernPair) {
+      const drawn = Array.from(outlineGid.entries()).filter(([gl]) => gl.contours && gl.contours.length);
+      const pairs = [];
+      for (const [a, ga] of drawn) for (const [b, gb] of drawn) {
+        const v = M.kernPair(a, b);
+        if (v) pairs.push({ l: ga, r: gb, v });
+      }
+      if (pairs.length) tables.kern = kernTable(pairs.slice(0, 10000));
+    }
 
     const locaW = new W();
     for (const off of loca) locaW.u32(off);

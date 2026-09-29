@@ -32,7 +32,7 @@
     defaultTester() {
       return {
         bg: '#ffffff', fg: '#000000', align: 'left', aspect: 'free',
-        cycle: true, size: 112, tracking: 0.02, leading: 1.05,
+        cycle: true, autoKern: true, size: 112, tracking: 0.02, leading: 1.05,
       };
     }
 

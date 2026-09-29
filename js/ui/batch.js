@@ -95,7 +95,7 @@
         if (r.ok && r.has) return item.analysis;
       }
       const bitmap = await g.createImageBitmap(canvas);
-      const r = await ask(w, { type: 'reread', bitmap }, [bitmap]);
+      const r = await ask(w, { type: 'reread', bitmap, inPhoto: canvas._inPhoto ? canvas._inPhoto.slice() : null }, [bitmap]);
       if (!r.ok || item.canvas !== canvas) return null;
       item.analysis = r.analysis;
       if (item.original && item.original.canvas === canvas) item.original.analysis = r.analysis;
@@ -798,7 +798,7 @@
     // (no worker: the photo read on the page, once, for its paints)
     if (!item._pageRead || item._pageRead.canvas !== item.canvas) {
       const res = ST.auto.processImage(item.canvas, { deskew: false, maxEdge: Math.max(item.canvas.width, item.canvas.height) });
-      item._pageRead = { canvas: item.canvas, src: { W: res.canvas.width, H: res.canvas.height, paints: res.paints || [], shapes: res.shapes || [], data: ST.extract.flatData(res.canvas).data } };
+      item._pageRead = { canvas: item.canvas, src: { W: res.canvas.width, H: res.canvas.height, paints: res.paints || [], shapes: res.shapes || [], data: ST.extract.flatData(res.canvas).data, inPhoto: item.canvas._inPhoto || null } };
     }
     return ST.typed.traceStrokes(strokes, item._pageRead.src, { tol });
   }

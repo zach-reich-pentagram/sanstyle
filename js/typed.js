@@ -1129,18 +1129,21 @@
         else for (let k = L.first; k <= L.last; k++) pts.push([L.cx[k], L.cy[k]]);
         if (pts.length < 6) continue;
         const [ex, ey] = pts[0];
+        const arc = [0];
+        for (let k = 1; k < pts.length; k++) arc.push(arc[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+        // (an end where another of your strokes meets it — or this one's own
+        // way round, an O traced in one go — is a joint, not an end)
         let joint = false;
         for (const L2 of lines) {
           if (L2 === L) continue;
           for (let k = L2.first; k <= L2.last && !joint; k++) if (Math.hypot(L2.cx[k] - ex, L2.cy[k] - ey) < 2 * r0) joint = true;
           if (joint) break;
         }
+        for (let k = 0; k < pts.length && !joint; k++) if (arc[k] > 5 * r0 && Math.hypot(pts[k][0] - ex, pts[k][1] - ey) < 2 * r0) joint = true;
         if (joint) continue;
         // (its width a little way in — between one and three half-widths from
         // the tip — and no wider than the stroke along its length, nor the
         // letter's: a crossing near the end is not the stroke's width)
-        const arc = [0];
-        for (let k = 1; k < pts.length; k++) arc.push(arc[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
         const ws = [];
         for (let k = 0; k < pts.length && arc[k] <= 3 * r0; k++) if (arc[k] >= r0) ws.push(width(pts[k][0], pts[k][1]));
         if (ws.length < 3) continue;
@@ -1169,7 +1172,9 @@
         const reachT = arc[kc] + 4 * typ;
         const x0 = Math.max(0, Math.floor(cx - reachT)), x1 = Math.min(w - 1, Math.ceil(cx + reachT));
         const y0 = Math.max(0, Math.floor(cy - reachT)), y1 = Math.min(h - 1, Math.ceil(cy + reachT));
-        const others = (x, y) => lines.some((L2) => L2 !== L && L2.cx.some((v, k) => k >= L2.first && k <= L2.last && Math.hypot(v - x, L2.cy[k] - y) <= 1.3 * r0));
+        // (not another stroke's, nor this one's own further along)
+        const others = (x, y) => lines.some((L2) => L2 !== L && L2.cx.some((v, k) => k >= L2.first && k <= L2.last && Math.hypot(v - x, L2.cy[k] - y) <= 1.3 * r0)) ||
+          pts.some((p, k) => arc[k] > arc[kc] + 3 * typ && Math.hypot(p[0] - x, p[1] - y) <= 1.3 * r0);
         for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
           const i = y * w + x;
           if (!out[i]) continue;
@@ -1273,7 +1278,7 @@
    * The letter under strokes you traced. strokes: [[x0, y0, x1, y1, …], …]
    * in photo px; src: { W, H, paints (masks of the photo's paints, W×H),
    * shapes (the analysis's shapes), data (the photo's rgba, for a line no
-   * paint was read for) }; opts.tol: how far off the paint your line may
+   * paint was read for), inPhoto (1 where the photo reaches, or null) }; opts.tol: how far off the paint your line may
    * run (photo px — a few pointer widths at the zoom you traced at).
    * → a candidate for the review queue ({crop, mask, w, h, paths, kind:
    * 'traced', read, lean}) or null.
@@ -1364,6 +1369,11 @@
     // your strokes onto the paint (a hand is off by a stroke's width, or by
     // what a pointer's pixel spans zoomed out)
     const reach = Math.max(1.5 * sw, 8, o.tol || 0);
+    // (beyond the photo — the corners a flattening leaves, filled with the
+    // wall's color — a stroke runs on hidden, as under another's paint)
+    if (src.inPhoto) {
+      for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) if (!src.inPhoto[(y + box.y0) * W + x + box.x0]) got.any[y * rw + x] = 1;
+    }
     const drawn = drawTraced(loc, F, mask, got.any, reach);
     if (o.debug) Object.assign(o.debug, { sw, r0: drawn.r0, drawn: drawn.mask, rw, rh });
     if (!R.count(drawn.mask)) return null;

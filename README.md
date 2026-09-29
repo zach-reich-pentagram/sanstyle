@@ -146,14 +146,15 @@ zoomed out); what you traced is the letter's skeleton:
   stroke's), never into a neighbor's stroke or a third color that crosses
   it — and its edges evened out. Where another color
   crosses over it, the stroke is drawn on underneath at its width; a short
-  gap where the stroke runs straight on is bridged; bare wall is never
+  gap where the stroke runs straight on is bridged, and so is a stretch
+  beyond the photo (a flattened photo's corners); bare wall is never
   painted in;
 - each end runs on along the paint a little (you needn't hit it exactly),
   but not on into a neighbor it touches; an end where the paint thins out
   to a point (a can or a marker lifting off, a brush's last streaks) is cut
   where the stroke is still near its own width and capped round, the way a
-  pen tip ends a stroke — an end another of your strokes meets is a joint
-  and is left as it is.
+  pen tip ends a stroke — an end another of your strokes meets (or the
+  same stroke, an O traced in one go) is a joint and is left as it is.
 
 Each stroke you add reads the letter again with all of them (in the worker,
 a fraction of a second); the character it reads as is filled in unless you
@@ -314,8 +315,18 @@ the FontFace API in a few milliseconds.
   anywhere else (another device, a browser that cleared its storage) it is
   cut again from the letterform's Drive photo — every letterform records
   which photo it came from and where in it, in `library.json` — and kept.
+- **Pair kerning** — each pair of letters is spaced by its shapes
+  (`metrics.kernPair`): the letters' side profiles are read at every
+  height, and where their outermost points don't face each other (a T's
+  bar over the y beside it, an A's foot under a V's arm, an L's leg under a
+  T's bar) the pair is pulled in most of the way to where its nearest
+  points would be as far apart as two facing strokes — never closer; a
+  pair that would touch is moved apart. The variant each letter cycles to
+  is kerned as drawn. It is in the tester, the exports and the TTF (a
+  `kern` table); **Kern letter pairs** turns it off.
 - **Manual kerning** — hit **Kern**, click a letterform, and arrow-key it
-  (shift for coarse). Esc returns to typing; kern tweaks carry into exports.
+  (shift for coarse); it adds to the pair kerning. Esc returns to typing;
+  kern tweaks carry into exports.
 - Captured ligatures shape as one glyph while you type, in the tester and in
   every export.
 - Background color, text color, and alignment controls; tracking down to

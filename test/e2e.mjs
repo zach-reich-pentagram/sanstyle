@@ -1150,6 +1150,37 @@ check(Object.keys(kerned.kerns).length === 1 && kerned.margin.endsWith('em'),
 await page.keyboard.press('Escape');
 await page.click('#kernClear');
 
+// pairs kerned by their shapes: the most pulled-in pair of the library set
+// in the tester is moved in by its kerning; off, it isn't; the font file
+// carries the kerning too
+const pair = await page.evaluate(() => {
+  const m = ST.fontlive.glyphMaps[0];
+  let best = null;
+  for (const [ca, a] of m) for (const [cb, b] of m) {
+    if (ca === 32 || cb === 32) continue;
+    const k = ST.metrics.kernPair(a, b);
+    if (!best || k < best.k) best = { k, text: String.fromCodePoint(ca) + String.fromCodePoint(cb) };
+  }
+  const t = document.getElementById('tester');
+  t.textContent = best.text;
+  ST.fontlive.rewrap();
+  const sp = t.querySelectorAll('span.tl');
+  return { k: best.k, text: best.text, margin: sp[1] && sp[1].style.marginLeft, first: sp[0] && sp[0].style.marginLeft };
+});
+check(pair.k < 0 && pair.margin === `${pair.k / 1000}em` && !pair.first, `the tester kerns “${pair.text}” by its shapes (${pair.k} units → ${pair.margin})`);
+await page.click('#autoKern');
+await page.waitForTimeout(700);
+const unkerned = await page.evaluate(() => { const sp = document.querySelectorAll('#tester span.tl'); return { margin: sp[1] && sp[1].style.marginLeft, on: ST.store.state.tester.autoKern }; });
+check(!unkerned.margin && unkerned.on === false, 'with “Kern letter pairs” off it is set by its sidebearings alone');
+await page.click('#autoKern');
+await page.waitForTimeout(700);
+const kernTable = await page.evaluate(() => {
+  const b = ST.fontlive.lastBytes, dv = new DataView(b.buffer, b.byteOffset, b.byteLength), n = dv.getUint16(4);
+  for (let i = 0; i < n; i++) if (String.fromCharCode(...b.slice(12 + i * 16, 16 + i * 16)) === 'kern') return dv.getUint16(dv.getUint32(12 + i * 16 + 8) + 10);
+  return 0;
+});
+check(kernTable > 0, `the font file carries a kerning table (${kernTable} pairs)`);
+
 // tracking to −0.25em, colors, alignment, aspect
 await page.fill('#trackRange', '-0.25');
 await page.fill('#bgColor', '#0a0a0a');

@@ -336,6 +336,85 @@
     return map;
   };
 
+  // --- Pair kerning ------------------------------------------------------------
+  // A glyph's side profiles: at every height, how far in from its advance's
+  // left edge its ink starts, and how far short of the right edge it ends.
+  // Two letters side by side are spaced by their sidebearings — right for
+  // shapes whose outermost points face each other (an H beside an N). Where
+  // they don't (a T's bar over the y beside it, the A's foot under the V's
+  // arm, an L's leg under the next letter's bowl, a y's arm under a t's
+  // bar) the space between them is taken in: the pair moves most of the way
+  // to where its nearest points would be as far apart as the sidebearings
+  // put two facing strokes — never closer. A pair that would touch is moved
+  // apart. Heights a band apart count as facing (a diagonal is near all
+  // along it), so a shape is never tucked into another's corner.
+  const KSTEP = 10, KBAND = 50, KPULL = 0.7;
+  function profile(gl) {
+    if (gl._prof !== undefined) return gl._prof;
+    gl._prof = null;
+    if (!gl.contours || !gl.contours.length) return null;
+    const bb = gl.bbox || ST.trace.boundsOf(gl.contours);
+    if (!bb) return null;
+    const polys = ST.trace.flattenAll(gl.contours, 6);
+    const r0 = Math.floor(bb.y0 / KSTEP), r1 = Math.ceil(bb.y1 / KSTEP);
+    const n = r1 - r0 + 1, L = new Float32Array(n).fill(NaN), Rg = new Float32Array(n).fill(NaN);
+    const lsb = gl.lsb || 0;
+    for (let r = 0; r < n; r++) {
+      const y = (r0 + r) * KSTEP + 0.5;
+      let lo = Infinity, hi = -Infinity;
+      for (const poly of polys) {
+        for (let i = 0, m = poly.length; i < m; i++) {
+          const a = poly[i], b = poly[(i + 1) % m];
+          if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y)) {
+            const x = a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x);
+            if (x < lo) lo = x;
+            if (x > hi) hi = x;
+          }
+        }
+      }
+      if (lo === Infinity) continue;
+      L[r] = lsb + (lo - bb.x0);
+      Rg[r] = gl.advance - (lsb + (hi - bb.x0));
+    }
+    gl._prof = { r0, n, L, R: Rg, lsb, rsb: gl.advance - (lsb + bb.x1 - bb.x0) };
+    return gl._prof;
+  }
+  // (the least of a profile over rows [a, b], or NaN where it has no ink)
+  function least(arr, r0, a, b) {
+    let m = NaN;
+    for (let r = Math.max(a, r0); r <= Math.min(b, r0 + arr.length - 1); r++) {
+      const v = arr[r - r0];
+      if (v === v && !(v >= m)) m = v;
+    }
+    return m;
+  }
+  /** Kerning for glyph `a` followed by glyph `b` (font units: − closer). */
+  M.kernPair = function (a, b) {
+    if (!a || !b) return 0;
+    if (!a._kern) a._kern = new Map();
+    if (a._kern.has(b)) return a._kern.get(b);
+    let k = 0;
+    const A = profile(a), B = profile(b);
+    if (A && B) {
+      const band = KBAND / KSTEP;
+      const lo = Math.max(A.r0, B.r0) - band, hi = Math.min(A.r0 + A.n, B.r0 + B.n) + band;
+      let gap = Infinity;
+      for (let r = lo; r <= hi; r++) {
+        const ra = least(A.R, A.r0, r - band, r + band), lb = least(B.L, B.r0, r - band, r + band);
+        if (ra === ra && lb === lb && ra + lb < gap) gap = ra + lb;
+      }
+      if (isFinite(gap)) {
+        const facing = A.rsb + B.lsb, least2 = Math.max(20, 0.3 * facing);
+        if (gap > facing) k = -KPULL * (gap - facing);
+        else if (gap < least2) k = least2 - gap;
+        k = Math.round(Math.max(k, -0.4 * M.UPM));
+        if (Math.abs(k) < 8) k = 0;
+      }
+    }
+    a._kern.set(b, k);
+    return k;
+  };
+
   // Longest-first ligature match at position i of a character array.
   M.ligatureAt = function (chars, i, keys) {
     for (const L of keys) {

@@ -12,7 +12,7 @@
 
   /**
    * Lay out text with the live glyph maps.
-   * opts: { size, tracking (em), leading, align, cycle, kerns {index→em},
+   * opts: { size, tracking (em), leading, align, cycle, autoKern, kerns {index→em},
    *         glyphMaps: [baseMap, cycMap1, ...] }
    * Returns { lines: [{glyphs: [{outline, x}], width, y}], width, height,
    *           ascent, size }
@@ -35,6 +35,7 @@
     for (const lineText of String(text).split('\n')) {
       const glyphs = [];
       let x = 0;
+      let prev = null;
       const chars = Array.from(lineText);
       for (let i = 0; i < chars.length;) {
         // a captured ligature swallows its letters, like the font's GSUB does
@@ -50,6 +51,9 @@
           occurrence[key] = occ + 1;
           outline = lookup(maps[occ % maps.length], key) || outline;
         }
+        // (kerned against the letter before, as the tester is)
+        if (outline && prev && o.autoKern) x += ST.metrics.kernPair(prev, outline) * scale;
+        prev = outline;
         if (outline) {
           glyphs.push({ outline, x });
           x += outline.advance * scale + o.tracking * o.size;

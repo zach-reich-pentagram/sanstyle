@@ -76,7 +76,7 @@ self.onmessage = async (e) => {
       const an = analysisOf(e.data.analysis);
       if (!an) { self.postMessage({ id, ok: false, error: 'no analysis' }); return; }
       if (!an.data) an.data = self.ST.extract.flatData(an.canvas).data; // (kept for the next stroke)
-      const src = { W: an.canvas.width, H: an.canvas.height, paints: an.paints || [], shapes: an.shapes, data: an.data };
+      const src = { W: an.canvas.width, H: an.canvas.height, paints: an.paints || [], shapes: an.shapes, data: an.data, inPhoto: an.canvas._inPhoto || null };
       const found = self.ST.typed.traceStrokes(e.data.strokes, src, { tol: e.data.tol });
       if (!found) { self.postMessage({ id, ok: true, none: true }); return; }
       send(id, [found], {}, []);
@@ -102,6 +102,7 @@ self.onmessage = async (e) => {
     // a photo on the queue read again, as it is now (flattened, cropped):
     // only its analysis is wanted
     if (type === 'reread') {
+      if (e.data.inPhoto) c._inPhoto = e.data.inPhoto;
       const res = self.ST.auto.processImage(c, { deskew: false, maxEdge: Math.max(c.width, c.height) });
       const key = keep({ canvas: res.canvas, shapes: res.shapes || [], backdrop: res.backdrop || null, paints: res.paints || [] });
       self.postMessage({ id, ok: true, analysis: key });

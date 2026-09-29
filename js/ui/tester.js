@@ -44,6 +44,7 @@
     const bytesList = maps.map((m, k) => ST.ttf.compile({
       fontName: k === 0 ? st.fontName : st.fontName + ' Alt' + k,
       glyphMap: m,
+      kern: tst.autoKern !== false,
     }));
     live.lastBytes = bytesList[0];
 
@@ -163,6 +164,10 @@
     const cycling = st.cycle && nMaps > 1;
     const ligKeys = ST.metrics.ligatureKeys(live.glyphMaps[0]);
     const occurrence = {};
+    // (each letter kerned against the one before it, as drawn — the variant
+    // it cycles to — unless kerning is off; a manual kern adds to it)
+    const autoKern = st.autoKern !== false;
+    let prev = null;
     el.textContent = '';
     const frag = g.document.createDocumentFragment();
     const chars = Array.from(text);
@@ -172,6 +177,7 @@
       if (ch === '\n') {
         frag.appendChild(g.document.createTextNode('\n'));
         idx++; i++;
+        prev = null;
         continue;
       }
       const lig = ST.metrics.ligatureAt(chars, i, ligKeys);
@@ -181,13 +187,18 @@
       span.dataset.i = idx;
       if (lig) span.dataset.lig = lig;
       span.textContent = key;
+      let k = 0;
       if (cycling && key !== ' ') {
         const occ = occurrence[key] || 0;
         occurrence[key] = occ + 1;
-        const k = occ % nMaps;
+        k = occ % nMaps;
         if (k > 0) span.classList.add('cyc' + k);
       }
-      const kern = live.kerns[idx];
+      const glyph = glyphOf(key, k);
+      const ak = autoKern && prev && glyph ? ST.metrics.kernPair(prev, glyph) / ST.metrics.UPM : 0;
+      prev = glyph;
+      if (ak) span.dataset.ak = ak;
+      const kern = (live.kerns[idx] || 0) + ak;
       if (kern) span.style.marginLeft = kern + 'em';
       frag.appendChild(span);
       idx += key.length; i += key.length;
@@ -197,6 +208,17 @@
     updateCoverage();
   }
   live.rewrap = rewrap;
+
+  // the drawing a key shows in glyph map k (a ligature's, a letter's; the
+  // base font's where the alternate has none)
+  function glyphOf(key, k) {
+    for (const m of [live.glyphMaps[k], live.glyphMaps[0]]) {
+      if (!m) continue;
+      const o = key.length > 1 ? m.liga && m.liga.get(key) : m.get(key.codePointAt(0));
+      if (o) return o;
+    }
+    return null;
+  }
 
   // ---------- source popup: hover a letter, see the photo it came from ----------
   let pop = null, popToken = 0;
@@ -296,7 +318,8 @@
     const next = Math.round((cur + delta) * 1000) / 1000;
     if (next === 0) delete live.kerns[idx];
     else live.kerns[idx] = next;
-    live.kernSel.style.marginLeft = next ? next + 'em' : '';
+    const total = next + (+live.kernSel.dataset.ak || 0);
+    live.kernSel.style.marginLeft = total ? total + 'em' : '';
     $('#kernReadout').textContent = `${next >= 0 ? '+' : ''}${next.toFixed(3)}em`;
   }
 
@@ -317,6 +340,7 @@
     $('#trackRange').value = st.tracking;
     $('#leadRange').value = st.leading;
     $('#cycleToggle').checked = !!st.cycle;
+    if ($('#autoKern')) $('#autoKern').checked = st.autoKern !== false;
     $('#weightToggle').checked = !!st.weightOn;
     $('#weightRange').value = st.weight == null ? 50 : st.weight;
     $('#weightRange').disabled = !st.weightOn;
@@ -346,6 +370,7 @@
       leading: st.leading,
       align: st.align,
       cycle: st.cycle && live.glyphMaps.length > 1,
+      autoKern: st.autoKern !== false,
       kerns: live.kerns,
       glyphMaps: live.glyphMaps,
     };
@@ -438,6 +463,11 @@
     $('#cycleToggle').addEventListener('change', (e) => {
       upd({ cycle: e.target.checked });
       rewrap();
+    });
+    // (the font file carries the kerning too: compiled again)
+    if ($('#autoKern')) $('#autoKern').addEventListener('change', (e) => {
+      upd({ autoKern: e.target.checked });
+      live.rebuild();
     });
     // weight: the font recompiles with each slot's nearest-weight variant
     const rebuildForWeight = ST.debounce(() => live.rebuild(), 120);
