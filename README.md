@@ -146,9 +146,21 @@ zoomed out); what you traced is the letter's skeleton:
   stroke's), never into a neighbor's stroke or a third color that crosses
   it — and its edges evened out. Where another color
   crosses over it, the stroke is drawn on underneath at its width; a short
-  gap where the stroke runs straight on is bridged, and so is a stretch
-  beyond the photo (a flattened photo's corners); bare wall is never
+  gap where the stroke runs straight on is bridged; bare wall is never
   painted in;
+- a stroke keeps its width: where it is suddenly narrower than just before
+  and after it (a dry brush's thin start, paint streaked through with the
+  wall), it is filled back out to that width on the side that looks like
+  the stroke — streaked, or not the wall's colors — never the side that is
+  plain wall; the paint's colors read off your line only fill what the
+  photo's reading missed in the stroke, not wall of those colors beside it
+  (a counter's gray by a silver stroke);
+- where your stroke turns sharply (a W's middle, a V's point) or two of
+  your strokes meet at an angle, the turn is round at the stroke's width,
+  the way a brush turns; the edge never grows a spike or a sliver off it;
+- a letter the photo's edge cuts off is carried on past the frame: a bowl
+  by the curve that continues both its sides, a stroke straight on out,
+  at its width — never capped at the edge;
 - each end runs on along the paint a little (you needn't hit it exactly),
   but not on into a neighbor it touches; an end where the paint thins out
   to a point (a can or a marker lifting off, a brush's last streaks) is cut
@@ -212,8 +224,11 @@ before you trace — and a rotation set by hand is kept for the rest of that
 photo (a crop keeps it too). **Baseline** moves the letter up or down
 against the baseline (a descender, a letter that sits high); height is set
 later in Glyphs ("Optical nudges"), where both can be nudged again.
-**Reset** goes back to the letters the automatic pass found — no crop,
-clicks, cuts, pieces, traced strokes or turn.
+**Smoothing** evens out the letter's outline — a jagged edge, bumps and
+notches go, the strokes keep their width (0 is the outline as found); like
+the turn, it holds for every letter taken from the photo. **Reset** goes
+back to the letters the automatic pass found — no crop, clicks, cuts,
+pieces, traced strokes, turn or smoothing.
 
 On the stage the selected letter is boxed and its trace drawn over the
 paint — nothing else is laid over the photo (how to work on it is told in
@@ -475,7 +490,8 @@ npm run e2e     # headless Chromium: demo walls + HEIC intake on the stage,
                 # a typed A found in "HAH" through the H's bars (and ⌘Z),
                 # the same A traced by hand, stroke by stroke (⌘Z, Reset,
                 # a dropped analysis read again, traced on a turned photo,
-                # a second A from the same photo: pick which to keep),
+                # a second A from the same photo: pick which to keep,
+                # Smoothing, a bowl carried on past the photo's edge),
                 # Baseline,
                 # Option-click removal, crop + its undo, Reset, a letter
                 # behind a pipe, one cut off by the frame, a throw-up's

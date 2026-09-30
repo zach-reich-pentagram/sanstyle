@@ -97,6 +97,8 @@
     if (shape) { shape.classList.toggle('active', !!item); shape.classList.toggle('locked', !item); }
     if (tag) { tag.classList.toggle('active', !!cand); tag.classList.toggle('locked', !cand); }
     if (!item) setHint(o.intake ? 'Analyzing…' : 'Drop photos of graffiti here — or load a demo wall');
+    // (the smoothing set on this photo)
+    if (cand && item && (cand.smooth || 0) !== (item.smooth || 0)) cap.smoothCand(cand, item.smooth || 0);
     // a leaning letter stands up by its stems (the Rotate slider adjusts)
     if (cand && cand.turn == null) {
       if (item && item.manualTurn != null) cand.turn = item.manualTurn; // set by hand on this photo: kept
@@ -138,7 +140,40 @@
     const sc = $('#reviewScale'), dy = $('#reviewDy');
     if (sc) { sc.value = n.scale || 0; sc.disabled = !cap.cand; $('#reviewScaleVal').textContent = `${100 + (n.scale || 0)}%`; }
     if (dy) { dy.value = n.dy || 0; dy.disabled = !cap.cand; $('#reviewDyVal').textContent = `${(n.dy || 0) > 0 ? '+' : ''}${n.dy || 0}`; }
+    const sm = $('#reviewSmooth'), level = cap.item ? cap.item.smooth || 0 : 0;
+    if (sm) { sm.value = level; sm.disabled = !cap.cand; $('#reviewSmoothVal').textContent = String(level); }
   }
+
+  // ---------- smoothing ----------
+  // A shape's outline evened out by hand (the Smoothing slider, 0–10): the
+  // shape blurred over up to two fifths of its strokes' width and cut again
+  // halfway — jags, bumps and notches smaller than that go, the strokes
+  // keep their width and place. 0 is the shape as found. Set on a photo, it
+  // holds for every letter taken from it.
+  cap.smoothCand = function (cand, level) {
+    if (!cand || !cand.mask) return;
+    level = Math.max(0, Math.min(10, Math.round(level || 0)));
+    if ((cand.smooth || 0) === level) return;
+    if (!cand._raw) cand._raw = { mask: cand.mask, w: cand.w, h: cand.h, crop: cand.crop, paths: cand.paths };
+    const raw = cand._raw;
+    let out = raw;
+    if (level) {
+      const R = ST.raster;
+      const sw = R.strokeWidth(raw.mask, raw.w, raw.h) || 10;
+      const r = Math.max(1, Math.round((level / 10) * 0.4 * sw));
+      const p = r + 2, w = raw.w + 2 * p, h = raw.h + 2 * p;
+      const f = new Float32Array(w * h);
+      for (let y = 0; y < raw.h; y++) for (let x = 0; x < raw.w; x++) f[(y + p) * w + x + p] = raw.mask[y * raw.w + x];
+      // (a box twice over: near enough a gaussian)
+      const b = R.blur(R.blur(f, w, h, r), w, h, r);
+      const m = new Uint8Array(w * h);
+      for (let i = 0; i < m.length; i++) m[i] = b[i] >= 0.5 ? 1 : 0;
+      const paths = ST.trace.vectorize(m, w, h, { strokeWidth: sw });
+      if (paths.length) out = { mask: m, w, h, crop: { x: raw.crop.x - p, y: raw.crop.y - p, w, h }, paths };
+    }
+    Object.assign(cand, { mask: out.mask, w: out.w, h: out.h, crop: out.crop, paths: out.paths, smooth: level });
+    cand._overlay = cand._upright = cand._read = cand._fit = cand._thumb = null;
+  };
 
   // ---------- what it reads as ----------
   // The upright shape as the recognizer sees it (cached per rotation).
@@ -693,6 +728,19 @@
       redraw(false);
     };
     if ($('#reviewScale')) $('#reviewScale').addEventListener('input', nudgeInput('scale'));
+    // (the outline smoothed again a beat after the slider stops)
+    const smoothSoon = ST.debounce(() => {
+      if (!cap.cand || !cap.item) return;
+      cap.smoothCand(cap.cand, cap.item.smooth || 0);
+      requestDraw();
+      redraw(true);
+    }, 60);
+    if ($('#reviewSmooth')) $('#reviewSmooth').addEventListener('input', (e) => {
+      if (!cap.item) return;
+      cap.item.smooth = +e.target.value;
+      $('#reviewSmoothVal').textContent = e.target.value;
+      smoothSoon();
+    });
     if ($('#reviewDy')) $('#reviewDy').addEventListener('input', nudgeInput('dy'));
 
     setTool('trace');

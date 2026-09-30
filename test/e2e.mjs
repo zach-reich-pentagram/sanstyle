@@ -1076,6 +1076,33 @@ check(await page.evaluate(() => ST.capture.view.rot === 0 && ST.batch.queue[ST.b
 await page.evaluate(() => { const r = document.getElementById('reviewDy'); r.value = 120; r.dispatchEvent(new Event('input', { bubbles: true })); });
 const dyRes = await page.evaluate(() => { const it = ST.batch.queue[ST.batch.idx]; return { dy: (it.candidates[it.ci].nudge || {}).dy, label: document.getElementById('reviewDyVal').textContent }; });
 check(turnedCand.dy && dyRes.dy === 120 && dyRes.label === '+120', `Baseline moves the letter up or down (${dyRes.label})`);
+// Smoothing evens the outline out; back at 0 it is the outline as found
+const smoothRes = await page.evaluate(async () => {
+  const it = ST.batch.queue[ST.batch.idx], c = it.candidates[it.ci], before = c.paths;
+  const r = document.getElementById('reviewSmooth');
+  r.value = 6; r.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise((res) => setTimeout(res, 250));
+  const out = { smooth: c.smooth, item: it.smooth, changed: c.paths !== before, label: document.getElementById('reviewSmoothVal').textContent };
+  r.value = 0; r.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise((res) => setTimeout(res, 250));
+  out.restored = c.paths === before;
+  return out;
+});
+check(smoothRes.smooth === 6 && smoothRes.item === 6 && smoothRes.changed && smoothRes.label === '6' && smoothRes.restored,
+  `Smoothing evens the outline out, and 0 gives it back as found (${JSON.stringify(smoothRes)})`);
+// a stroke the photo's edge cuts: carried on past the frame, not cut off square
+const pastFrame = await page.evaluate(() => {
+  const W = 420, H = 420, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d');
+  x.fillStyle = '#d8d4cc'; x.fillRect(0, 0, W, H);
+  x.strokeStyle = '#1b1b1b'; x.lineWidth = 30; x.beginPath(); x.arc(60, 210, 120, 0, Math.PI * 2); x.stroke();
+  const line = [];
+  for (let a = -2.05; a <= 2.05; a += 0.02) line.push(60 + 120 * Math.cos(a), 210 + 120 * Math.sin(a));
+  const f = ST.typed.traceStrokes([line], { W, H, paints: [], shapes: [], data: x.getImageData(0, 0, W, H).data }, { tol: 20 });
+  return f && { x0: f.crop.x, y0: f.crop.y, x1: f.crop.x + f.crop.w, y1: f.crop.y + f.crop.h };
+});
+check(pastFrame && pastFrame.x0 < -10 && pastFrame.y0 < 110 && pastFrame.y1 > 310,
+  `a bowl the photo's edge cuts is carried on past the frame (${JSON.stringify(pastFrame)})`);
 await page.click('#reviewReset');
 await idle();
 check(await page.evaluate(() => ST.capture.view.rot === 0), 'Reset turns the photo back');

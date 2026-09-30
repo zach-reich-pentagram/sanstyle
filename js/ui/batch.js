@@ -721,7 +721,7 @@
     const keep = $('#reviewChar').value, keepTyped = $('#reviewChar').dataset.typed;
     Object.assign(item, {
       canvas: item.original.canvas, angle: item.original.angle, analysis: item.original.analysis, candidates: item.original.candidates, ci: 0,
-      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null, traces: [], pickedCi: null,
+      cuts: [], parts: [], removals: [], lastClick: null, history: [], manualTurn: null, traces: [], pickedCi: null, smooth: 0,
     });
     for (const c of item.candidates) { c.turn = c.lean ? -c.lean : 0; c.nudge = null; }
     renderCurrent();
